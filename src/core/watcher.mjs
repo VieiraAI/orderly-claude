@@ -1,0 +1,216 @@
+import fs from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { readRecords } from './jsonl.mjs';
+import { buildSession } from './steps.mjs';
+import { buildFileHistory } from './filehistory.mjs';
+import { detectDevServer, captureFor } from './capture.mjs';
+import { loadShots, saveShots, shotsDiffer } from './shots.mjs';
+
+/**
+ * Tails one session transcript and keeps a live model of it.
+ *
+ * Before/after screenshots chain: the shot taken after step N becomes the
+ * "before" of step N+1. That way a true before image exists without having to
+ * know in advance that a step was about to start.
+ */
+export class SessionWatcher extends EventEmitter {
+  constructor(file, { sessionId, capture = true, pollMs = 700, projectDir = null } = {}) {
+    super();
+    this.file = file;
+    this.sessionId = sessionId;
+    this.capture = capture;
+    this.projectDir = projectDir;
+    this.pinnedUrl = null;
+    this.pollMs = pollMs;
+    this.records = [];
+    this.offset = 0;
+    this.session = null;
+    this.history = new Map();
+    this.shots = loadShots(sessionId); // stepId -> { before, after }, restored from disk
+    this.lastShot = null;        // most recent screenshot, the next step's "before"
+    this.devUrl = null;
+    this.capturing = false;
+    this.seenSteps = new Set();
+    this.timer = null;
+    this.lastGrowthAt = Date.now();
+    this.unread = 0;
+    this.focused = false;
+  }
+
+  async start() {
+    this.read();
+    if (this.capture) {
+      this.devUrl = await detectDevServer(this.projectDir);
+      if (this.devUrl) {
+        this.emit('log', `watching ${this.devUrl} for visual before/after`);
+        this.lastShot = await captureFor(this.sessionId, 'baseline', 'after', this.devUrl);
+      }
+      this.rescanTimer = setInterval(() => {
+        this.rescanDev().catch((e) => this.emit('log', `dev scan failed: ${e.message}`));
+      }, 20000);
+    }
+    this.markSeen();
+    this.timer = setInterval(() => {
+      this.tick().catch((e) => this.emit('log', `read failed: ${e.message}`));
+    }, this.pollMs);
+    return this;
+  }
+
+  stop() {
+    clearInterval(this.timer);
+    clearInterval(this.rescanTimer);
+  }
+
+  /** Follow a different transcript, keeping the same poll loop and capture state. */
+  repoint(file, sessionId) {
+    this.file = file;
+    this.sessionId = sessionId;
+    this.offset = 0;
+    this.records = [];
+    this.session = null;
+    this.shots = loadShots(sessionId);
+    this.seenSteps = new Set();
+    this.read();
+    this.markSeen();
+    this.emit('update', { repointed: sessionId });
+  }
+
+  /** Only the tab being looked at takes screenshots; one browser, one target. */
+  async setCapture(on) {
+    this.capture = on;
+    if (!on) { this.devUrl = null; return; }
+    if (!this.devUrl) this.devUrl = this.pinnedUrl || await detectDevServer(this.projectDir);
+  }
+
+  /** Point captures at a chosen URL, and stop rescanning away from it. */
+  pinCaptureUrl(url) {
+    this.pinnedUrl = url || null;
+    this.devUrl = url || null;
+    this.lastShot = null; // the next shot starts a fresh before/after chain
+    this.emit('log', url ? `capturing ${url}` : 'capture target cleared');
+  }
+
+  /**
+   * Re-check periodically and move to a better match, not only when the
+   * current target dies — a dev server started after us should be picked up.
+   */
+  async rescanDev() {
+    if (this.pinnedUrl) return;
+    const found = await detectDevServer(this.projectDir);
+    if (found === this.devUrl) return;
+
+    if (this.devUrl && !found) {
+      try {
+        const res = await fetch(this.devUrl, { signal: AbortSignal.timeout(400) });
+        if (res.status < 500) return; // still serving; keep it
+      } catch { /* gone */ }
+    }
+    this.devUrl = found;
+    this.lastShot = null; // a new target starts a fresh before/after chain
+    this.emit('log', found ? `capturing ${found}` : 'no dev server found');
+  }
+
+  read() {
+    let records = [];
+    let nextOffset = this.offset;
+    try { ({ records, nextOffset } = readRecords(this.file, this.offset)); }
+    catch (e) { this.emit('log', `transcript unreadable: ${e.message}`); return false; }
+    if (!records.length && this.session) return false;
+    this.records.push(...records);
+    if (records.length) this.lastGrowthAt = Date.now();
+    this.offset = nextOffset;
+    this.session = buildSession(this.records, { live: true });
+    this.history = buildFileHistory(this.records);
+    this.attachShots();
+    return true;
+  }
+
+  attachShots() {
+    for (const t of this.session.turns) {
+      for (const s of t.steps) s.shots = this.shots[s.id] || null;
+    }
+  }
+
+  markSeen() {
+    for (const t of this.session?.turns || []) for (const s of t.steps) this.seenSteps.add(s.id);
+  }
+
+  allSteps() {
+    return (this.session?.turns || []).flatMap((t) => t.steps);
+  }
+
+  /**
+   * Whether Claude is working right now.
+   *
+   * A tool call and its result are written to the transcript together, once
+   * the tool has finished — so an unfinished call is invisible and "a
+   * tool_use with no result" never fires. What does get written the moment
+   * Claude starts thinking is an `api-request`. If the newest one of those
+   * is newer than the newest thing Claude has said or received, a request is
+   * in flight and Claude is working.
+   */
+  activity() {
+    let lastRequest = 0;
+    let lastOutput = 0;
+    for (const r of this.records) {
+      const t = Date.parse(r.timestamp || '') || 0;
+      if (!t) continue;
+      if (r.type === 'api-request') lastRequest = Math.max(lastRequest, t);
+      else if (r.type === 'assistant' || r.type === 'user') lastOutput = Math.max(lastOutput, t);
+    }
+
+    const requestPending = lastRequest > 0 && lastRequest > lastOutput;
+    // Rare, but when a call is caught mid-flight it names the step.
+    const running = this.allSteps().find((s) => s.status === 'running');
+    // Judge staleness by what the records say, not by when the file last
+    // grew; growth can be unrelated writes.
+    const newest = Math.max(lastRequest, lastOutput) || this.lastGrowthAt;
+    const quietMs = Date.now() - newest;
+
+    return {
+      working: (requestPending || !!running) && quietMs < 15 * 60 * 1000,
+      inFlight: !!running,
+      step: running?.label || null,
+      quietMs,
+      since: lastRequest ? new Date(lastRequest).toISOString() : null,
+    };
+  }
+
+  async tick() {
+    let size;
+    try { size = fs.statSync(this.file).size; } catch { return; }
+    if (size === this.offset) return;
+
+    this.read();
+    const fresh = this.allSteps().filter((s) => !this.seenSteps.has(s.id));
+    if (!fresh.length) { this.emit('update', { quiet: true }); return; }
+
+    for (const s of fresh) this.seenSteps.add(s.id);
+    if (!this.focused) this.unread += fresh.length;
+    this.emit('update', { newSteps: fresh.map((s) => s.id), sessionId: this.sessionId });
+
+    const changed = fresh.filter((s) => s.kind === 'change' && s.status !== 'failed');
+    if (changed.length) this.queueCapture(changed[changed.length - 1]);
+  }
+
+  /** One capture at a time; the result becomes the next step's "before". */
+  async queueCapture(step) {
+    if (!this.capture || !this.devUrl || this.capturing) return;
+    this.capturing = true;
+    try {
+      const after = await captureFor(this.sessionId, step.id, 'after', this.devUrl);
+      if (after) {
+        const before = this.lastShot || null;
+        this.shots[step.id] = { before, after, changed: shotsDiffer(before, after) };
+        saveShots(this.sessionId, this.shots);
+        this.lastShot = after;
+        this.attachShots();
+        this.emit('update', { shot: step.id });
+      }
+    } catch (e) {
+      this.emit('log', `capture failed: ${e.message}`);
+    } finally {
+      this.capturing = false;
+    }
+  }
+}

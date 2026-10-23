@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orderly Claude</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="top">
+  <button id="railBtn" class="btn ghost" title="Sessions" aria-label="Sessions">☰</button>
+  <div class="brand">
+    <span class="dot" id="liveDot" title="live"></span>
+    <span>Orderly Claude</span>
+  </div>
+  <div class="ctx">
+    <span id="sessionTitle" class="title">—</span>
+    <span id="sessionCwd" class="cwd"></span>
+  </div>
+  <div class="actions">
+    <button id="devUrl" class="pill" title="What the before/after screenshots point at">—</button>
+    <input id="devUrlInput" class="pill-input hidden" placeholder="http://localhost:3000" spellcheck="false">
+    <button id="themeBtn" class="btn ghost" title="Light / dark">◐</button>
+    <button id="searchBtn" class="btn">Search <kbd>⌘F</kbd></button>
+  </div>
+</header>
+
+<div id="connBanner" class="conn-banner hidden" role="status">
+  <span class="conn-dot"></span>
+  <span id="connText">Lost connection to Orderly Claude — retrying…</span>
+</div>
+
+<div class="layout">
+  <aside class="rail" id="rail">
+    <div class="rail-section">
+      <h3>Terminals</h3>
+      <div id="liveSessions" class="list"></div>
+      <button id="newSessionBtn" class="btn new-session">+ New Claude session</button>
+    </div>
+    <div class="rail-section hidden" id="viewersSection">
+      <h3>Other windows</h3>
+      <div id="instances" class="list"></div>
+    </div>
+    <div class="rail-section grow">
+      <h3>History</h3>
+      <input id="sessionFilter" class="filter" placeholder="filter sessions…">
+      <div id="sessions" class="list scroll"></div>
+    </div>
+  </aside>
+
+  <div class="center">
+    <div class="tabbar" id="tabBar"></div>
+    <main class="timeline" id="timeline">
+      <div class="empty">Waiting for the session…</div>
+    </main>
+
+    <div class="composer" id="composer">
+      <div id="cmdPalette" class="cmd-palette hidden"></div>
+      <div id="cmdChip" class="cmd-chip hidden"></div>
+      <textarea id="promptInput" rows="2" placeholder="Ask Claude to do something — no terminal needed"></textarea>
+      <div class="composer-row">
+        <select id="permMode" title="What Claude may do without asking">
+          <option value="acceptEdits">accept edits</option>
+          <option value="plan">plan only</option>
+        </select>
+        <span id="runState" class="run-state"></span>
+        <span class="spacer"></span>
+        <span class="hint"><kbd>⏎</kbd> send · <kbd>⇧⏎</kbd> new line</span>
+        <button id="stopBtn" class="btn hidden">Stop</button>
+        <button id="sendBtn" class="btn primary">Send</button>
+      </div>
+      <div id="runError" class="run-error hidden"></div>
+    </div>
+  </div>
+
+  <section class="drawer" id="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <div id="drawerLabel" class="drawer-title">—</div>
+        <div id="drawerMeta" class="drawer-meta"></div>
+      </div>
+      <button id="drawerClose" class="btn ghost" aria-label="Close">✕</button>
+    </div>
+    <nav class="tabs" id="drawerTabs"></nav>
+    <div class="drawer-body" id="drawerBody"></div>
+  </section>
+</div>
+
+<div class="search-overlay hidden" id="searchOverlay">
+  <div class="search-box">
+    <div class="search-row">
+      <input id="searchInput" placeholder="Search steps, prompts, commands, screenshots…" autocomplete="off">
+      <label class="scope"><input type="checkbox" id="searchAll"> all sessions</label>
+      <button id="searchClose" class="btn ghost">esc</button>
+    </div>
+    <div id="searchResults" class="search-results"></div>
+  </div>
+</div>
+
+<script type="module" src="/app.mjs"></script>
+</body>
+</html>

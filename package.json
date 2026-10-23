@@ -1,0 +1,18 @@
+{
+  "name": "orderly-claude",
+  "version": "0.1.0",
+  "description": "Organize Claude's outputs for better interpretation and learning",
+  "type": "module",
+  "bin": {
+    "orderly-claude": "./bin/orderly-claude.mjs",
+    "orderly": "./bin/orderly-claude.mjs"
+  },
+  "scripts": {
+    "start": "node bin/orderly-claude.mjs",
+    "test": "node test/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
