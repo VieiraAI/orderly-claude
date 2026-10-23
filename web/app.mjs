@@ -636,7 +636,7 @@ async function openStep(id) {
       const v = compareView(data.shots);
       if (v) body.append(v);
       else body.append(el('div', { class: 'note' },
-        'No screenshots for this step. Claudenized captures them automatically when a dev server is running — start your app and the next change will have a before/after.'));
+        'No screenshots for this step. Orderly Claude captures them automatically when a dev server is running — start your app and the next change will have a before/after.'));
     }
 
     if (state.tab === 'thinking') {

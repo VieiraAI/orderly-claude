@@ -208,6 +208,15 @@ plugin/                 the Claude Code mod (terminal pane)
 test/smoke.mjs          end-to-end smoke test
 ```
 
+## Contributing
+
+Pull requests welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers running it,
+the test suite, and how the pieces fit together. There is no build step and
+nothing to install, so it is a short road from clone to first change.
+
+If you use Claude Code daily and something here annoys you, say so in an
+issue — that is a contribution.
+
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
