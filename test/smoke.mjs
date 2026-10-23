@@ -148,6 +148,32 @@ const VOCAB_PROBE = `(() => {
   return JSON.stringify(out);
 })()`;
 
+/* A diff used to run off the right edge and show every line of a new file
+   as an undifferentiated wall. */
+const DIFF_PROBE = `(() => {
+  const file = document.querySelector('.file');
+  if (!file) return JSON.stringify({ error: 'no diff on screen' });
+  const body = file.querySelector('.file-body');
+  const row = file.querySelector('.row .code');
+  const out = {
+    head: !!file.querySelector('.file-head .fname'),
+    stats: (file.querySelector('.fstat')?.textContent || '').trim(),
+    bar: !!file.querySelector('.stat-bar'),
+    folded: body.classList.contains('folded'),
+    wraps: row ? getComputedStyle(row).whiteSpace : null,
+    overflowX: Math.max(0, body.scrollWidth - body.clientWidth),
+    rows: file.querySelectorAll('.row').length,
+  };
+  const more = file.querySelector('.file-more');
+  out.hasToggle = !!more;
+  if (more) {
+    more.click();
+    out.foldedAfterClick = body.classList.contains('folded');
+    out.toggleLabel = more.textContent.trim();
+  }
+  return JSON.stringify(out);
+})()`;
+
 const DRAWER_PROBE = `(() => {
   const body = document.getElementById('drawerBody');
   if (!body) return JSON.stringify({ error: 'no drawer' });
@@ -285,6 +311,9 @@ async function inspectPage(url) {
     let cmds = null;
     if (url.includes('cmds=1')) cmds = await evaluate(COMMAND_PROBE);
 
+    let diff = null;
+    if (url.includes('/changes')) { await sleep(700); diff = await evaluate(DIFF_PROBE); }
+
     let dismiss = null;
     if (url.includes('dismiss=1')) { await sleep(700); dismiss = await evaluate(DISMISS_PROBE); }
 
@@ -300,7 +329,7 @@ async function inspectPage(url) {
       swipe = await evaluate(SWIPE_PROBE);
     }
     cdp.close();
-    return { dom: JSON.parse(result.value), problems, swipe, drawer, keys, vocab, dismiss, cmds };
+    return { dom: JSON.parse(result.value), problems, swipe, drawer, keys, vocab, dismiss, cmds, diff };
   } finally {
     try { proc.kill('SIGKILL'); } catch {}
     fs.rm(profile, { recursive: true, force: true }, () => {});
@@ -754,6 +783,24 @@ async function main() {
         check('what happened: shows no raw command blocks', plain.drawer?.codeBlocks === 0,
           String(plain.drawer?.codeBlocks));
         check('what happened: no console errors', plain.problems.length === 0, plain.problems[0] || '');
+
+        const withFiles = state.session.turns.flatMap((t) => t.steps).find((s) => s.fileCount > 0);
+        if (withFiles) {
+          const { diff, problems } = await inspectPage(`${base}/?theme=light#${sid}/${withFiles.id}/changes`);
+          check('diff: renders', !!diff && !diff.error, diff?.error || '');
+          check('diff: no console errors', problems.length === 0, problems[0] || '');
+          if (diff && !diff.error) {
+            check('diff: names the file and its size', diff.head === true && /[+\u2212]\d/.test(diff.stats), diff.stats);
+            check('diff: shows the shape of the change', diff.bar === true);
+            check('diff: long lines wrap rather than run off', diff.wraps === 'pre-wrap', diff.wraps);
+            check('diff: nothing is cut off horizontally', diff.overflowX === 0, `${diff.overflowX}px hidden`);
+            if (diff.hasToggle) {
+              check('diff: a large change starts folded', diff.folded === true);
+              check('diff: it can be opened', diff.foldedAfterClick === false);
+              check('diff: the toggle says what it does', /show less/i.test(diff.toggleLabel || ''), diff.toggleLabel);
+            }
+          }
+        }
 
         const deep = await inspectPage(`${base}/?theme=light#${sid}/${anyStepId}/thinking`);
         check('reasoning: carries the detail', deep.drawer?.codeBlocks > 0, String(deep.drawer?.codeBlocks));

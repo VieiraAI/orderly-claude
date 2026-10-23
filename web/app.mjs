@@ -204,6 +204,16 @@ function liveTitle() {
  * a second reply. Omitted when a step is already spinning in the list,
  * because that step is the live one.
  */
+function waitingBubble(label) {
+  return el('div', { class: 'bubble live waiting', title: 'Claude is waiting for you' }, [
+    el('span', { class: 'icon t-ask' }, '?'),
+    el('span', { class: 'label' }, el('span', { class: 'text' }, [
+      el('span', { class: 'vocab-term' }, 'Waiting on you'),
+      label ? el('span', { class: 'vocab-plain' }, label) : null,
+    ])),
+  ]);
+}
+
 function thinkingBubble() {
   const stalled = state.activity?.quietMs > 45000;
   return el('div', {
@@ -384,6 +394,9 @@ function renderTimeline() {
     const isLast = index === turns.length - 1;
     // Work still in flight belongs to the message it started in.
     const live = isLast && !!state.activity?.working;
+    // Claude idle with an unanswered question is not finished; it is your turn.
+    const openAsk = isLast && !state.activity?.working
+      && [...turn.steps].reverse().find((s) => s.needsUser && !s.userResolved);
     // Read this from the steps being drawn, not from the activity payload:
     // the two are separate requests and can disagree for a moment, which put
     // a live row and a spinning step on screen together.
@@ -403,7 +416,7 @@ function renderTimeline() {
     const body = [];
     if (turn.intro) body.push(el('div', { class: 'msg-text md', html: md(turn.intro) }));
 
-    if (turn.steps.length || (turn.pending || []).length || liveNeedsRow) {
+    if (turn.steps.length || (turn.pending || []).length || liveNeedsRow || openAsk) {
       const list = el('div', { class: 'steps' });
       for (const s of turn.steps) list.append(bubble(s));
       for (const p of turn.pending || []) {
@@ -413,6 +426,7 @@ function renderTimeline() {
         ]));
       }
       if (liveNeedsRow) list.append(thinkingBubble());
+      else if (openAsk) list.append(waitingBubble(openAsk.label));
       body.push(list);
     }
 
@@ -429,31 +443,64 @@ function renderTimeline() {
 
 /* ---------- drawer ---------- */
 
+/**
+ * A file's changes.
+ *
+ * A whole-file write used to render as hundreds of identical green rows with
+ * the right-hand side cut off, which tells you nothing and hides the rest. So:
+ * a header that says the shape of the change, long lines that wrap instead of
+ * disappearing, and anything large folded until asked for.
+ */
 function diffView(change) {
-  const rows = [];
+  const lines = change.hunks.reduce((n, h) => n + h.length, 0);
+  const { added, removed } = change.stats;
+  const big = lines > 14;
+
+  const bar = (() => {
+    const total = Math.max(1, added + removed);
+    const wrap = el('span', { class: 'stat-bar', title: `${added} added, ${removed} removed` });
+    if (added) wrap.append(el('span', { class: 'bar-add', style: `flex:${added}` }));
+    if (removed) wrap.append(el('span', { class: 'bar-del', style: `flex:${removed}` }));
+    return total ? wrap : null;
+  })();
+
+  const body = el('div', { class: `file-body${big ? ' folded' : ''}` });
   for (const hunk of change.hunks) {
     const h = el('div', { class: 'hunk' });
     for (const op of hunk) {
-      const cls = op.t === 'add' ? 'add' : op.t === 'del' ? 'del' : '';
-      h.append(el('div', { class: `row ${cls}` }, [
+      const kind = op.t === 'add' ? 'add' : op.t === 'del' ? 'del' : 'same';
+      h.append(el('div', { class: `row ${kind}` }, [
         el('span', { class: 'ln' }, String((op.t === 'add' ? op.b : op.a) + 1)),
-        el('span', { class: 'sign' }, op.t === 'add' ? '+' : op.t === 'del' ? '−' : ' '),
-        el('span', {}, op.line),
+        el('span', { class: 'sign' }, op.t === 'add' ? '+' : op.t === 'del' ? '\u2212' : ''),
+        el('span', { class: 'code' }, op.line === '' ? '\u00a0' : op.line),
       ]));
     }
-    rows.push(h);
+    body.append(h);
   }
-  return el('div', { class: 'file' }, [
+
+  const file = el('div', { class: 'file' }, [
     el('div', { class: 'file-head' }, [
-      el('span', {}, short(change.path)),
-      el('span', { class: 'stat' }, [
-        el('span', { class: 'plus' }, `+${change.stats.added}`),
-        ' ',
-        el('span', { class: 'minus' }, `−${change.stats.removed}`),
+      el('span', { class: 'fname', title: change.path }, change.name),
+      change.isNew ? el('span', { class: 'fbadge' }, 'new file') : null,
+      el('span', { class: 'fspace' }),
+      bar,
+      el('span', { class: 'fstat' }, [
+        added ? el('span', { class: 'plus' }, `+${added}`) : null,
+        removed ? el('span', { class: 'minus' }, `\u2212${removed}`) : null,
       ]),
     ]),
-    ...rows,
+    body,
   ]);
+
+  if (big) {
+    const toggle = el('button', { class: 'file-more' }, `Show all ${lines} lines`);
+    toggle.onclick = () => {
+      const folded = body.classList.toggle('folded');
+      toggle.textContent = folded ? `Show all ${lines} lines` : 'Show less';
+    };
+    file.append(toggle);
+  }
+  return file;
 }
 
 function compareView(shots) {
