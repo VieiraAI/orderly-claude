@@ -22,6 +22,7 @@ import { loadShots } from '../src/core/shots.mjs';
 import { SessionWatcher } from '../src/core/watcher.mjs';
 import { listTerminals } from '../src/core/terminals.mjs';
 import { TERMS, CATEGORIES, createRotation, find, byCategory } from '../web/genz.mjs';
+import { fileURLToPath } from 'node:url';
 import { CDP, httpJSON } from '../src/core/cdp.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -372,6 +373,44 @@ async function main() {
   const hits = search(entries, firstStep.text.split(/\s+/)[0]);
   check('search finds a known step', hits.length > 0);
   check('search of nonsense finds nothing', search(entries, 'zzzzqqqxnotathing').length === 0);
+
+  console.log('\nNaming\n');
+
+  /*
+   * The project was renamed, and a stray old name in anything a person reads
+   * is the sort of thing that survives for years. Two mentions are deliberate:
+   * the previous data directory, so old screenshots are still found, and the
+   * mod's previous tool name, so older transcripts still read.
+   */
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const ALLOWED = new Set(['src/core/paths.mjs', 'src/core/steps.mjs']);
+  const walk = (dir) => {
+    const out = [];
+    for (const name of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (name.name === '.git' || name.name === 'node_modules') continue;
+      const full = path.join(dir, name.name);
+      if (name.isDirectory()) out.push(...walk(full));
+      else if (/\.(mjs|js|tsx|ts|json|html|css|md)$/.test(name.name)) out.push(full);
+    }
+    return out;
+  };
+
+  const stale = [];
+  for (const file of walk(repoRoot)) {
+    const rel = path.relative(repoRoot, file);
+    if (ALLOWED.has(rel) || rel.startsWith('test/')) continue;
+    const text = fs.readFileSync(file, 'utf8');
+    if (/claudenized/i.test(text)) stale.push(rel);
+  }
+  check('no stray mentions of the old name', stale.length === 0, stale.join(', '));
+  check('the deliberate ones are still there, and explained',
+    /Kept so screenshots taken under the previous name/.test(fs.readFileSync(path.join(repoRoot, 'src/core/paths.mjs'), 'utf8'))
+    && /mcp__claudenized__plan/.test(fs.readFileSync(path.join(repoRoot, 'src/core/steps.mjs'), 'utf8')));
+
+  const manifest = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
+  check('the package is named for the project', manifest.name === 'orderly-claude', manifest.name);
+  check('the command is on the package', !!manifest.bin?.orderly, JSON.stringify(manifest.bin));
+  check('the entry point exists', fs.existsSync(path.join(repoRoot, manifest.bin.orderly)));
 
   console.log('\nRunning terminals\n');
 

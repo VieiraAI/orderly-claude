@@ -7,6 +7,7 @@ export const CLAUDE_DIR = path.join(HOME, '.claude');
 export const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
 export const FILE_HISTORY_DIR = path.join(CLAUDE_DIR, 'file-history');
 export const DATA_DIR = path.join(HOME, '.orderly-claude');
+// Kept so screenshots taken under the previous name are still found.
 const LEGACY_DATA_DIR = path.join(HOME, '.claudenized');
 export const SHOTS_DIR = path.join(DATA_DIR, 'shots');
 export const INSTANCES_FILE = path.join(DATA_DIR, 'instances.json');
