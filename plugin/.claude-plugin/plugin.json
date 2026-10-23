@@ -1,0 +1,6 @@
+{
+  "name": "orderly-claude",
+  "version": "0.1.0",
+  "description": "Progress bubbles for Claude Code, in a pane beside the chat",
+  "types": "./types/index.d.ts"
+}
