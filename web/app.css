@@ -242,6 +242,8 @@ kbd { font: 11px var(--mono); color: var(--faint); margin-left: 5px; }
 .bubble.pending .text { color: var(--faint); }
 .bubble.tone-running .text { color: var(--muted); }
 .bubble.tone-fix .text { color: var(--t-fix); }
+.bubble.tone-ask .text { color: var(--t-ask); font-weight: 500; }
+.tag.needs-you { opacity: 1; color: var(--t-ask); border-color: var(--t-ask); }
 .bubble.tone-failed .text { color: var(--t-failed); }
 .bubble.tone-ask .text { color: var(--t-ask); font-weight: 600; }
 .bubble.tone-inspect .text { color: var(--muted); }
@@ -385,17 +387,53 @@ pre.block.cmd { color: var(--text); }
 .hint-line { font-size: 12px; color: var(--faint); border-top: 1px solid var(--line-soft); padding-top: 10px; margin-top: 14px; }
 
 /* diffs */
-.file { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; margin-bottom: 14px; }
-.file-head { display: flex; justify-content: space-between; align-items: center; background: var(--raised); padding: 8px 12px; font: 12px var(--mono); }
-.file-head .stat { font-size: 11px; }
-.plus { color: #4E9A6B; } .minus { color: var(--fail); }
-.hunk { font: 12px/1.65 var(--mono); overflow-x: auto; }
+.file { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 14px; }
+.file-head {
+  display: flex; align-items: center; gap: 10px; background: var(--raised);
+  padding: 9px 13px; border-bottom: 1px solid var(--line-soft);
+}
+.file-head .fname { font: 12.5px var(--mono); color: var(--text); font-weight: 600; }
+.file-head .fspace { flex: 1; }
+.fbadge {
+  font-size: 9.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--faint);
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px;
+}
+/* The shape of the change, before any of it is read. */
+.stat-bar { display: flex; width: 58px; height: 5px; border-radius: 3px; overflow: hidden; background: var(--line); }
+.bar-add { background: #4E9A6B; }
+.bar-del { background: var(--fail); }
+.fstat { display: flex; gap: 7px; font: 11.5px var(--mono); }
+.plus { color: #4E9A6B; }
+.minus { color: var(--fail); }
+
+.file-body { font: 12px/1.7 var(--mono); }
+/* Large changes stay folded; the header already said how big it is. */
+.file-body.folded { max-height: 230px; overflow: hidden; position: relative; }
+.file-body.folded::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 58px;
+  background: linear-gradient(transparent, var(--bg));
+}
 .hunk + .hunk { border-top: 1px dashed var(--line); }
-.row { display: flex; white-space: pre; }
-.row .ln { flex: none; width: 46px; text-align: right; padding-right: 10px; color: var(--faint); user-select: none; }
-.row.add { background: rgba(78,154,107,.12); }
-.row.del { background: rgba(169,78,70,.12); }
-.row .sign { flex: none; width: 15px; }
+.row { display: flex; align-items: flex-start; padding: 0 12px 0 0; }
+.row .ln {
+  flex: none; width: 46px; text-align: right; padding-right: 10px; color: var(--faint);
+  user-select: none; background: var(--line-soft); font-size: 11px;
+}
+.row .sign { flex: none; width: 18px; text-align: center; user-select: none; }
+/* Wrap rather than run off the edge: a line you cannot see is a line lost. */
+.row .code { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; padding-left: 2px; }
+.row.add { background: rgba(78,154,107,.09); }
+.row.add .sign { color: #4E9A6B; }
+.row.del { background: rgba(169,78,70,.09); }
+.row.del .sign { color: var(--fail); }
+.row.same .code { color: var(--muted); }
+
+.file-more {
+  display: block; width: 100%; background: var(--raised); border: 0;
+  border-top: 1px solid var(--line-soft); padding: 8px; cursor: pointer;
+  font-size: 12px; color: var(--muted);
+}
+.file-more:hover { color: var(--text); }
 
 /* before / after */
 .compare { margin-bottom: 16px; }
@@ -466,5 +504,7 @@ pre.block.cmd { color: var(--text); }
 .vocab-time { font: 11.5px var(--mono); color: var(--faint); }
 .bubble .sub.live { margin-top: 2px; }
 
+.bubble.live.waiting { cursor: default; }
+.bubble.live.waiting .vocab-term { color: var(--t-ask); }
 .bubble.live.stalled .icon { animation-duration: 2.6s; opacity: .55; }
 .bubble.live.stalled .vocab-term { color: var(--muted); font-weight: 500; }
