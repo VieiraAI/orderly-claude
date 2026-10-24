@@ -525,10 +525,37 @@ function compareView(shots) {
     return wrap;
   }
 
+  /*
+   * Say when each picture was taken.
+   *
+   * A pair is only as honest as its "before", which is the shot from the end
+   * of the previous change. Showing the clock times — and warning when they
+   * are far apart — lets you judge whether the two frames really bracket this
+   * one step, instead of trusting a label that cannot know.
+   */
+  const shotAt = (s) => (s?.at ? new Date(s.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : '');
   const sbs = el('div', { class: 'sbs' }, [
-    el('div', { class: 'shot' }, [el('img', { src: src(shots.before) }), el('div', { class: 'cap' }, 'before')]),
-    el('div', { class: 'shot' }, [el('img', { src: src(shots.after) }), el('div', { class: 'cap' }, 'after')]),
+    el('div', { class: 'shot' }, [
+      el('img', { src: src(shots.before) }),
+      el('div', { class: 'cap' }, [el('span', {}, 'before'), el('span', { class: 'cap-at' }, shotAt(shots.before))]),
+    ]),
+    el('div', { class: 'shot' }, [
+      el('img', { src: src(shots.after) }),
+      el('div', { class: 'cap' }, [el('span', {}, 'after'), el('span', { class: 'cap-at' }, shotAt(shots.after))]),
+    ]),
   ]);
+
+  const span = shots.spanMs || 0;
+  const WIDE = 90 * 1000;
+  if (span >= WIDE) {
+    const mins = Math.round(span / 60000);
+    wrap.append(el('div', { class: 'pair-note' },
+      `These frames are ${mins >= 1 ? `${mins} min` : `${Math.round(span / 1000)}s`} apart, `
+      + 'so other work may sit between them.'));
+  } else if (!shots.changed) {
+    wrap.append(el('div', { class: 'pair-note quiet' },
+      'The two frames are identical — this step changed nothing you can see.'));
+  }
 
   // The after image sits at full size on top of the before image and is
   // *clipped*, so dragging reveals it. Resizing a wrapper instead would
@@ -655,7 +682,26 @@ function askView(call) {
         ? { text: 'You answered', cls: 'settled' }
         : { text: 'Answered', cls: 'settled' };
 
+  /*
+   * The ask, in one sentence, before any of the detail.
+   *
+   * The context below is useful but it buries the point: someone opening this
+   * panel wants to know what is being asked of them, not to infer it from a
+   * list of options.
+   */
+  const need = (() => {
+    if (pending) {
+      if (questions.length === 1) return `Claude needs you to answer: ${questions[0].question}`;
+      if (questions.length > 1) return `Claude needs your answer on ${questions.length} questions before it can carry on.`;
+      return 'Claude needs a decision from you before it can carry on.';
+    }
+    if (refused) return 'Claude asked you to choose, and you asked to clarify first.';
+    if (questions.length === 1) return `You answered: ${questions[0].question}`;
+    return `You answered ${questions.length} questions.`;
+  })();
+
   const box = el('div', { class: `ask-box ${status.cls}` }, [
+    el('div', { class: 'ask-need' }, need),
     el('div', { class: 'ask-status' }, [
       el('span', { class: 'ask-dot' }),
       el('span', {}, status.text),
@@ -666,7 +712,8 @@ function askView(call) {
     const chosen = answers.get(q.question);
     box.append(el('div', { class: 'ask-q' }, [
       q.header ? el('div', { class: 'ask-header' }, q.header) : null,
-      el('div', { class: 'ask-text' }, q.question),
+      // With a single question the headline above already says it.
+      questions.length > 1 ? el('div', { class: 'ask-text' }, q.question) : null,
       q.multiSelect ? el('div', { class: 'ask-note' }, 'More than one may be chosen') : null,
       el('div', { class: 'ask-options' }, (q.options || []).map((o) => {
         const picked = chosen && chosen.split(', ').some((c) => c.trim() === o.label);
@@ -694,8 +741,9 @@ function askView(call) {
 function blockedView(call) {
   const input = call.input?.command || call.input?.file_path || call.toolLabel;
   return el('div', { class: 'ask-box waiting' }, [
-    el('div', { class: 'ask-status' }, [el('span', { class: 'ask-dot' }), el('span', {}, 'Blocked \u2014 needs your permission')]),
-    el('div', { class: 'ask-text' }, `Claude tried to run ${call.toolLabel} and was stopped.`),
+    el('div', { class: 'ask-need' }, `Claude needs your permission to run ${call.toolLabel}.`),
+    el('div', { class: 'ask-status' }, [el('span', { class: 'ask-dot' }), el('span', {}, 'Blocked \u2014 waiting on you')]),
+    el('div', { class: 'ask-text' }, 'It tried this and was stopped:'),
     el('pre', { class: 'block cmd' }, String(input).slice(0, 600)),
     call.result ? el('div', { class: 'ask-desc' }, String(call.result).slice(0, 400)) : null,
   ]);
@@ -946,12 +994,14 @@ async function refresh() {
   if (!state.sessionId) state.sessionId = data.instance.sessionId;
   state.person = data.person || state.person;
   if (data.tabs) renderTabs(data.tabs);
+  restoreDraft(); // whatever was being typed before a reload or a tab switch
 
   // The UI changed on disk since this page loaded, so it is running code that
-  // no longer exists. Reload rather than leave a fixed bug looking unfixed.
+  // no longer exists. Reload rather than leave a fixed bug looking unfixed —
+  // but never out from under someone mid-sentence.
   if (data.build) {
     if (!state.build) state.build = data.build;
-    else if (state.build !== data.build) { location.reload(); return; }
+    else if (state.build !== data.build && reloadForBuild()) return;
   }
 
   const wasWorking = !!state.activity?.working;
@@ -1013,8 +1063,10 @@ async function sendPrompt() {
   box.value = '';
   box.style.height = '';
   attachments = [];
+  clearDraft();
   renderAttachments();
   updateComposer();
+  takeHeldUpdate(); // the message is away; a held update can land now
   updateComposer();
   paintRun({ status: 'running', busy: true });
   const res = await api('/api/prompt', {
@@ -1339,6 +1391,61 @@ $('promptInput').addEventListener('keydown', (e) => {
   sendPrompt();
 });
 
+/*
+ * Nothing typed is ever lost.
+ *
+ * The page reloads itself when the UI changes on disk, which used to wipe a
+ * half-written message without warning. Two defences: the draft is kept as it
+ * is typed and put back afterwards, and a reload waits until the composer is
+ * empty and unfocused rather than interrupting.
+ */
+const draftKey = () => `cz-draft-${state.sessionId || 'current'}`;
+
+function saveDraft() {
+  try { localStorage.setItem(draftKey(), $('promptInput').value); } catch {}
+}
+
+function restoreDraft() {
+  try {
+    const kept = localStorage.getItem(draftKey());
+    if (kept && !$('promptInput').value) {
+      $('promptInput').value = kept;
+      growPrompt();
+      updateComposer();
+    }
+  } catch {}
+}
+
+function clearDraft() {
+  try { localStorage.removeItem(draftKey()); } catch {}
+}
+
+let buildPending = false;
+
+/** Returns true when the page is actually going to reload. */
+function reloadForBuild() {
+  const box = $('promptInput');
+  const busy = document.activeElement === box || box.value.trim().length > 0;
+  if (busy) {
+    // Hold it until they are done, and say an update is waiting.
+    buildPending = true;
+    $('updateHint')?.classList.remove('hidden');
+    return false;
+  }
+  saveDraft();
+  location.reload();
+  return true;
+}
+
+/* Once the composer is clear, a held update can land. */
+function takeHeldUpdate() {
+  if (!buildPending) return;
+  const box = $('promptInput');
+  if (document.activeElement === box || box.value.trim()) return;
+  saveDraft();
+  location.reload();
+}
+
 /* Grow with the text, up to a point, so multi-line prompts stay readable. */
 const growPrompt = () => {
   const box = $('promptInput');
@@ -1346,7 +1453,8 @@ const growPrompt = () => {
   box.style.height = `${Math.min(box.scrollHeight, 220)}px`;
 };
 
-$('promptInput').addEventListener('input', () => { growPrompt(); updateComposer(); });
+$('promptInput').addEventListener('input', () => { growPrompt(); updateComposer(); saveDraft(); });
+$('promptInput').addEventListener('blur', takeHeldUpdate);
 
 const events = new EventSource('/events');
 events.addEventListener('update', () => { if (state.live) refresh(); });
@@ -1418,6 +1526,8 @@ const openSearch = () => {
   $('searchInput').select();
 };
 const closeSearch = () => $('searchOverlay').classList.add('hidden');
+
+$('updateHint').onclick = () => { saveDraft(); location.reload(); };
 
 $('newSessionBtn').onclick = () => newSession();
 
