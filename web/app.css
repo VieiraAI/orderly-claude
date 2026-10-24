@@ -187,6 +187,12 @@ kbd { font: 11px var(--mono); color: var(--faint); margin-left: 5px; }
   border-radius: 9px; padding: 10px 12px; overflow-x: auto; margin: 0 0 10px; white-space: pre;
 }
 .msg-text.md strong { font-weight: 600; }
+.msg-text.md .md-h {
+  font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--text);
+  margin: 16px 0 7px;
+}
+.msg-text.md .md-h:first-child { margin-top: 0; }
+.msg-text.md h5.md-h, .msg-text.md h6.md-h { font-size: 13.5px; color: var(--muted); }
 .msg-text.said { color: var(--text); }
 .msg-text.summary { color: var(--muted); margin-top: 14px; }
 .msg-text.clamp { max-height: 300px; overflow: auto; }

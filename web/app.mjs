@@ -338,6 +338,13 @@ function md(text) {
     }
     if (inCode) { code.push(line); continue; }
 
+    const head = line.match(/^(#{1,4})\s+(.*)$/);
+    if (head) {
+      closeList();
+      out.push(`<h${head[1].length + 2} class="md-h">${inlineMd(head[2])}</h${head[1].length + 2}>`);
+      continue;
+    }
+
     const li = line.match(/^\s*[-*]\s+(.*)$/);
     if (li) {
       if (!inList) { out.push('<ul>'); inList = true; }
