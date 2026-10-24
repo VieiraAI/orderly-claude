@@ -150,6 +150,21 @@ const VOCAB_PROBE = `(() => {
 
 /* A diff used to run off the right edge and show every line of a new file
    as an undifferentiated wall. */
+/* A step that needs a decision must say which decision. */
+const ASK_PROBE = `(() => {
+  const box = document.querySelector('.ask-box');
+  if (!box) return JSON.stringify({ error: 'no decision panel' });
+  return JSON.stringify({
+    status: (box.querySelector('.ask-status')?.textContent || '').trim(),
+    waiting: box.classList.contains('waiting'),
+    questions: [...box.querySelectorAll('.ask-text')].map(n => n.textContent.slice(0, 60)),
+    options: box.querySelectorAll('.ask-option').length,
+    described: [...box.querySelectorAll('.ask-option')].filter(o => o.querySelector('.ask-desc')).length,
+    picked: box.querySelectorAll('.ask-option.picked').length,
+    codeBlocks: box.querySelectorAll('pre').length,
+  });
+})()`;
+
 const DIFF_PROBE = `(() => {
   const file = document.querySelector('.file');
   if (!file) return JSON.stringify({ error: 'no diff on screen' });
@@ -311,6 +326,9 @@ async function inspectPage(url) {
     let cmds = null;
     if (url.includes('cmds=1')) cmds = await evaluate(COMMAND_PROBE);
 
+    let ask = null;
+    if (url.includes('needsyou=1')) { await sleep(700); ask = await evaluate(ASK_PROBE); }
+
     let diff = null;
     if (url.includes('/changes')) { await sleep(700); diff = await evaluate(DIFF_PROBE); }
 
@@ -329,7 +347,7 @@ async function inspectPage(url) {
       swipe = await evaluate(SWIPE_PROBE);
     }
     cdp.close();
-    return { dom: JSON.parse(result.value), problems, swipe, drawer, keys, vocab, dismiss, cmds, diff };
+    return { dom: JSON.parse(result.value), problems, swipe, drawer, keys, vocab, dismiss, cmds, diff, ask };
   } finally {
     try { proc.kill('SIGKILL'); } catch {}
     fs.rm(profile, { recursive: true, force: true }, () => {});
@@ -695,6 +713,39 @@ async function main() {
       check('closing the last tab is refused', lastOne.status === 409);
     }
 
+    // Attachments: written beside the session, path handed to Claude.
+    const body = Buffer.from('codeword SMOKE-TEST\n');
+    const up = await fetch(`${base}/api/upload?name=notes.txt&session=${state.instance.sessionId}`, {
+      method: 'POST', body,
+    }).then((r) => r.json());
+    check('a file can be attached', !!up.path && up.size === body.length, JSON.stringify(up));
+    check('the file is written where it says', up.path && fs.existsSync(up.path));
+    check('its contents survive', fs.readFileSync(up.path, 'utf8').includes('SMOKE-TEST'));
+
+    const again = await fetch(`${base}/api/upload?name=notes.txt&session=${state.instance.sessionId}`, {
+      method: 'POST', body,
+    }).then((r) => r.json());
+    check('a second file of the same name does not overwrite', again.path !== up.path, again.path);
+
+    const nasty = await fetch(
+      `${base}/api/upload?name=${encodeURIComponent('../../escape.txt')}&session=${state.instance.sessionId}`,
+      { method: 'POST', body },
+    ).then((r) => r.json());
+    check('a path in the filename cannot escape the folder',
+      nasty.path && path.dirname(nasty.path) === path.dirname(up.path) && !nasty.path.includes('..'),
+      nasty.path);
+    for (const f of [up.path, again.path, nasty.path]) { try { fs.rmSync(f); } catch {} }
+
+    // Each session runs on its own, rather than queueing behind the others.
+    const tabState = await get('/api/tabs');
+    check('each tab reports whether it is busy',
+      tabState.tabs.every((x) => typeof x.busy === 'boolean'), JSON.stringify(tabState.tabs));
+    const refusedEmpty = await fetch(`${base}/api/prompt`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: '  ', sessionId: state.instance.sessionId }),
+    });
+    check('an empty prompt is still refused per session', refusedEmpty.status === 409);
+
     const lib = await fetch(base + '/genz.mjs');
     check('the library is served to the page', lib.status === 200
       && (lib.headers.get('content-type') || '').includes('javascript'));
@@ -783,6 +834,22 @@ async function main() {
         check('what happened: shows no raw command blocks', plain.drawer?.codeBlocks === 0,
           String(plain.drawer?.codeBlocks));
         check('what happened: no console errors', plain.problems.length === 0, plain.problems[0] || '');
+
+        const asked = state.session.turns.flatMap((t) => t.steps).find((s) => s.needsUser);
+        if (asked) {
+          const { ask, problems } = await inspectPage(
+            `${base}/?theme=light&needsyou=1#${sid}/${asked.id}/detail`);
+          check('decision: the panel opens', !!ask && !ask.error, ask?.error || '');
+          if (ask && !ask.error) {
+            check('decision: it says what state the decision is in', (ask.status || '').length > 3, ask.status);
+            check('decision: the question is shown', ask.questions?.length > 0, JSON.stringify(ask.questions));
+            check('decision: the choices are shown', ask.options > 0, String(ask.options));
+            check('decision: each choice explains itself', ask.described === ask.options,
+              `${ask.described}/${ask.options}`);
+            check('decision: no raw commands in it', ask.codeBlocks === 0, String(ask.codeBlocks));
+          }
+          check('decision: no console errors', problems.length === 0, problems[0] || '');
+        }
 
         const withFiles = state.session.turns.flatMap((t) => t.steps).find((s) => s.fileCount > 0);
         if (withFiles) {

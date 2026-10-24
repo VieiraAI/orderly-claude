@@ -15,7 +15,7 @@ import { indexSession, search } from '../core/search.mjs';
 import { SessionWatcher } from '../core/watcher.mjs';
 import { shutdownBrowser } from '../core/capture.mjs';
 import { Runner } from '../core/runner.mjs';
-import { SHOTS_DIR, INSTANCES_FILE, ensureDirs, transcriptPathFor } from '../core/paths.mjs';
+import { SHOTS_DIR, INSTANCES_FILE, ensureDirs, transcriptPathFor, uploadsFor } from '../core/paths.mjs';
 import { randomUUID } from 'node:crypto';
 import { loadShots, attachShots } from '../core/shots.mjs';
 
@@ -197,7 +197,7 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
     const meta = tabMeta.get(id) || {};
     liveTitle = meta.title || liveTitle;
     liveCwd = meta.cwd || liveCwd;
-    runner.cwd = meta.cwd || runner.cwd;
+    runnerFor(id).cwd = meta.cwd || runnerFor(id).cwd;
     if (capture) await next.setCapture(true);
     broadcast('tabs', { tabs: tabs(), active: liveId });
     return true;
@@ -212,13 +212,28 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       active: id === liveId,
       unread: w.unread,
       working: !!w.activity().working,
+      busy: !!runners.get(id)?.busy,
     }));
   }
 
-  const runner = new Runner({ cwd });
+  /*
+   * A runner per session. Sharing one meant a prompt in any tab blocked every
+   * other tab, which is not how separate terminals behave and is not how tabs
+   * should either.
+   */
+  const runners = new Map();
+  function runnerFor(id) {
+    if (runners.has(id)) return runners.get(id);
+    const meta = tabMeta.get(id) || {};
+    const r = new Runner({ cwd: meta.cwd || cwd });
+    r.on('state', (st) => broadcast('run', { ...st, sessionId: id }));
+    r.on('session', ({ sessionId: ran }) => followFork(id, ran));
+    runners.set(id, r);
+    return r;
+  }
+  const runner = () => runnerFor(liveId);
   let liveId = sessionId;
   let liveTitle = title;
-  let runnerTarget = sessionId; // which session the last prompt was sent to
   let liveCwd = cwd;
 
   // Claude forks a copy under a new id when the session is already open
@@ -230,20 +245,25 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
    * that moves on its own while you are reading another tab is worse than a
    * tab you have to click.
    */
-  runner.on('session', ({ sessionId: ran }) => {
-    if (!ran || watchers.has(ran)) return;
-    const wasFocused = runnerTarget === liveId;
+  /*
+   * Claude forks a copy under a new id when the session is already open
+   * elsewhere. Follow the work by opening the fork as a tab, and only bring it
+   * forward if the tab it replaced was the one being looked at.
+   */
+  function followFork(from, ran) {
+    if (!ran || ran === from || watchers.has(ran)) return;
+    const wasFocused = from === liveId;
     let tries = 0;
     const findIt = async () => {
-      const match = listSessions().find((s) => s.sessionId === ran);
+      const match = listSessions().find((x) => x.sessionId === ran);
       if (match) {
         await openTab(ran, match);
         if (wasFocused) await focusTab(ran);
-        broadcast('session', { sessionId: ran, forked: true, focused: wasFocused });
+        broadcast('session', { sessionId: ran, forked: true, from, focused: wasFocused });
       } else if (tries++ < 10) setTimeout(findIt, 600);
     };
     findIt().catch(() => {});
-  });
+  }
 
   const clients = new Set();
   const broadcast = (event, data) => {
@@ -253,7 +273,6 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       catch { clients.delete(res); } // a dead client should not be kept
     }
   };
-  runner.on('state', (st) => broadcast('run', st));
 
   const resolveView = (id) => {
     const wanted = id || liveId;
@@ -294,7 +313,7 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         if (!view) return send(404, { error: 'session not found' });
         return send(200, {
           instance: { port, sessionId: liveId, cwd: liveCwd, title: liveTitle, pid: process.pid },
-          run: runner.state(),
+          run: runner().state(),
           activity: view.live ? watcher().activity() : { working: false },
           person: personName(cwd),
           build: webBuildId(),
@@ -309,11 +328,19 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       if (url.pathname === '/api/prompt' && req.method === 'POST') {
         const body = await readBody(req);
         try {
-          runnerTarget = liveId;
-          const started = runner.run({
-            sessionId: liveId, text: body.text, mode: body.mode, fresh: freshTabs.has(liveId),
+          // A prompt may name its tab, so a background tab can be sent work.
+          const target = body.sessionId && watchers.has(body.sessionId) ? body.sessionId : liveId;
+          // Name the attachments in the prompt so Claude knows to read them.
+          const files = Array.isArray(body.attachments) ? body.attachments : [];
+          const text = files.length
+            ? `${body.text}\n\nAttached ${files.length === 1 ? 'file' : 'files'}:\n`
+              + files.map((f) => `- ${f}`).join('\n')
+            : body.text;
+          const started = runnerFor(target).run({
+            sessionId: target, text, mode: body.mode, fresh: freshTabs.has(target),
+            readDir: files.length ? uploadsFor(target) : null,
           });
-          freshTabs.delete(liveId); // it exists from here on
+          freshTabs.delete(target); // it exists from here on
           return send(200, started);
         } catch (e) {
           return send(409, { error: e.message });
@@ -327,7 +354,9 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       }
 
       if (url.pathname === '/api/stop' && req.method === 'POST') {
-        return send(200, { stopped: runner.stop(), run: runner.state() });
+        const body = await readBody(req).catch(() => ({}));
+        const which = body.sessionId && runners.has(body.sessionId) ? body.sessionId : liveId;
+        return send(200, { stopped: runnerFor(which).stop(), run: runnerFor(which).state() });
       }
 
       // Polled on its own so the live row stays honest even when the
@@ -337,7 +366,7 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       }
 
       if (url.pathname === '/api/activity') {
-        return send(200, { activity: watcher().activity(), run: runner.state(), live: true, tabs: tabs() });
+        return send(200, { activity: watcher().activity(), run: runner().state(), live: true, tabs: tabs() });
       }
 
       if (url.pathname === '/api/sessions') return send(200, { sessions: listSessions() });
@@ -363,6 +392,46 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       // Start a Claude session from here. Nothing runs until the first
       // prompt — that is what creates the transcript — so the tab opens empty
       // and the watcher picks it up the moment it appears.
+      /*
+       * An attachment is written beside the session and its path handed to
+       * Claude, which then reads it with its own tools. Uploading the bytes
+       * into the prompt would blow the context on the first PDF.
+       */
+      if (url.pathname === '/api/upload' && req.method === 'POST') {
+        const target = url.searchParams.get('session') || liveId;
+        const raw = url.searchParams.get('name') || 'attachment';
+        // Keep the name, lose any path in it.
+        const name = path.basename(raw).replace(/[^\w.\-() ]+/g, '_').slice(0, 120) || 'attachment';
+        const dir = uploadsFor(target);
+        fs.mkdirSync(dir, { recursive: true });
+
+        const chunks = [];
+        let size = 0;
+        const LIMIT = 25 * 1024 * 1024;
+        try {
+          await new Promise((resolve, reject) => {
+            req.on('data', (d) => {
+              size += d.length;
+              if (size > LIMIT) { reject(new Error('file is larger than 25MB')); req.destroy(); return; }
+              chunks.push(d);
+            });
+            req.on('end', resolve);
+            req.on('error', reject);
+          });
+        } catch (e) {
+          return send(413, { error: e.message });
+        }
+
+        let final = path.join(dir, name);
+        let n = 1;
+        while (fs.existsSync(final)) {
+          const ext = path.extname(name);
+          final = path.join(dir, `${path.basename(name, ext)}-${n++}${ext}`);
+        }
+        fs.writeFileSync(final, Buffer.concat(chunks));
+        return send(200, { name: path.basename(final), path: final, size, dir });
+      }
+
       if (url.pathname === '/api/tabs/new' && req.method === 'POST') {
         const body = await readBody(req);
         const where = body.cwd || liveCwd || cwd;
@@ -398,7 +467,9 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         const body = await readBody(req);
         const target = listSessions().find((s) => s.sessionId === body.sessionId);
         if (!target) return send(404, { error: 'session not found' });
-        if (runner.busy) return send(409, { error: 'Claude is working in this session; stop it first' });
+        if (runnerFor(target.sessionId).busy) {
+          return send(409, { error: 'Claude is working in that session; stop it first' });
+        }
         await openTab(target.sessionId, target);
         await focusTab(target.sessionId);
         broadcast('session', { sessionId: target.sessionId, switched: true });
@@ -474,11 +545,11 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
   await openTab(sessionId, { file, cwd, title });
   watcher().focused = true;
   const close = () => {
-    runner.stop();
+    for (const r of runners.values()) r.stop();
     for (const w of watchers.values()) w.stop();
     shutdownBrowser(); // otherwise the headless Chrome outlives the CLI
     server.close();
   };
 
-  return { server, watchers, tabs, runner, close };
+  return { server, watchers, tabs, runners, close };
 }

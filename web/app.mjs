@@ -5,7 +5,9 @@ const state = {
   sessionId: null, live: true, session: null, activeStep: null,
   tab: 'detail', results: [], sel: 0, run: { status: 'idle', busy: false }, person: null, tabs: [],
   activity: null, devUrl: null, build: null, think: { word: 0, tick: 0, since: null },
-  voice: (() => { try { return localStorage.getItem('cz-voice') || 'genz'; } catch { return 'genz'; } })(),
+  voice: (() => {
+    try { return localStorage.getItem('cz-voice-2') || 'genz'; } catch { return 'genz'; }
+  })(),
 };
 
 const el = (tag, attrs = {}, kids = []) => {
@@ -272,7 +274,7 @@ function elapsedLabel() {
 function cycleVoice() {
   const i = VOICE_ORDER.indexOf(state.voice);
   state.voice = VOICE_ORDER[(i + 1) % VOICE_ORDER.length];
-  try { localStorage.setItem('cz-voice', state.voice); } catch {}
+  try { localStorage.setItem('cz-voice-2', state.voice); } catch {}
   advanceVoice();
   paintLive();
 }
@@ -628,6 +630,77 @@ function plainSummary(step, changes = []) {
   return { headline, facts };
 }
 
+/**
+ * What Claude is waiting for, spelled out.
+ *
+ * A step marked "needs you" used to open on a summary of commands, which says
+ * nothing about the decision being asked for. The question, the choices and
+ * what each one means are all in the call; this shows them.
+ */
+function askView(call) {
+  const questions = call.input?.questions || [];
+  const result = call.result || '';
+  const pending = call.pending;
+  const refused = /doesn.t want to proceed|rejected/i.test(result);
+
+  // Answers come back as "<question>"="<choice>" pairs.
+  const answers = new Map();
+  for (const m of result.matchAll(/"([^"]+)"\s*=\s*"([^"]+)"/g)) answers.set(m[1], m[2]);
+
+  const status = pending
+    ? { text: 'Waiting for your answer', cls: 'waiting' }
+    : refused
+      ? { text: 'You asked to clarify instead of choosing', cls: 'waiting' }
+      : answers.size
+        ? { text: 'You answered', cls: 'settled' }
+        : { text: 'Answered', cls: 'settled' };
+
+  const box = el('div', { class: `ask-box ${status.cls}` }, [
+    el('div', { class: 'ask-status' }, [
+      el('span', { class: 'ask-dot' }),
+      el('span', {}, status.text),
+    ]),
+  ]);
+
+  for (const q of questions) {
+    const chosen = answers.get(q.question);
+    box.append(el('div', { class: 'ask-q' }, [
+      q.header ? el('div', { class: 'ask-header' }, q.header) : null,
+      el('div', { class: 'ask-text' }, q.question),
+      q.multiSelect ? el('div', { class: 'ask-note' }, 'More than one may be chosen') : null,
+      el('div', { class: 'ask-options' }, (q.options || []).map((o) => {
+        const picked = chosen && chosen.split(', ').some((c) => c.trim() === o.label);
+        return el('div', { class: `ask-option${picked ? ' picked' : ''}` }, [
+          el('div', { class: 'ask-label' }, [
+            el('span', { class: 'ask-mark' }, picked ? '\u2713' : ''),
+            o.label,
+          ]),
+          o.description ? el('div', { class: 'ask-desc' }, o.description) : null,
+        ]);
+      })),
+      chosen && !(q.options || []).some((o) => chosen.split(', ').some((c) => c.trim() === o.label))
+        ? el('div', { class: 'ask-own' }, `You answered: ${chosen}`)
+        : null,
+    ]));
+  }
+
+  if (!questions.length) {
+    box.append(el('div', { class: 'ask-text' }, 'Claude is waiting on a decision before it can continue.'));
+  }
+  return box;
+}
+
+/** A tool call that was refused, and what it was trying to do. */
+function blockedView(call) {
+  const input = call.input?.command || call.input?.file_path || call.toolLabel;
+  return el('div', { class: 'ask-box waiting' }, [
+    el('div', { class: 'ask-status' }, [el('span', { class: 'ask-dot' }), el('span', {}, 'Blocked \u2014 needs your permission')]),
+    el('div', { class: 'ask-text' }, `Claude tried to run ${call.toolLabel} and was stopped.`),
+    el('pre', { class: 'block cmd' }, String(input).slice(0, 600)),
+    call.result ? el('div', { class: 'ask-desc' }, String(call.result).slice(0, 400)) : null,
+  ]);
+}
+
 async function openStep(id) {
   state.activeStep = id;
   history.replaceState(null, '', `#${state.sessionId}/${id}/${state.tab}`);
@@ -670,6 +743,12 @@ async function openStep(id) {
     body.innerHTML = '';
 
     if (state.tab === 'detail') {
+      // A decision comes first; everything else about the step can wait.
+      const asks = step.calls.filter((c) => c.tool === 'AskUserQuestion' || c.tool === 'ExitPlanMode');
+      const blocked = step.calls.filter((c) => c.isError && /permission|approve|denied|rejected/i.test(c.result || ''));
+      for (const c of asks) body.append(askView(c));
+      for (const c of blocked) if (!asks.length) body.append(blockedView(c));
+
       const { headline, facts } = plainSummary(step, data.changes);
       body.append(el('div', { class: 'headline' }, headline));
       if (facts.length) {
@@ -933,13 +1012,20 @@ async function sendPrompt() {
   }
   box.value = '';
   box.style.height = '';
+  attachments = [];
+  renderAttachments();
   updateComposer();
   updateComposer();
   paintRun({ status: 'running', busy: true });
   const res = await api('/api/prompt', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ text, mode: $('permMode').value }),
+    body: JSON.stringify({
+      text,
+      mode: $('permMode').value,
+      sessionId: state.sessionId,
+      attachments: attachments.filter((f) => f.path).map((f) => f.path),
+    }),
   }) || { error: 'Lost connection to Orderly Claude.' };
   if (res.error) { box.value = text; growPrompt(); paintRun({ status: 'failed', busy: false, error: res.error }); }
   else paintRun(res);
@@ -950,6 +1036,74 @@ $('stopBtn').onclick = async () => {
   const r = await api('/api/stop', { method: 'POST' });
   if (r) paintRun(r.run);
 };
+/* ---------- attachments ---------- */
+
+let attachments = [];
+
+function renderAttachments() {
+  const box = $('attachList');
+  box.innerHTML = '';
+  box.classList.toggle('hidden', attachments.length === 0);
+  for (const f of attachments) {
+    box.append(el('span', { class: 'attach-chip', title: f.path }, [
+      el('span', { class: 'attach-name' }, f.name),
+      el('span', { class: 'attach-size' }, humanSize(f.size)),
+      el('button', {
+        class: 'attach-drop',
+        title: 'Remove',
+        onclick: () => { attachments = attachments.filter((x) => x !== f); renderAttachments(); },
+      }, '\u00d7'),
+    ]));
+  }
+}
+
+const humanSize = (n) => (n > 1048576 ? `${(n / 1048576).toFixed(1)} MB`
+  : n > 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
+
+/**
+ * The file is written beside the session and Claude is told where it is, so
+ * it reads it with its own tools. Putting the bytes in the prompt would spend
+ * the whole context on the first PDF.
+ */
+async function uploadFiles(fileList) {
+  for (const file of [...fileList]) {
+    const chip = { name: file.name, size: file.size, path: '', uploading: true };
+    attachments.push(chip);
+    renderAttachments();
+    try {
+      const res = await fetch(
+        `/api/upload?name=${encodeURIComponent(file.name)}&session=${encodeURIComponent(state.sessionId)}`,
+        { method: 'POST', body: file },
+      );
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      Object.assign(chip, { name: data.name, path: data.path, size: data.size, uploading: false });
+    } catch (e) {
+      attachments = attachments.filter((x) => x !== chip);
+      alertInline(`Could not attach ${file.name}: ${e.message}`);
+    }
+    renderAttachments();
+  }
+}
+
+$('attachBtn').onclick = () => $('fileInput').click();
+$('fileInput').onchange = (e) => { uploadFiles(e.target.files); e.target.value = ''; };
+
+/* Dropping a file anywhere on the composer attaches it. */
+const composerEl = () => $('composer');
+['dragenter', 'dragover'].forEach((ev) => composerEl().addEventListener(ev, (e) => {
+  e.preventDefault();
+  composerEl().classList.add('dropping');
+}));
+['dragleave', 'drop'].forEach((ev) => composerEl().addEventListener(ev, (e) => {
+  e.preventDefault();
+  if (ev === 'dragleave' && composerEl().contains(e.relatedTarget)) return;
+  composerEl().classList.remove('dropping');
+}));
+composerEl().addEventListener('drop', (e) => {
+  if (e.dataTransfer?.files?.length) uploadFiles(e.dataTransfer.files);
+});
+
 /* ---------- tabs, one per terminal ---------- */
 
 function renderTabs(tabs) {

@@ -10,6 +10,7 @@ export const DATA_DIR = path.join(HOME, '.orderly-claude');
 // Kept so screenshots taken under the previous name are still found.
 const LEGACY_DATA_DIR = path.join(HOME, '.claudenized');
 export const SHOTS_DIR = path.join(DATA_DIR, 'shots');
+export const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 export const INSTANCES_FILE = path.join(DATA_DIR, 'instances.json');
 
 let migrated = false;
@@ -51,7 +52,7 @@ function adoptLegacyData() {
 }
 
 export function ensureDirs() {
-  for (const d of [DATA_DIR, SHOTS_DIR]) fs.mkdirSync(d, { recursive: true });
+  for (const d of [DATA_DIR, SHOTS_DIR, UPLOADS_DIR]) fs.mkdirSync(d, { recursive: true });
   adoptLegacyData();
 }
 
@@ -63,6 +64,11 @@ export function ensureDirs() {
 export function transcriptPathFor(cwd, sessionId) {
   const folder = String(cwd || '').replace(/\//g, '-');
   return path.join(PROJECTS_DIR, folder, `${sessionId}.jsonl`);
+}
+
+/** Where a session's attachments live. */
+export function uploadsFor(sessionId) {
+  return path.join(UPLOADS_DIR, sessionId);
 }
 
 /** Backup file for a file-history entry: ~/.claude/file-history/<session>/<backupFileName> */

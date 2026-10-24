@@ -342,6 +342,19 @@ kbd { font: 11px var(--mono); color: var(--faint); margin-left: 5px; }
 .term-row.new { border-bottom: 1px solid var(--line-soft); font-weight: 500; color: var(--text); }
 .new-session { width: 100%; margin-top: 9px; font-size: 12.5px; }
 
+/* ---------- attachments ---------- */
+.composer.dropping { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.attach-list { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 9px; }
+.attach-chip {
+  display: flex; align-items: center; gap: 8px; font-size: 12.5px;
+  background: var(--raised); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px;
+}
+.attach-name { font-weight: 500; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-size { font: 11px var(--mono); color: var(--faint); }
+.attach-drop { border: 0; background: none; color: var(--faint); cursor: pointer; font-size: 13px; line-height: 1; }
+.attach-drop:hover { color: var(--fail); }
+.attach-btn { font-size: 12.5px; }
+
 /* ---------- slash commands ---------- */
 .cmd-palette {
   position: absolute; bottom: calc(100% + 8px); left: 0; right: 0;
@@ -391,6 +404,34 @@ pre.block.cmd { color: var(--text); }
 .facts { margin: 0 0 16px; padding-left: 18px; color: var(--muted); font-size: 13.5px; }
 .facts li { margin: 4px 0; }
 .hint-line { font-size: 12px; color: var(--faint); border-top: 1px solid var(--line-soft); padding-top: 10px; margin-top: 14px; }
+
+/* what Claude is waiting for */
+.ask-box {
+  border: 1px solid var(--line); border-left: 3px solid var(--t-asked);
+  border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; background: var(--bg);
+}
+.ask-box.waiting { border-left-color: var(--t-ask); background: color-mix(in srgb, var(--t-ask) 5%, transparent); }
+.ask-status {
+  display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em; color: var(--t-asked); margin-bottom: 12px;
+}
+.ask-box.waiting .ask-status { color: var(--t-ask); }
+.ask-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.ask-box.waiting .ask-dot { animation: askPulse 2.4s ease-in-out infinite; }
+.ask-q + .ask-q { margin-top: 18px; border-top: 1px solid var(--line-soft); padding-top: 16px; }
+.ask-header {
+  font-size: 10px; letter-spacing: .09em; text-transform: uppercase; color: var(--faint);
+  margin-bottom: 5px;
+}
+.ask-text { font-size: 15px; font-weight: 600; letter-spacing: -.01em; margin-bottom: 4px; }
+.ask-note { font-size: 12px; color: var(--faint); margin-bottom: 8px; }
+.ask-options { display: flex; flex-direction: column; gap: 7px; margin-top: 11px; }
+.ask-option { border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; }
+.ask-option.picked { border-color: var(--t-asked); background: color-mix(in srgb, var(--t-asked) 9%, transparent); }
+.ask-label { display: flex; align-items: baseline; gap: 8px; font-size: 13.5px; font-weight: 500; }
+.ask-mark { width: 12px; color: var(--t-asked); font-weight: 700; flex: none; }
+.ask-desc { font-size: 12.5px; color: var(--muted); margin-top: 3px; padding-left: 20px; }
+.ask-own { margin-top: 9px; font-size: 13px; color: var(--text); }
 
 /* diffs */
 .file { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 14px; }
