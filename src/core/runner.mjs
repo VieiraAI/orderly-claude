@@ -34,7 +34,7 @@ export class Runner extends EventEmitter {
 
   get busy() { return this.proc !== null; }
 
-  run({ sessionId, text, mode = DEFAULT_MODE, fresh = false }) {
+  run({ sessionId, text, mode = DEFAULT_MODE, fresh = false, readDir = null }) {
     if (this.busy) throw new Error('Claude is already working on this session');
     if (!text || !text.trim()) throw new Error('empty prompt');
     const permission = MODES.has(mode) ? mode : DEFAULT_MODE;
@@ -42,6 +42,8 @@ export class Runner extends EventEmitter {
     const args = [];
     // A session that does not exist yet is named, not resumed.
     if (sessionId) args.push(fresh ? '--session-id' : '--resume', sessionId);
+    // Attachments live outside the project, so the directory has to be granted.
+    if (readDir) args.push('--add-dir', readDir);
     args.push(
       '-p', text,
       '--output-format', 'stream-json',

@@ -70,9 +70,14 @@ transcript leaves your machine, and it works on sessions that already happened.
   reader, so a background tab shows a green dot while it works and a count
   of what you have not looked at. Switching is instant, and the timeline,
   screenshots and composer all follow the tab in front.
+- **Attach files.** Drop a document on the composer or use Attach. The file
+  is written beside the session and its path handed to Claude, which reads it
+  with its own tools — the bytes never go into the prompt, so a PDF does not
+  cost you the context window.
 - **Prompt without a terminal.** Send Claude a prompt from the page; it
   resumes the session you are watching and the bubbles fill in as it works.
-  Enter sends, Shift+Enter starts a new line, and the box grows with it.
+  Enter sends, Shift+Enter starts a new line, and the box grows with it. Each
+  tab runs on its own, so a prompt in one never waits behind another.
 
 ## Install
 
