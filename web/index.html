@@ -20,6 +20,7 @@
   <div class="actions">
     <button id="devUrl" class="pill" title="What the before/after screenshots point at">—</button>
     <input id="devUrlInput" class="pill-input hidden" placeholder="http://localhost:3000" spellcheck="false">
+    <button id="updateHint" class="btn update-hint hidden" title="The interface changed on disk">Update ready — reload</button>
     <button id="themeBtn" class="btn ghost" title="Light / dark">◐</button>
     <button id="searchBtn" class="btn">Search <kbd>⌘F</kbd></button>
   </div>
@@ -57,8 +58,11 @@
     <div class="composer" id="composer">
       <div id="cmdPalette" class="cmd-palette hidden"></div>
       <div id="cmdChip" class="cmd-chip hidden"></div>
+      <div id="attachList" class="attach-list hidden"></div>
       <textarea id="promptInput" rows="2" placeholder="Ask Claude to do something — no terminal needed"></textarea>
       <div class="composer-row">
+        <button id="attachBtn" class="btn attach-btn" title="Attach a file for Claude to read">Attach</button>
+        <input type="file" id="fileInput" multiple class="hidden">
         <select id="permMode" title="What Claude may do without asking">
           <option value="acceptEdits">accept edits</option>
           <option value="plan">plan only</option>

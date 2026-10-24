@@ -40,9 +40,13 @@ export function loadShots(sessionId) {
       const before = resolveShot(sessionId, pair.before);
       const after = resolveShot(sessionId, pair.after);
       if (!before && !after) continue;
-      // Pairs stored before this field existed get it computed on the way in.
+      // Pairs stored before these fields existed get them worked out on the
+      // way in, rather than being dropped.
       const changed = pair.changed ?? shotsDiffer(before, after);
-      out[stepId] = { before, after, changed };
+      const spanMs = pair.spanMs ?? (before?.at && after?.at
+        ? Math.max(0, Date.parse(after.at) - Date.parse(before.at))
+        : 0);
+      out[stepId] = { before, after, changed, spanMs };
     }
     return out;
   } catch { return {}; }

@@ -35,6 +35,9 @@ export class SessionWatcher extends EventEmitter {
     this.lastGrowthAt = Date.now();
     this.unread = 0;
     this.focused = false;
+    this.captureQueue = [];
+    // Long enough for a dev server to rebuild before the picture is taken.
+    this.settleMs = 1200;
   }
 
   async start() {
@@ -189,28 +192,69 @@ export class SessionWatcher extends EventEmitter {
     if (!this.focused) this.unread += fresh.length;
     this.emit('update', { newSteps: fresh.map((s) => s.id), sessionId: this.sessionId });
 
-    const changed = fresh.filter((s) => s.kind === 'change' && s.status !== 'failed');
-    if (changed.length) this.queueCapture(changed[changed.length - 1]);
+    // Every change gets its own pair. Capturing only the last of a burst
+    // made one pair stand for several steps, with a "before" from minutes
+    // earlier that showed none of them.
+    for (const s of fresh) {
+      if (s.kind === 'change' && s.status !== 'failed') this.enqueueCapture(s);
+    }
   }
 
-  /** One capture at a time; the result becomes the next step's "before". */
-  async queueCapture(step) {
-    if (!this.capture || !this.devUrl || this.capturing) return;
+  /**
+   * Queue a capture rather than drop it.
+   *
+   * Dropping while another was in flight left most steps with no shot at all,
+   * and the chain then paired a change against a picture from long before it.
+   * A burst is trimmed to the most recent few so a flurry of edits cannot put
+   * the camera minutes behind the work.
+   */
+  enqueueCapture(step) {
+    if (!this.capture) return;
+    this.captureQueue.push(step);
+    if (this.captureQueue.length > 3) {
+      this.captureQueue.splice(0, this.captureQueue.length - 3);
+    }
+    this.drainCaptures().catch((e) => this.emit('log', `capture failed: ${e.message}`));
+  }
+
+  async drainCaptures() {
+    if (this.capturing) return;
     this.capturing = true;
     try {
+      while (this.captureQueue.length && this.devUrl) {
+        await this.captureStep(this.captureQueue.shift());
+      }
+    } finally {
+      this.capturing = false;
+    }
+  }
+
+  /** One pair: the previous shot, and this step's, taken once a rebuild lands. */
+  async captureStep(step) {
+    try {
+      // A dev server rebuilds after the edit. Shooting the instant the step
+      // appears photographed the old page, so the pair looked unchanged.
+      await new Promise((r) => setTimeout(r, this.settleMs));
       const after = await captureFor(this.sessionId, step.id, 'after', this.devUrl);
       if (after) {
         const before = this.lastShot || null;
-        this.shots[step.id] = { before, after, changed: shotsDiffer(before, after) };
+        const spanMs = before ? Date.parse(after.at) - Date.parse(before.at) : 0;
+        this.shots[step.id] = {
+          before,
+          after,
+          changed: shotsDiffer(before, after),
+          // How much work sits between the two pictures, so the panel can say
+          // when a pair covers more than the one step.
+          spanMs: spanMs > 0 ? spanMs : 0,
+        };
         saveShots(this.sessionId, this.shots);
         this.lastShot = after;
         this.attachShots();
         this.emit('update', { shot: step.id });
       }
     } catch (e) {
+      // One failed shot must not end the drain; the queue owns the lock.
       this.emit('log', `capture failed: ${e.message}`);
-    } finally {
-      this.capturing = false;
     }
   }
 }

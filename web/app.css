@@ -100,6 +100,12 @@ kbd { font: 11px var(--mono); color: var(--faint); margin-left: 5px; }
 .top .btn { color: rgba(255,255,255,.72); border-color: rgba(255,255,255,.16); }
 .top .btn:hover { color: var(--pure-white); border-color: rgba(255,255,255,.34); }
 .top kbd { color: rgba(255,255,255,.4); }
+/* An update is waiting because someone is mid-sentence; offer, do not take. */
+.update-hint {
+  color: var(--deep-black); background: var(--t-fix); border-color: var(--t-fix);
+  font-size: 12px; font-weight: 500;
+}
+.top .update-hint:hover { color: var(--deep-black); border-color: var(--t-fix); opacity: .9; }
 .top .pill { color: rgba(255,255,255,.6); border-color: rgba(255,255,255,.16); cursor: pointer; background: none; }
 .top .pill:hover { color: var(--pure-white); border-color: rgba(255,255,255,.35); }
 .pill-input {
@@ -187,6 +193,12 @@ kbd { font: 11px var(--mono); color: var(--faint); margin-left: 5px; }
   border-radius: 9px; padding: 10px 12px; overflow-x: auto; margin: 0 0 10px; white-space: pre;
 }
 .msg-text.md strong { font-weight: 600; }
+.msg-text.md .md-h {
+  font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--text);
+  margin: 16px 0 7px;
+}
+.msg-text.md .md-h:first-child { margin-top: 0; }
+.msg-text.md h5.md-h, .msg-text.md h6.md-h { font-size: 13.5px; color: var(--muted); }
 .msg-text.said { color: var(--text); }
 .msg-text.summary { color: var(--muted); margin-top: 14px; }
 .msg-text.clamp { max-height: 300px; overflow: auto; }
@@ -336,6 +348,19 @@ kbd { font: 11px var(--mono); color: var(--faint); margin-left: 5px; }
 .term-row.new { border-bottom: 1px solid var(--line-soft); font-weight: 500; color: var(--text); }
 .new-session { width: 100%; margin-top: 9px; font-size: 12.5px; }
 
+/* ---------- attachments ---------- */
+.composer.dropping { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.attach-list { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 9px; }
+.attach-chip {
+  display: flex; align-items: center; gap: 8px; font-size: 12.5px;
+  background: var(--raised); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px;
+}
+.attach-name { font-weight: 500; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-size { font: 11px var(--mono); color: var(--faint); }
+.attach-drop { border: 0; background: none; color: var(--faint); cursor: pointer; font-size: 13px; line-height: 1; }
+.attach-drop:hover { color: var(--fail); }
+.attach-btn { font-size: 12.5px; }
+
 /* ---------- slash commands ---------- */
 .cmd-palette {
   position: absolute; bottom: calc(100% + 8px); left: 0; right: 0;
@@ -385,6 +410,40 @@ pre.block.cmd { color: var(--text); }
 .facts { margin: 0 0 16px; padding-left: 18px; color: var(--muted); font-size: 13.5px; }
 .facts li { margin: 4px 0; }
 .hint-line { font-size: 12px; color: var(--faint); border-top: 1px solid var(--line-soft); padding-top: 10px; margin-top: 14px; }
+
+/* what Claude is waiting for */
+.ask-box {
+  border: 1px solid var(--line); border-left: 3px solid var(--t-asked);
+  border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; background: var(--bg);
+}
+.ask-box.waiting { border-left-color: var(--t-ask); background: color-mix(in srgb, var(--t-ask) 5%, transparent); }
+/* The ask itself, stated before any of the detail under it. */
+.ask-need {
+  font-size: 17px; font-weight: 700; line-height: 1.4; letter-spacing: -.015em;
+  color: var(--text); margin-bottom: 9px;
+}
+.ask-box.waiting .ask-need { color: var(--t-ask); }
+.ask-status {
+  display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em; color: var(--t-asked); margin-bottom: 14px;
+}
+.ask-box.waiting .ask-status { color: var(--t-ask); }
+.ask-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.ask-box.waiting .ask-dot { animation: askPulse 2.4s ease-in-out infinite; }
+.ask-q + .ask-q { margin-top: 18px; border-top: 1px solid var(--line-soft); padding-top: 16px; }
+.ask-header {
+  font-size: 10px; letter-spacing: .09em; text-transform: uppercase; color: var(--faint);
+  margin-bottom: 5px;
+}
+.ask-text { font-size: 15px; font-weight: 600; letter-spacing: -.01em; margin-bottom: 4px; }
+.ask-note { font-size: 12px; color: var(--faint); margin-bottom: 8px; }
+.ask-options { display: flex; flex-direction: column; gap: 7px; margin-top: 11px; }
+.ask-option { border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; }
+.ask-option.picked { border-color: var(--t-asked); background: color-mix(in srgb, var(--t-asked) 9%, transparent); }
+.ask-label { display: flex; align-items: baseline; gap: 8px; font-size: 13.5px; font-weight: 500; }
+.ask-mark { width: 12px; color: var(--t-asked); font-weight: 700; flex: none; }
+.ask-desc { font-size: 12.5px; color: var(--muted); margin-top: 3px; padding-left: 20px; }
+.ask-own { margin-top: 9px; font-size: 13px; color: var(--text); }
 
 /* diffs */
 .file { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 14px; }
@@ -441,7 +500,17 @@ pre.block.cmd { color: var(--text); }
 .sbs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .shot { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
 .shot img { display: block; width: 100%; }
-.shot .cap { font-size: 11px; color: var(--faint); padding: 6px 9px; border-top: 1px solid var(--line-soft); }
+.shot .cap {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 11px; color: var(--faint); padding: 6px 9px; border-top: 1px solid var(--line-soft);
+}
+.cap-at { font-family: var(--mono); }
+/* When a pair cannot be trusted to bracket one step, say so. */
+.pair-note {
+  font-size: 12.5px; color: var(--warn); margin-bottom: 10px;
+  border-left: 2px solid var(--warn); padding-left: 10px;
+}
+.pair-note.quiet { color: var(--muted); border-left-color: var(--line); }
 .slider {
   position: relative; border: 1px solid var(--line); border-radius: 9px;
   overflow: hidden; user-select: none; touch-action: none; cursor: ew-resize;
