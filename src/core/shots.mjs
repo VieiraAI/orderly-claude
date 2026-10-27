@@ -46,7 +46,16 @@ export function loadShots(sessionId) {
       const spanMs = pair.spanMs ?? (before?.at && after?.at
         ? Math.max(0, Date.parse(after.at) - Date.parse(before.at))
         : 0);
-      out[stepId] = { before, after, changed, spanMs };
+      out[stepId] = {
+        before, after, changed, spanMs,
+        // Pairs measured in pixels carry where and how much; older ones were
+        // only ever compared as bytes and say so by leaving these empty.
+        ratio: pair.ratio ?? null,
+        percent: pair.percent ?? null,
+        box: pair.box ?? null,
+        wholePage: pair.wholePage ?? false,
+        compared: pair.compared ?? false,
+      };
     }
     return out;
   } catch { return {}; }

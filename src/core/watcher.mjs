@@ -3,8 +3,9 @@ import { EventEmitter } from 'node:events';
 import { readRecords } from './jsonl.mjs';
 import { buildSession } from './steps.mjs';
 import { buildFileHistory } from './filehistory.mjs';
-import { detectDevServer, captureFor } from './capture.mjs';
+import { detectDevServer, captureFor, comparePair } from './capture.mjs';
 import { loadShots, saveShots, shotsDiffer } from './shots.mjs';
+import { shouldCapture, readComparison } from './visual.mjs';
 
 /**
  * Tails one session transcript and keeps a live model of it.
@@ -14,12 +15,21 @@ import { loadShots, saveShots, shotsDiffer } from './shots.mjs';
  * know in advance that a step was about to start.
  */
 export class SessionWatcher extends EventEmitter {
-  constructor(file, { sessionId, capture = true, pollMs = 700, projectDir = null } = {}) {
+  constructor(file, {
+    sessionId, capture = true, pollMs = 700, projectDir = null,
+    selfPort = null, origin = null,
+  } = {}) {
     super();
     this.file = file;
     this.sessionId = sessionId;
     this.capture = capture;
     this.projectDir = projectDir;
+    // Our own port, so this viewer is never mistaken for the app under work,
+    // and our own origin, which the pixel comparison runs on.
+    this.selfPort = selfPort;
+    this.origin = origin;
+    // stepId -> why no picture was taken, so the panel can say so plainly.
+    this.captureSkips = {};
     this.pinnedUrl = null;
     this.pollMs = pollMs;
     this.records = [];
@@ -130,7 +140,12 @@ export class SessionWatcher extends EventEmitter {
 
   attachShots() {
     for (const t of this.session.turns) {
-      for (const s of t.steps) s.shots = this.shots[s.id] || null;
+      for (const s of t.steps) {
+        s.shots = this.shots[s.id] || null;
+        // Why there is no picture matters as much as the picture: "a test"
+        // is an answer, an empty panel is not.
+        s.noCapture = s.shots ? null : (this.captureSkips[s.id] || null);
+      }
     }
   }
 
@@ -192,12 +207,28 @@ export class SessionWatcher extends EventEmitter {
     if (!this.focused) this.unread += fresh.length;
     this.emit('update', { newSteps: fresh.map((s) => s.id), sessionId: this.sessionId });
 
-    // Every change gets its own pair. Capturing only the last of a burst
-    // made one pair stand for several steps, with a "before" from minutes
-    // earlier that showed none of them.
+    // Every change that could have altered the picture gets its own pair.
+    // Photographing the rest produced pairs that showed nothing and buried
+    // the ones that did.
     for (const s of fresh) {
-      if (s.kind === 'change' && s.status !== 'failed') this.enqueueCapture(s);
+      if (s.status === 'failed') continue;
+      // Deciding must never cost a step. If the rule throws, fall back to the
+      // old behaviour — photograph the change — rather than skip it silently.
+      let verdict;
+      try {
+        verdict = shouldCapture(s, {
+          projectDir: this.projectDir,
+          devUrl: this.devUrl,
+          selfPort: this.selfPort,
+        });
+      } catch (e) {
+        this.emit('log', `capture rule failed: ${e.message}`);
+        verdict = { capture: s.kind === 'change' };
+      }
+      if (verdict.capture) this.enqueueCapture(s);
+      else this.captureSkips[s.id] = verdict.reason;
     }
+    this.attachShots();
   }
 
   /**
@@ -239,10 +270,26 @@ export class SessionWatcher extends EventEmitter {
       if (after) {
         const before = this.lastShot || null;
         const spanMs = before ? Date.parse(after.at) - Date.parse(before.at) : 0;
+
+        // Count pixels rather than bytes, and keep where they moved so the
+        // panel can show the part that changed instead of the whole page.
+        let diff = null;
+        if (before && this.origin) {
+          const raw = await comparePair(this.origin, before.file, after.file);
+          if (raw) diff = readComparison(raw);
+        }
+
         this.shots[step.id] = {
           before,
           after,
-          changed: shotsDiffer(before, after),
+          // Fall back to the byte check only when pixels could not be read,
+          // so a failed comparison is never reported as "no change".
+          changed: diff ? diff.changed : shotsDiffer(before, after),
+          ratio: diff?.ratio ?? null,
+          percent: diff?.percent ?? null,
+          box: diff?.box ?? null,
+          wholePage: diff?.wholePage ?? false,
+          compared: !!diff,
           // How much work sits between the two pictures, so the panel can say
           // when a pair covers more than the one step.
           spanMs: spanMs > 0 ? spanMs : 0,

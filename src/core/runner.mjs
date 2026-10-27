@@ -118,6 +118,9 @@ export class Runner extends EventEmitter {
     return {
       status: this.status,
       busy: this.busy,
+      // How long this run has been going. A run that started a dev server
+      // never ends, so the number matters more than the flag.
+      runningMs: this.busy && this.startedAt ? Date.now() - Date.parse(this.startedAt) : 0,
       error: this.lastError,
       startedAt: this.startedAt,
       prompt: this.prompt,

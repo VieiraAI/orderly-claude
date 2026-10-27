@@ -137,10 +137,11 @@ function bubble(step) {
   // A decision is the thing worth seeing first, so it leads the row.
   if (tone === 'ask') tags.push(el('span', { class: 'tag ask' }, 'needs you'));
   else if (tone === 'asked') tags.push(el('span', { class: 'tag asked' }, 'you decided'));
-  if (step.hasShots) {
-    tags.push(step.visualChanged
-      ? el('span', { class: 'tag shot' }, 'before & after')
-      : el('span', { class: 'tag' }, 'no visible change'));
+  // Only a picture worth opening earns a tag. A step that changed nothing
+  // visible, or could not have, says so in the panel rather than on the row.
+  if (step.hasShots && step.visualChanged) {
+    tags.push(el('span', { class: 'tag shot' },
+      step.changedPercent ? `before & after · ${step.changedPercent}%` : 'before & after'));
   }
   if (step.emergent && step.status === 'warn') tags.push(el('span', { class: 'tag emergent' }, 'unplanned'));
 
@@ -608,9 +609,60 @@ function compareView(shots) {
   });
   setPos(50);
 
-  const bSbs = el('button', { class: 'btn', onclick: () => { sbs.classList.remove('hidden'); slider.classList.add('hidden'); } }, 'side by side');
-  const bSwipe = el('button', { class: 'btn', onclick: () => { sbs.classList.add('hidden'); slider.classList.remove('hidden'); } }, 'swipe');
-  wrap.append(el('div', { class: 'compare-controls' }, [bSbs, bSwipe]), sbs, slider);
+  /*
+   * The part that actually moved.
+   *
+   * Two near-identical full pages side by side is the complaint this answers:
+   * when the comparison found a region, both frames are scaled up and shifted
+   * so that region fills the frame, and you are looking at the change rather
+   * than hunting for it.
+   */
+  const box = shots.box;
+  let zoom = null;
+  const placers = [];
+  if (box && box.w > 0 && box.h > 0 && !shots.wholePage) {
+    const pane = (file, label) => {
+      const inner = el('img', { src: src(file), class: 'zoom-img' });
+      const frame = el('div', { class: 'zoom-frame' }, inner);
+      /*
+       * The stored region is in the image's own pixels, so placing it needs
+       * both the natural size and the width on screen. Neither is known while
+       * the panel is still being assembled — an element not yet in the
+       * document measures zero — so this runs again when the view is shown.
+       */
+      const place = () => {
+        if (!inner.naturalWidth) return;
+        const width = frame.clientWidth || 280;
+        const scale = Math.min(6, Math.max(1, width / box.w));
+        inner.style.width = `${inner.naturalWidth * scale}px`;
+        inner.style.marginLeft = `${-box.x * scale}px`;
+        inner.style.marginTop = `${-box.y * scale}px`;
+        frame.style.height = `${Math.min(420, Math.max(80, box.h * scale))}px`;
+      };
+      inner.onload = place;
+      placers.push(place);
+      return el('div', { class: 'shot' }, [frame, el('div', { class: 'cap' }, label)]);
+    };
+    zoom = el('div', { class: 'sbs hidden' }, [pane(shots.before, 'before'), pane(shots.after, 'after')]);
+  }
+
+  const show = (which) => {
+    sbs.classList.toggle('hidden', which !== 'sbs');
+    slider.classList.toggle('hidden', which !== 'swipe');
+    if (zoom) zoom.classList.toggle('hidden', which !== 'zoom');
+    // Measure once it is on screen and has a width to measure.
+    if (which === 'zoom') requestAnimationFrame(() => placers.forEach((p) => p()));
+  };
+
+  const controls = [];
+  if (zoom) controls.push(el('button', { class: 'btn', onclick: () => show('zoom') }, 'what changed'));
+  controls.push(el('button', { class: 'btn', onclick: () => show('sbs') }, 'side by side'));
+  controls.push(el('button', { class: 'btn', onclick: () => show('swipe') }, 'swipe'));
+
+  wrap.append(el('div', { class: 'compare-controls' }, controls), sbs, slider);
+  if (zoom) wrap.append(zoom);
+  // Open on the change itself when there is one to open on.
+  show(zoom ? 'zoom' : 'sbs');
   return wrap;
 }
 
@@ -814,10 +866,23 @@ async function openStep(id) {
     }
 
     if (state.tab === 'visual') {
+      if (data.shots?.percent) {
+        body.append(el('div', { class: 'headline' },
+          data.shots.wholePage
+            ? `The page changed throughout — ${data.shots.percent}% of it differs.`
+            : `${data.shots.percent}% of the page changed.`));
+      }
       const v = compareView(data.shots);
       if (v) body.append(v);
-      else body.append(el('div', { class: 'note' },
-        'No screenshots for this step. Orderly Claude captures them automatically when a dev server is running — start your app and the next change will have a before/after.'));
+      else if (data.step?.noCapture) {
+        // Say why rather than leaving an empty panel: a step that could not
+        // have changed the picture is an answer, not a gap.
+        body.append(el('div', { class: 'headline' }, 'No picture for this step.'));
+        body.append(el('div', { class: 'note' }, `Nothing was captured because ${data.step.noCapture}.`));
+      } else {
+        body.append(el('div', { class: 'note' },
+          'No screenshots for this step. Orderly Claude photographs the app around changes that could alter what it draws — start your app and the next such change will have a before and after.'));
+      }
     }
 
     if (state.tab === 'thinking') {
@@ -1033,14 +1098,35 @@ function paintRun(run) {
   state.run = run || { status: 'idle', busy: false };
   const busy = !!state.run.busy;
   $('composer').classList.toggle('busy', busy);
-  $('sendBtn').disabled = busy;
-  $('sendBtn').textContent = busy ? 'Working…' : 'Send';
+  /*
+   * Sending is never blocked.
+   *
+   * A run that started a dev server does not finish — the command holds the
+   * process open for as long as the server runs — so disabling the button
+   * while "working" left no way to say anything ever again. A new prompt
+   * replaces the run instead, which is what pressing Enter in a terminal
+   * would have done anyway.
+   */
+  $('sendBtn').disabled = false;
+  $('sendBtn').textContent = busy ? 'Stop & send' : 'Send';
+  $('sendBtn').title = busy
+    ? 'Stops what is running in this session and sends this instead'
+    : '';
   $('stopBtn').classList.toggle('hidden', !busy);
 
   const label = $('runState');
   label.innerHTML = '';
   if (busy) {
-    label.append(el('span', { class: 'spin' }), el('span', {}, 'Claude is working'));
+    const secs = Math.round((state.run.runningMs || 0) / 1000);
+    const forHow = secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`;
+    label.append(
+      el('span', { class: 'spin' }),
+      el('span', {}, secs > 2 ? `Claude is working · ${forHow}` : 'Claude is working'),
+    );
+    // Long enough that it is probably holding a server open rather than thinking.
+    if (secs > 120) {
+      label.append(el('span', { class: 'run-hint' }, 'still running — sending will replace it'));
+    }
   } else if (state.run.status === 'stopped') {
     label.append(el('span', {}, 'stopped'));
   }
@@ -1053,13 +1139,19 @@ function paintRun(run) {
 async function sendPrompt() {
   const box = $('promptInput');
   const text = box.value.trim();
-  if (!text || state.run?.busy) return;
+  // Only an empty box stops a send. A run in progress is replaced, not a reason
+  // to refuse — see paintRun.
+  if (!text) return;
   if (!state.live) {
     // Prompting resumes whichever session is open here, so follow it first.
     $('runError').textContent = 'Switch to the live session before sending.';
     $('runError').classList.remove('hidden');
     return;
   }
+  // Read the attachments before the box is cleared; clearing first meant the
+  // list was always empty by the time the request was built, so a file
+  // attached in the page never reached Claude.
+  const attached = attachments.filter((f) => f.path).map((f) => f.path);
   box.value = '';
   box.style.height = '';
   attachments = [];
@@ -1076,7 +1168,9 @@ async function sendPrompt() {
       text,
       mode: $('permMode').value,
       sessionId: state.sessionId,
-      attachments: attachments.filter((f) => f.path).map((f) => f.path),
+      attachments: attached,
+      // Replace whatever is running in this session rather than be refused.
+      replace: true,
     }),
   }) || { error: 'Lost connection to Orderly Claude.' };
   if (res.error) { box.value = text; growPrompt(); paintRun({ status: 'failed', busy: false, error: res.error }); }
@@ -1085,7 +1179,12 @@ async function sendPrompt() {
 
 $('sendBtn').onclick = sendPrompt;
 $('stopBtn').onclick = async () => {
-  const r = await api('/api/stop', { method: 'POST' });
+  const r = await api('/api/stop', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    // Stop the session being looked at, not whichever the server last ran.
+    body: JSON.stringify({ sessionId: state.sessionId }),
+  });
   if (r) paintRun(r.run);
 };
 /* ---------- attachments ---------- */
@@ -1623,4 +1722,15 @@ window.__cz = {
   /* The word for a voice, independent of whether a stall is being reported. */
   sample(v) { state.voice = v; advanceVoice(); return asVocab(currentTerm()); },
   setVoice(v) { state.voice = v; advanceVoice(); return vocabText(); },
+  /* Paint a run state and report what the composer does with it. */
+  showRun(run) {
+    paintRun(run);
+    const out = {
+      disabled: $('sendBtn').disabled,
+      label: $('sendBtn').textContent,
+      note: $('runState').textContent.trim(),
+    };
+    paintRun({ status: 'idle', busy: false });
+    return out;
+  },
 };
