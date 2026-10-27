@@ -75,6 +75,8 @@ function light(session) {
         fileCount: s.files.length,
         hasShots: !!(s.shots?.after),
         visualChanged: !!(s.shots?.changed),
+        changedPercent: s.shots?.percent ?? null,
+        noCapture: s.noCapture || null,
         needsUser: !!s.needsUser,
         userResolved: !!s.userResolved,
         hasThinking: (s.thinking || []).length > 0,
@@ -164,6 +166,9 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
     if (watchers.has(id)) return watchers.get(id);
     const w = new SessionWatcher(meta.file, {
       sessionId: id, capture: capture && id === liveId, projectDir: meta.cwd || cwd,
+      // So the viewer is never photographed as though it were the work, and
+      // so pixel comparisons can be run on this server's own origin.
+      selfPort: port, origin: `http://127.0.0.1:${port}`,
     });
     w.on('update', (d) => broadcast('update', { ...(d || {}), sessionId: id }));
     w.on('log', (m) => broadcast('log', { message: m, sessionId: id }));
@@ -336,6 +341,20 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
             ? `${body.text}\n\nAttached ${files.length === 1 ? 'file' : 'files'}:\n`
               + files.map((f) => `- ${f}`).join('\n')
             : body.text;
+          /*
+           * A run that started a dev server never ends: the command holds the
+           * process open, so the run stays "working" for as long as the server
+           * lives. Refusing every later prompt because of that leaves the
+           * composer dead with no way back, so a new prompt replaces the run
+           * instead of being turned away.
+           */
+          if (runnerFor(target).busy) {
+            if (body.replace === false) {
+              return send(409, { error: 'Claude is already working in this session' });
+            }
+            runnerFor(target).stop();
+          }
+
           const started = runnerFor(target).run({
             sessionId: target, text, mode: body.mode, fresh: freshTabs.has(target),
             readDir: files.length ? uploadsFor(target) : null,
@@ -467,9 +486,9 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         const body = await readBody(req);
         const target = listSessions().find((s) => s.sessionId === body.sessionId);
         if (!target) return send(404, { error: 'session not found' });
-        if (runnerFor(target.sessionId).busy) {
-          return send(409, { error: 'Claude is working in that session; stop it first' });
-        }
+        // Watching a session that is working is the normal case — it is the
+        // whole point. Each session has its own runner, so nothing is shared
+        // and nothing needs stopping first.
         await openTab(target.sessionId, target);
         await focusTab(target.sessionId);
         broadcast('session', { sessionId: target.sessionId, switched: true });

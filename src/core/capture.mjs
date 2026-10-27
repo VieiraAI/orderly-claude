@@ -5,6 +5,7 @@ import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { SHOTS_DIR } from './paths.mjs';
 import { CDP, httpJSON } from './cdp.mjs';
+import { comparePairInPage } from './visual.mjs';
 
 const CHROME_CANDIDATES = [
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -186,6 +187,36 @@ class Browser {
       try { await cdp.send('Target.closeTarget', { targetId }); } catch {}
     }
   }
+
+  /**
+   * Run a script on a blank page of our own origin.
+   *
+   * Reading pixels back from a canvas is refused once a `file://` image has
+   * been drawn onto it, so the images are fetched over this server instead,
+   * from the same origin as the page. The alternative is launching the
+   * browser with file access turned on, which is a larger hole than this
+   * needs.
+   */
+  async evaluateOnOrigin(origin, expression, { timeout = 20000 } = {}) {
+    const cdp = await this.ensure();
+    this.touchIdle();
+    const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+    try {
+      const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+      await cdp.send('Page.enable', {}, sessionId);
+      await cdp.send('Page.navigate', { url: `${origin}/blank.html` }, sessionId);
+      await cdp.once('Page.loadEventFired', sessionId, timeout);
+      const res = await cdp.send(
+        'Runtime.evaluate',
+        { expression, awaitPromise: true, returnByValue: true },
+        sessionId,
+      );
+      if (res.exceptionDetails) throw new Error(res.exceptionDetails.text || 'evaluation failed');
+      return res.result?.value;
+    } finally {
+      try { await cdp.send('Target.closeTarget', { targetId }); } catch {}
+    }
+  }
 }
 
 const browser = new Browser();
@@ -202,6 +233,30 @@ export async function screenshot(url, outFile, opts = {}) {
 
 export function shotPath(sessionId, stepId, which) {
   return path.join(SHOTS_DIR, sessionId, `${stepId}-${which}.png`);
+}
+
+/**
+ * How much of the picture actually changed, and where.
+ *
+ * Comparing bytes said 71% of pairs had changed when almost none of them had
+ * anything a person would notice: a page that redraws itself differs every
+ * time. Counting pixels answers the question that was being asked.
+ *
+ * Returns null when the comparison could not be made, so the caller can fall
+ * back rather than treat a failure as "no change".
+ */
+export async function comparePair(origin, beforeFile, afterFile, opts = {}) {
+  if (!origin || !beforeFile || !afterFile) return null;
+  const asUrl = (f) => `${origin}/api/shot?f=${encodeURIComponent(f)}`;
+  try {
+    const raw = await browser.evaluateOnOrigin(
+      origin,
+      comparePairInPage(asUrl(beforeFile), asUrl(afterFile), opts),
+    );
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch {
+    return null;
+  }
 }
 
 export async function captureFor(sessionId, stepId, which, url, opts = {}) {

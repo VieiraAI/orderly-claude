@@ -21,6 +21,7 @@ import { screenshot, shutdownBrowser, findChrome, listeningServers } from '../sr
 import { loadShots } from '../src/core/shots.mjs';
 import { SessionWatcher } from '../src/core/watcher.mjs';
 import { listTerminals } from '../src/core/terminals.mjs';
+import { rendersInto, shouldCapture, readComparison, attribution, NOISE_FLOOR } from '../src/core/visual.mjs';
 import { TERMS, CATEGORIES, createRotation, find, byCategory } from '../web/genz.mjs';
 import { fileURLToPath } from 'node:url';
 import { CDP, httpJSON } from '../src/core/cdp.mjs';
@@ -143,6 +144,11 @@ const VOCAB_PROBE = `(() => {
   for (const v of ['genz', 'plain', 'booth']) out[v] = window.__cz.sample(v);
   window.__cz.setVoice('genz');
   out.title = window.__cz.liveTitle();
+  // A dev server started by Claude keeps a run open indefinitely; the
+  // composer must stay usable through it.
+  out.idle = window.__cz.showRun({ status: 'idle', busy: false });
+  out.working = window.__cz.showRun({ status: 'running', busy: true, runningMs: 4000 });
+  out.longRun = window.__cz.showRun({ status: 'running', busy: true, runningMs: 400000 });
   out.stalled = window.__cz.isStalled();
   out.displayed = window.__cz.vocabText();
   return JSON.stringify(out);
@@ -459,6 +465,72 @@ async function main() {
   check('the command is on the package', !!manifest.bin?.orderly, JSON.stringify(manifest.bin));
   check('the entry point exists', fs.existsSync(path.join(repoRoot, manifest.bin.orderly)));
 
+  console.log('\nWhat deserves a picture\n');
+
+  /*
+   * Measured on 509 real captures: 382 photographed this viewer's own page,
+   * which redraws as the conversation grows, so a byte comparison called 71%
+   * of pairs "changed" while almost none showed anything. These checks hold
+   * the rules that replaced that.
+   */
+  const APP = '/work/site';
+  const draws = (f) => rendersInto(f, APP).renders;
+
+  check('a stylesheet draws', draws(`${APP}/src/app.css`));
+  check('a component draws', draws(`${APP}/src/Hero.tsx`));
+  check('markup draws', draws(`${APP}/index.html`));
+  check('an image draws', draws(`${APP}/public/logo.png`));
+  check('build configuration draws', draws(`${APP}/vite.config.ts`));
+  check('a test does not draw', !draws(`${APP}/src/Hero.test.tsx`));
+  check('a test folder does not draw', !draws(`${APP}/tests/e2e/home.ts`));
+  check('a readme does not draw', !draws(`${APP}/README.md`));
+  check('a lockfile does not draw', !draws(`${APP}/package-lock.json`));
+  check('vendored code does not draw', !draws(`${APP}/node_modules/x/index.js`));
+  check('build output does not draw', !draws(`${APP}/dist/bundle.js`));
+  check('a file outside the app does not draw', !draws('/elsewhere/other.css'));
+  check('prose in a content folder does draw', draws(`${APP}/src/content/post.md`));
+  check('prose outside one does not', !draws(`${APP}/notes.md`));
+  check('a refusal explains itself',
+    (rendersInto(`${APP}/README.md`, APP).reason || '').length > 3,
+    rendersInto(`${APP}/README.md`, APP).reason);
+
+  const stepWith = (files, kind = 'change') => ({ kind, files: files.map((path) => ({ path })) });
+  const DEV = 'http://localhost:3000';
+
+  check('a step touching the stylesheet is photographed',
+    shouldCapture(stepWith([`${APP}/src/app.css`]), { projectDir: APP, devUrl: DEV, selfPort: 7788 }).capture);
+  check('a step touching only tests is not',
+    !shouldCapture(stepWith([`${APP}/src/a.test.ts`]), { projectDir: APP, devUrl: DEV, selfPort: 7788 }).capture);
+  check('a step that wrote nothing is not',
+    !shouldCapture(stepWith([]), { projectDir: APP, devUrl: DEV, selfPort: 7788 }).capture);
+  check('a look-only step is not',
+    !shouldCapture(stepWith([`${APP}/src/app.css`], 'inspect'), { projectDir: APP, devUrl: DEV, selfPort: 7788 }).capture);
+  check('nothing is photographed when no app is running',
+    !shouldCapture(stepWith([`${APP}/src/app.css`]), { projectDir: APP, devUrl: null, selfPort: 7788 }).capture);
+  // The failure that produced three quarters of the useless pairs.
+  check('this viewer never photographs itself',
+    !shouldCapture(stepWith([`${APP}/src/app.css`]),
+      { projectDir: APP, devUrl: 'http://localhost:7788', selfPort: 7788 }).capture);
+  check('a refusal to photograph says why',
+    (shouldCapture(stepWith([`${APP}/README.md`]), { projectDir: APP, devUrl: DEV }).reason || '').length > 3);
+
+  const comparison = (ratio, box) => readComparison({ ratio, box, width: 1000, height: 1000 });
+  check('a pair below the noise floor is not a change', !comparison(NOISE_FLOOR / 2, { x: 1, y: 1, w: 2, h: 2 }).changed);
+  check('a real difference is a change', comparison(0.08, { x: 100, y: 100, w: 200, h: 120 }).changed);
+  check('a change reports how much moved', comparison(0.08, { x: 100, y: 100, w: 200, h: 120 }).percent === 8);
+  check('a change keeps the region, padded', (() => {
+    const r = comparison(0.08, { x: 100, y: 100, w: 200, h: 120 });
+    return r.box && r.box.x < 100 && r.box.w > 200;
+  })());
+  check('a change covering everything is not offered as a crop',
+    comparison(0.95, { x: 0, y: 0, w: 1000, h: 1000 }).wholePage === true);
+  check('an unreadable comparison is not called unchanged',
+    readComparison(null).changed === false && /could not/.test(readComparison(null).reason));
+
+  check('a tight pair is trusted', attribution(5000).level === 'tight');
+  check('a wide pair is flagged', attribution(5 * 60 * 1000).level === 'weak');
+  check('a flagged pair says how far apart', !!attribution(5 * 60 * 1000).note);
+
   console.log('\nRunning terminals\n');
 
   // Claude Code writes ~/.claude/sessions/<pid>.json per running process, so
@@ -746,6 +818,25 @@ async function main() {
     });
     check('an empty prompt is still refused per session', refusedEmpty.status === 409);
 
+    /*
+     * A run that started a dev server never ends, so "busy" is not a reason to
+     * refuse the next message — the composer used to disable itself forever.
+     */
+    const anotherTab = sessionList.sessions.find((x) => x.sessionId !== state.instance.sessionId);
+    if (anotherTab) {
+      const stillSwitches = await fetch(`${base}/api/watch`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: anotherTab.sessionId }),
+      });
+      check('a session can be watched whatever it is doing', stillSwitches.status === 200);
+      await fetch(`${base}/api/watch`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: state.instance.sessionId }),
+      });
+    }
+    check('a run reports how long it has been going',
+      typeof (await get('/api/activity')).run?.runningMs === 'number');
+
     const lib = await fetch(base + '/genz.mjs');
     check('the library is served to the page', lib.status === 200
       && (lib.headers.get('content-type') || '').includes('javascript'));
@@ -909,6 +1000,20 @@ async function main() {
           JSON.stringify(vocab.genz));
         check('live row: a translation carries its meaning', (vocab.genz?.note || '').length > 8);
         check('live row: tooltip is written out', (vocab.title || '').length > 20, vocab.title);
+
+        // The bug this guards: a run that never ends disabled the composer
+        // for good, leaving no way to say anything.
+        check('composer: sending is never disabled',
+          vocab.idle?.disabled === false && vocab.working?.disabled === false
+          && vocab.longRun?.disabled === false,
+          JSON.stringify([vocab.idle?.disabled, vocab.working?.disabled, vocab.longRun?.disabled]));
+        check('composer: a busy send says it will replace the run',
+          /stop & send/i.test(vocab.working?.label || ''), vocab.working?.label);
+        check('composer: an idle send just sends', vocab.idle?.label === 'Send', vocab.idle?.label);
+        check('composer: a long run says how long it has gone',
+          /\d+m/.test(vocab.longRun?.note || ''), vocab.longRun?.note);
+        check('composer: a long run warns it will be replaced',
+          /replace/i.test(vocab.longRun?.note || ''), vocab.longRun?.note);
         check('live row: a stall is reported plainly, not as slang',
           !vocab.stalled || vocab.displayed?.term === 'Still working',
           JSON.stringify(vocab.displayed));
