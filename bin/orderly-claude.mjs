@@ -48,6 +48,27 @@ function doctor() {
 
 if (has('doctor')) { doctor(); process.exit(0); }
 
+if (argv[0] === 'new-prompt') {
+  const slug = argv[1];
+  if (!slug) {
+    console.error('Usage: orderly-claude new-prompt <slug> [--title "..."] [--category build|design|review|ship|plan] [--scope project|user]');
+    process.exit(2);
+  }
+  const { scaffoldPrompt, writePrompt } = await import('../src/core/prompts.mjs');
+  const title = flag('title', null);
+  const category = flag('category', 'build');
+  const scope = flag('scope', 'project');
+  const md = scaffoldPrompt(slug, { title, category });
+  try {
+    const file = writePrompt({ md, slug, scope, repoRoot: process.cwd() });
+    console.log(`wrote ${file}`);
+  } catch (e) {
+    console.error(e.message);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
 if (argv[0] === 'new-workflow') {
   // Scaffold a starter workflow at <scope>/.claude/workflows/<id>.json.
   const id = argv[1];
@@ -80,6 +101,7 @@ if (has('help')) {
   orderly --no-capture                 skip automatic before/after screenshots
   orderly --no-open                    don't open a browser
   orderly new-workflow <id> [options]  scaffold a starter workflow .json
+  orderly new-prompt <slug> [options]  scaffold a starter prompt .md
 `);
   process.exit(0);
 }

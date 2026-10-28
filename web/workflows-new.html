@@ -7,30 +7,62 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/workflows.css">
 <style>
-  .editor { max-width: 1080px; margin: 0 auto; padding: 24px 56px 60px; display: grid; gap: 20px; }
-  .row { display: grid; grid-template-columns: 160px 1fr; gap: 12px; align-items: center; }
-  .row label { font: 12px var(--f-mono); color: var(--mute); letter-spacing: 0.04em; text-transform: uppercase; }
-  .row input, .row select {
-    width: 100%; padding: 8px 12px; font: 14px var(--f-ui); color: var(--text);
-    background: var(--surface); border: 1px solid var(--edge-tint); border-radius: 8px; outline: none;
+  .ed-layout { display: grid; grid-template-columns: 1fr 320px; gap: 0; height: calc(100vh - 56px); }
+  .ed-canvas { position: relative; overflow: auto;
+    background:
+      radial-gradient(circle, var(--cv-dot) 1px, transparent 1px) 0 0 / 20px 20px,
+      var(--bg);
+    border-right: 1px solid var(--edge-tint); }
+  .ed-side { padding: 20px 20px 40px; overflow: auto; border-left: 1px solid var(--edge-tint); background: var(--surface); }
+  .ed-side h3 { margin: 0 0 10px; font: 500 13px var(--f-ui); color: var(--text); letter-spacing: -0.01em; }
+  .ed-side .block { margin-bottom: 20px; }
+  .ed-side input, .ed-side select, .ed-side textarea {
+    width: 100%; padding: 7px 10px; font: 13px var(--f-ui); color: var(--text);
+    background: var(--bg); border: 1px solid var(--edge-tint); border-radius: 6px; outline: none;
+    margin-bottom: 6px;
   }
-  .row input:focus, .row select:focus { border-color: var(--edge-hi); }
-  .json-ed {
-    width: 100%; min-height: 420px; padding: 14px;
-    font: 12.5px/1.5 var(--f-mono); color: var(--text);
-    background: var(--surface); border: 1px solid var(--edge-tint); border-radius: 10px; outline: none;
-    resize: vertical;
+  .ed-side textarea { font: 12px/1.5 var(--f-mono); min-height: 120px; resize: vertical; }
+  .ed-side input:focus, .ed-side select:focus, .ed-side textarea:focus { border-color: var(--edge-hi); }
+  .ed-side label { display: block; font: 10.5px var(--f-mono); color: var(--mute); letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 4px; }
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  .ed-canvas-inner { position: relative; min-width: 1600px; min-height: 900px; }
+  .svg-edges { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+  .n-card {
+    position: absolute; width: 200px; min-height: 92px;
+    background: var(--surface); border: 1px solid var(--edge-tint); border-radius: 10px;
+    padding: 10px 12px; cursor: grab; user-select: none;
+    display: flex; flex-direction: column; gap: 4px;
+    transition: border-color .14s var(--ease), box-shadow .14s var(--ease);
   }
-  .json-ed:focus { border-color: var(--edge-hi); }
-  .actions-bar { display: flex; gap: 8px; align-items: center; }
-  .status { font: 11px var(--f-mono); color: var(--mute); margin-left: auto; }
-  .status.ok   { color: #90d6b0; }
-  .status.err  { color: var(--ship); }
+  .n-card:hover { border-color: var(--edge-hi); }
+  .n-card.sel { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 25%, transparent); }
+  .n-card.connect-src { border-color: var(--design); }
+  .n-card.dragging { cursor: grabbing; z-index: 10; }
+  .n-card .n-head { display: flex; align-items: baseline; gap: 8px; }
+  .n-card .n-kind { font: 10px var(--f-mono); color: var(--faint); letter-spacing: 0.08em; text-transform: uppercase; }
+  .n-card .n-id   { margin-left: auto; font: 10px var(--f-mono); color: var(--faint); }
+  .n-card .n-title { font: 500 13px var(--f-ui); color: var(--text); }
+  .n-card .n-foot { margin-top: auto; display: flex; justify-content: space-between; font: 10px var(--f-mono); color: var(--faint); }
+
+  .status { font: 11px var(--f-mono); color: var(--mute); margin-top: 10px; }
+  .status.ok  { color: #90d6b0; }
+  .status.err { color: var(--ship); }
   .problems { background: color-mix(in oklab, var(--ship) 10%, transparent);
     border: 1px solid color-mix(in oklab, var(--ship) 30%, transparent);
-    border-radius: 8px; padding: 10px 14px; font: 12px var(--f-mono); color: var(--text); }
-  .problems ul { margin: 0; padding-left: 18px; }
-  .problems .ok { color: #90d6b0; }
+    border-radius: 6px; padding: 8px 10px; font: 11px var(--f-mono); color: var(--text); margin-top: 8px; }
+
+  .ed-mode { display: flex; gap: 4px; margin-bottom: 10px; }
+  .ed-mode button { flex: 1; padding: 6px 10px; font: 11px var(--f-mono);
+    background: transparent; color: var(--mute); border: 1px solid var(--edge-tint);
+    border-radius: 999px; cursor: pointer; }
+  .ed-mode button.on { color: var(--accent); border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, transparent); }
+
+  .ed-json { padding: 20px; height: 100%; display: none; flex-direction: column; }
+  .ed-json textarea { flex: 1; width: 100%; padding: 14px; font: 12px/1.55 var(--f-mono);
+    color: var(--text); background: var(--bg); border: 1px solid var(--edge-tint); border-radius: 10px; outline: none; resize: none; }
+  body.json-mode .ed-canvas { display: none; }
+  body.json-mode .ed-json { display: flex; }
 </style>
 </head><body>
 
@@ -45,45 +77,81 @@
   mountAppMenu(document.getElementById('appMenu'), { here: 'workflows' });
 </script>
 
-<section class="hero">
-  <div class="eyebrow">Author · a workflow is one JSON file</div>
-  <h1 class="display">New workflow.</h1>
-  <p>Set the id and title, tweak the starter graph, validate, save. Writes to the right <code>.claude/workflows/</code> for the chosen scope.</p>
-</section>
-
-<main class="editor">
-  <div class="row">
-    <label for="wfId">id</label>
-    <input id="wfId" placeholder="hyphenated-id" spellcheck="false">
-  </div>
-  <div class="row">
-    <label for="wfTitle">title</label>
-    <input id="wfTitle" placeholder="Human-readable title">
-  </div>
-  <div class="row">
-    <label for="wfScope">scope</label>
-    <select id="wfScope">
-      <option value="project">project (writes to &lt;repo&gt;/.claude/workflows/)</option>
-      <option value="user">user (writes to ~/.claude/workflows/)</option>
-    </select>
-  </div>
-
-  <div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-      <label style="font: 12px var(--f-mono); color: var(--mute); letter-spacing: 0.04em; text-transform: uppercase;">graph JSON</label>
-      <button id="btnScaffold" class="btn-ghost" style="padding:3px 10px;font:11px var(--f-mono);">↻ Fresh scaffold</button>
+<div class="ed-layout">
+  <div class="ed-canvas" id="edCanvas">
+    <div class="ed-canvas-inner" id="edInner">
+      <svg class="svg-edges" id="edEdges"></svg>
     </div>
-    <textarea id="wfJson" class="json-ed" spellcheck="false"></textarea>
   </div>
 
-  <div id="problems" class="problems" style="display:none;"></div>
-
-  <div class="actions-bar">
-    <button class="btn-run" id="btnValidate">✓ Validate</button>
-    <button class="btn-run" id="btnSave" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent);">◆ Save</button>
-    <span id="status" class="status">Edit something.</span>
+  <div class="ed-json" id="edJson">
+    <textarea id="jsonArea" spellcheck="false"></textarea>
   </div>
-</main>
+
+  <aside class="ed-side">
+    <div class="ed-mode">
+      <button id="modeVisual" class="on">◇ Visual</button>
+      <button id="modeJson">{ } JSON</button>
+    </div>
+
+    <div class="block">
+      <label>id</label>
+      <input id="wfId" placeholder="hyphenated-id" spellcheck="false" value="untitled">
+      <label>title</label>
+      <input id="wfTitle" placeholder="Human-readable title">
+      <label>scope</label>
+      <select id="wfScope">
+        <option value="project">project</option>
+        <option value="user">user</option>
+      </select>
+    </div>
+
+    <div class="block">
+      <h3>Add node</h3>
+      <div class="btn-row">
+        <select id="newKind" style="flex:1;">
+          <option value="document">document</option>
+          <option value="report">report</option>
+          <option value="mockup">mockup</option>
+          <option value="diff">diff</option>
+          <option value="shots">shots</option>
+          <option value="shots-set">shots-set</option>
+          <option value="terminal">terminal</option>
+          <option value="ask">ask</option>
+          <option value="pr">pr</option>
+        </select>
+        <button class="run-btn" id="btnAddNode">+ add</button>
+      </div>
+    </div>
+
+    <div class="block" id="selBlock" style="display:none;">
+      <h3>Selected node</h3>
+      <label>id</label><input id="selId" spellcheck="false">
+      <label>title</label><input id="selTitle">
+      <label>kind</label>
+      <select id="selKind">
+        <option>document</option><option>report</option><option>mockup</option>
+        <option>diff</option><option>shots</option><option>shots-set</option>
+        <option>terminal</option><option>ask</option><option>pr</option>
+      </select>
+      <label>cost</label><input id="selCost" type="number" min="0" step="1" value="1">
+      <div class="btn-row" style="margin-top:6px;">
+        <button class="run-btn" id="btnConnect" title="Click a target node after this to draw an edge">↝ connect to…</button>
+        <button class="run-btn danger" id="btnDelete">✕ delete</button>
+      </div>
+    </div>
+
+    <div class="block">
+      <h3>Save</h3>
+      <div class="btn-row">
+        <button class="run-btn" id="btnValidate">✓ validate</button>
+        <button class="run-btn" id="btnSave" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent);">◆ save</button>
+      </div>
+      <div id="status" class="status">Edit something.</div>
+      <div id="problems" class="problems" style="display:none;"></div>
+    </div>
+  </aside>
+</div>
 
 <script type="module" src="/workflows-new.mjs"></script>
 </body></html>

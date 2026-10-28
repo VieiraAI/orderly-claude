@@ -155,9 +155,28 @@ function renderRuns() {
     b.onclick = (ev) => {
       ev.stopPropagation();
       const id = b.dataset.id;
-      if (b.dataset.act === 'rerun') rerunFromCatalog(id);
+      if (b.dataset.act === 'rerun')  rerunFromCatalog(id);
+      else if (b.dataset.act === 'share')  shareRunRow(id, b);
       else if (b.dataset.act === 'delete') deleteRunRow(id);
     };
+  }
+}
+
+async function shareRunRow(runId, btn) {
+  const prev = btn.textContent;
+  btn.textContent = '…';
+  try {
+    const r = await fetch(`/api/runs/${encodeURIComponent(runId)}/share`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((x) => x.json());
+    if (!r.url) throw new Error(r.error || 'no url');
+    await navigator.clipboard?.writeText(r.url).catch(() => {});
+    btn.textContent = 'copied';
+    window.open(r.url, '_blank', 'noopener');
+    setTimeout(() => { btn.textContent = prev; }, 1600);
+  } catch (e) {
+    btn.textContent = prev;
+    alert(`Share failed: ${e.message}`);
   }
 }
 
@@ -186,6 +205,7 @@ function runRow(r) {
     <span class="state ${stateCls}">${escapeHtml(label)}</span>
     <span class="row-actions">
       <button class="row-btn" data-act="rerun"  data-id="${r.runId}" title="Start a new run from the same def">↻ rerun</button>
+      <button class="row-btn" data-act="share"  data-id="${r.runId}" title="Signed URL to a static copy">◎ share</button>
       <button class="row-btn danger" data-act="delete" data-id="${r.runId}" title="Delete this run folder">✕</button>
       <span class="open">open canvas →</span>
     </span>
@@ -248,7 +268,8 @@ function renderDecisions() {
   }
   mount.innerHTML = parts.join('');
   for (const el of document.querySelectorAll('.decision-row')) {
-    el.onclick = () => {
+    el.onclick = (ev) => {
+      if (ev.target.closest('.row-btn')) return;
       const kind = el.dataset.kind;
       if (kind === 'auto' && el.dataset.runId) {
         location.href = `/workflows-run.html#${el.dataset.runId}`;
@@ -256,6 +277,9 @@ function renderDecisions() {
         location.href = `/#${el.dataset.sessionId}/${el.dataset.stepId || ''}`;
       }
     };
+  }
+  for (const b of document.querySelectorAll('.d-share')) {
+    b.onclick = (ev) => { ev.stopPropagation(); shareDecisionRow(b.closest('.decision-row'), b); };
   }
 }
 
@@ -267,7 +291,8 @@ function decisionRow(d) {
   const q = d.kind === 'auto' ? esc(d.question) : esc(d.note || '(no note)');
   const a = d.kind === 'auto' ? esc(d.answer)   : 'marked';
   return `<div class="decision-row" data-kind="${d.kind}" data-run-id="${esc(d.runId || '')}"
-       data-session-id="${esc(d.sessionId || '')}" data-step-id="${esc(d.stepId || '')}">
+       data-session-id="${esc(d.sessionId || '')}" data-step-id="${esc(d.stepId || '')}"
+       data-node-id="${esc(d.nodeId || '')}">
     <span class="time">${time}</span>
     <span class="d-kind ${d.kind}">${d.kind}</span>
     <div class="d-body">
@@ -275,8 +300,31 @@ function decisionRow(d) {
       <div class="d-a">${a}</div>
       <div class="d-where">${where}</div>
     </div>
+    <button class="row-btn d-share" data-share-kind="${d.kind}" title="Signed URL to this moment">◎ share</button>
     <span class="open">open →</span>
   </div>`;
+}
+
+async function shareDecisionRow(row, btn) {
+  const prev = btn.textContent;
+  btn.textContent = '…';
+  const body = row.dataset.kind === 'auto'
+    ? { runId: row.dataset.runId, nodeId: row.dataset.nodeId }
+    : { sessionId: row.dataset.sessionId, stepId: row.dataset.stepId };
+  try {
+    const r = await fetch('/api/decisions/share', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((x) => x.json());
+    if (!r.url) throw new Error(r.error || 'no url');
+    await navigator.clipboard?.writeText(r.url).catch(() => {});
+    btn.textContent = 'copied';
+    window.open(r.url, '_blank', 'noopener');
+    setTimeout(() => { btn.textContent = prev; }, 1600);
+  } catch (e) {
+    btn.textContent = prev;
+    alert(`Share failed: ${e.message}`);
+  }
 }
 
 /* -------------------------------- Prompts -------------------------------- */
@@ -513,6 +561,8 @@ const TAB_COPY = {
     eyebrow: 'Workflows · available in this project',
     title:   'Pick a workflow.',
     desc:    'Every tile is a graph of typed-output cards. Click one for the brief sheet, fill the inputs, and open it on the canvas.',
+    newHref: '/workflows-new.html',
+    newLabel: '+ New workflow',
   },
   runs: {
     eyebrow: 'Runs · every invocation, linked to its session',
@@ -528,6 +578,8 @@ const TAB_COPY = {
     eyebrow: 'Prompts · named templates you can send into a session',
     title:   'Pick a prompt.',
     desc:    'Each prompt is one .md file with frontmatter and a body. Fill the inputs, hit Send, and it lands in the active Claude Code session.',
+    newHref: '/prompts-new.html',
+    newLabel: '+ New prompt',
   },
   decisions: {
     eyebrow: 'Decisions · the moments you committed to a direction',
@@ -548,6 +600,16 @@ function switchTab(tab) {
   document.getElementById('heroEyebrow').textContent = copy.eyebrow;
   document.getElementById('heroTitle').textContent   = copy.title;
   document.getElementById('heroDesc').textContent    = copy.desc;
+  const newBtn = document.getElementById('heroNewBtn');
+  if (newBtn) {
+    if (copy.newHref) {
+      newBtn.href = copy.newHref;
+      newBtn.textContent = copy.newLabel || '+ New';
+      newBtn.style.display = '';
+    } else {
+      newBtn.style.display = 'none';
+    }
+  }
   if (tab === 'runs')      loadRuns();
   if (tab === 'skills')    loadSkills();
   if (tab === 'prompts')   loadPrompts();

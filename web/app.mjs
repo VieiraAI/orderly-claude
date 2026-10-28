@@ -5,7 +5,7 @@ const state = {
   sessionId: null, live: true, session: null, activeStep: null,
   tab: 'detail', results: [], sel: 0, run: { status: 'idle', busy: false }, person: null, tabs: [],
   activity: null, devUrl: null, build: null, think: { word: 0, tick: 0, since: null },
-  runs: [],
+  runs: [], markedSteps: new Set(),
   voice: (() => {
     try { return localStorage.getItem('cz-voice-2') || 'genz'; } catch { return 'genz'; }
   })(),
@@ -138,6 +138,34 @@ async function loadRuns() {
   } catch { state.runs = []; }
 }
 
+/** Steps the user has marked as decisions, pulled fresh each refresh. */
+async function loadMarks() {
+  if (!state.sessionId) return;
+  try {
+    const r = await api('/api/decisions');
+    state.markedSteps = new Set(
+      (r?.decisions || [])
+        .filter((d) => d.kind === 'marked' && d.sessionId === state.sessionId)
+        .map((d) => d.stepId),
+    );
+  } catch { state.markedSteps = new Set(); }
+}
+
+async function toggleDecisionMark(stepId, label) {
+  if (!state.sessionId) return;
+  const marked = state.markedSteps.has(stepId);
+  const method = marked ? 'DELETE' : 'POST';
+  await fetch('/api/decisions/mark', {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: state.sessionId, stepId, note: label || '' }),
+  });
+  if (marked) state.markedSteps.delete(stepId);
+  else state.markedSteps.add(stepId);
+  renderTimeline();
+}
+window.toggleDecisionMark = toggleDecisionMark;
+
 function workflowBubble(run) {
   const done = run.doneNodes ?? 0;
   const total = run.totalNodes ?? 0;
@@ -191,9 +219,19 @@ function bubble(step) {
       step.changedPercent ? `before & after · ${step.changedPercent}%` : 'before & after'));
   }
   if (step.emergent && step.status === 'warn') tags.push(el('span', { class: 'tag emergent' }, 'unplanned'));
+  const marked = state.markedSteps.has(step.id);
+  if (marked) tags.push(el('span', { class: 'tag decision' }, 'decision'));
 
-  return el('button', {
-    class: `bubble tone-${tone}${state.activeStep === step.id ? ' active' : ''}`,
+  // \u2691 is a sibling button so a click to mark doesn't open the drawer.
+  const mark = el('button', {
+    class: `mark${marked ? ' on' : ''}`,
+    title: marked ? 'Unmark as decision' : 'Mark as decision',
+    'aria-label': marked ? 'Unmark decision' : 'Mark as decision',
+    onclick: (e) => { e.stopPropagation(); toggleDecisionMark(step.id, step.label); },
+  }, '\u2691');
+
+  const bubbleBtn = el('button', {
+    class: `bubble tone-${tone}${state.activeStep === step.id ? ' active' : ''}${marked ? ' marked' : ''}`,
     title: TONE_TITLE[tone] || '',
     onclick: () => openStep(step.id),
   }, [
@@ -205,7 +243,9 @@ function bubble(step) {
         : bits.length ? el('span', { class: 'sub' }, bits.join(' \u00b7 ')) : null,
     ]),
     el('span', { class: 'tags' }, tags),
+    mark,
   ]);
+  return bubbleBtn;
 }
 
 const VOICE_LABEL = { plain: 'thinking', booth: 'in the booth' };
@@ -1147,6 +1187,7 @@ async function refresh() {
     : 'set capture target';
   state.devUrl = data.devUrl || null;
   await loadRuns();
+  await loadMarks();
   renderTimeline();
 }
 

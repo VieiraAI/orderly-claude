@@ -22,9 +22,9 @@ import { listDefinitions, getDefinition, startRun, readRun, listRuns, runsForSes
 import { Scheduler } from '../core/workflow-runner.mjs';
 import { openBlob } from '../core/blobs.mjs';
 import { listSkills } from '../core/skills.mjs';
-import { listPrompts, getPrompt, interpolate } from '../core/prompts.mjs';
+import { listPrompts, getPrompt, interpolate, scaffoldPrompt, writePrompt, validatePrompt } from '../core/prompts.mjs';
 import { listDecisions, markDecision, unmarkDecision } from '../core/decisions.mjs';
-import { generateToken, verifyToken, exportSessionHtml } from '../core/share.mjs';
+import { generateToken, verifyToken, exportSessionHtml, exportRunHtml, exportDecisionHtml } from '../core/share.mjs';
 
 const WEB_DIR = path.resolve(fileURLToPath(new URL('../../web', import.meta.url)));
 const TYPES = { '.html': 'text/html', '.css': 'text/css', '.mjs': 'text/javascript',
@@ -626,20 +626,71 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       if (shareMatch && req.method === 'POST') {
         const view = resolveView(shareMatch[1]);
         if (!view) return send(404, { error: 'session not found' });
-        const token = generateToken(shareMatch[1]);
+        const token = generateToken('session', shareMatch[1]);
         const host = req.headers.host || `localhost:${port}`;
         return send(200, { token, url: `http://${host}/share/${token}` });
       }
+      // Share a workflow run — same signed-token mechanism.
+      const shareRunMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/share$/);
+      if (shareRunMatch && req.method === 'POST') {
+        const run = readRun(shareRunMatch[1], { repoRoot: liveCwd });
+        if (!run) return send(404, { error: 'run not found' });
+        const token = generateToken('run', shareRunMatch[1]);
+        const host = req.headers.host || `localhost:${port}`;
+        return send(200, { token, url: `http://${host}/share/${token}` });
+      }
+      // Share a decision — body is {sessionId, stepId} for marked, or just
+      // {runId, nodeId} for auto-extracted ones. Encoded into the id so the
+      // same /share/:token route can serve it.
+      if (url.pathname === '/api/decisions/share' && req.method === 'POST') {
+        const body = await readBody(req);
+        let id;
+        if (body.runId && body.nodeId) id = `auto__${body.runId}__${body.nodeId}`;
+        else if (body.sessionId && body.stepId) id = `marked__${body.sessionId}__${body.stepId}`;
+        else return send(400, { error: 'need (runId, nodeId) or (sessionId, stepId)' });
+        const token = generateToken('decision', id);
+        const host = req.headers.host || `localhost:${port}`;
+        return send(200, { token, url: `http://${host}/share/${token}` });
+      }
+
       const shareOpenMatch = url.pathname.match(/^\/share\/(.+)$/);
       if (shareOpenMatch && req.method === 'GET') {
         const payload = verifyToken(shareOpenMatch[1]);
         if (!payload) return send(410, 'This link has expired or is not valid.', 'text/plain');
-        const view = resolveView(payload.sessionId);
-        if (!view) return send(404, 'Session not found.', 'text/plain');
-        const html = exportSessionHtml({
-          session: view.session, meta: view.meta, sessionId: payload.sessionId, shotsDir: SHOTS_DIR,
-        });
-        return send(200, html, 'text/html');
+        if (payload.kind === 'session') {
+          const view = resolveView(payload.id);
+          if (!view) return send(404, 'Session not found.', 'text/plain');
+          return send(200, exportSessionHtml({
+            session: view.session, meta: view.meta, sessionId: payload.id, shotsDir: SHOTS_DIR,
+          }), 'text/html');
+        }
+        if (payload.kind === 'run') {
+          const run = readRun(payload.id, { repoRoot: liveCwd });
+          if (!run) return send(404, 'Run not found.', 'text/plain');
+          return send(200, exportRunHtml({ run }), 'text/html');
+        }
+        if (payload.kind === 'decision') {
+          const parts = payload.id.split('__');
+          const kind = parts[0];
+          let decision = null;
+          if (kind === 'auto' && parts.length === 3) {
+            const [, runId, nodeId] = parts;
+            const run = readRun(runId, { repoRoot: liveCwd });
+            const n = run?.graph?.nodes?.find((x) => x.id === nodeId);
+            if (run && n && n.kind === 'ask') decision = {
+              kind: 'auto', at: n.endedAt || run.startedAt,
+              workflowTitle: run.workflowTitle, nodeId,
+              question: n.output?.question || n.title, answer: n.output?.answer,
+            };
+          } else if (kind === 'marked' && parts.length === 3) {
+            const [, sessionId, stepId] = parts;
+            const marks = listDecisions();
+            decision = marks.find((d) => d.kind === 'marked' && d.sessionId === sessionId && d.stepId === stepId);
+          }
+          if (!decision) return send(404, 'Decision not found.', 'text/plain');
+          return send(200, exportDecisionHtml({ decision }), 'text/html');
+        }
+        return send(404, 'Unknown share kind.', 'text/plain');
       }
 
       // Decisions — auto-extracted from ask-node answers, plus user marks.
@@ -660,6 +711,27 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       // Prompts — named templates you can send into a session.
       if (url.pathname === '/api/prompts' && req.method === 'GET') {
         return send(200, { prompts: listPrompts() });
+      }
+      if (url.pathname === '/api/prompts/scaffold' && req.method === 'GET') {
+        const slug = url.searchParams.get('slug') || 'untitled';
+        const title = url.searchParams.get('title') || null;
+        return send(200, { md: scaffoldPrompt(slug, { title }) });
+      }
+      if (url.pathname === '/api/prompts/validate' && req.method === 'POST') {
+        const body = await readBody(req);
+        const problems = validatePrompt(body.md || '');
+        return send(200, { ok: problems.length === 0, problems });
+      }
+      if (url.pathname === '/api/prompts' && req.method === 'POST') {
+        const body = await readBody(req);
+        try {
+          const file = writePrompt({
+            md: body.md, slug: body.slug, scope: body.scope || 'project',
+            repoRoot: body.scope === 'project' ? (body.repoRoot || liveCwd) : null,
+            overwrite: !!body.overwrite,
+          });
+          return send(200, { saved: true, file });
+        } catch (e) { return send(400, { error: e.message }); }
       }
       const promptMatch = url.pathname.match(/^\/api\/prompts\/(.+)$/);
       if (promptMatch && req.method === 'GET' && !promptMatch[1].endsWith('/send')) {

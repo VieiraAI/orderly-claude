@@ -172,3 +172,54 @@ function unquote(v) {
   }
   return v;
 }
+
+/* ---------------------------- Authoring --------------------------------- */
+
+/** Build a starter prompt .md body with sensible frontmatter and one placeholder input. */
+export function scaffoldPrompt(slug, { title, category = 'build' } = {}) {
+  const human = title || slug.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  return `---
+name: ${slug}
+title: ${human}
+description: One sentence on what this prompt does.
+category: ${category}
+inputs:
+  - key: topic
+    label: Topic
+    placeholder: What is this about?
+---
+Write about {{topic|the current topic}}.
+
+Keep it short, specific, and plain.
+`;
+}
+
+/** Write a prompt .md to .claude/prompts/<slug>.md at the right scope. */
+export function writePrompt({ md, slug, scope = 'project', repoRoot = null, overwrite = false }) {
+  if (!slug || !/^[a-z0-9][a-z0-9\-_]*$/i.test(slug)) {
+    throw new Error('slug must be a short hyphenated identifier');
+  }
+  const dir = scope === 'user' ? USER_PROMPTS_DIR
+    : scope === 'project' ? (repoRoot ? repoPromptsDir(repoRoot) : null)
+    : null;
+  if (!dir) throw new Error(`unknown scope: ${scope}`);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${slug}.md`);
+  if (fs.existsSync(file) && !overwrite) {
+    throw new Error(`a prompt named "${slug}" already exists at ${file}`);
+  }
+  fs.writeFileSync(file, md);
+  return file;
+}
+
+/** Light validation: must have a frontmatter block with a non-empty body. */
+export function validatePrompt(md) {
+  const problems = [];
+  const s = String(md || '');
+  if (!s.startsWith('---')) problems.push('missing frontmatter --- block');
+  const end = s.indexOf('\n---', 3);
+  if (end === -1) problems.push('frontmatter is not closed');
+  const body = end === -1 ? '' : s.slice(end + 4).trim();
+  if (!body) problems.push('body is empty');
+  return problems;
+}

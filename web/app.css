@@ -645,3 +645,19 @@ pre.block.cmd { color: var(--text); }
 }
 .bubble.workflow.tone-running { box-shadow: inset 2px 0 0 var(--dusk-blue), 0 0 0 1px color-mix(in oklab, var(--dusk-blue) 30%, transparent); }
 .bubble.workflow.tone-done .wf-tag { color: color-mix(in oklab, var(--dusk-blue) 70%, var(--text)); }
+
+/* ------------------------- Decision marks on bubbles --------------------- */
+.bubble .mark {
+  background: transparent; border: 0; cursor: pointer;
+  color: var(--faint); font-size: 13px; padding: 2px 6px;
+  margin-left: 6px; border-radius: 6px; opacity: 0; transition: opacity .12s;
+}
+.bubble:hover .mark, .bubble .mark.on { opacity: 1; }
+.bubble .mark:hover { color: var(--text); background: var(--raised); }
+.bubble .mark.on { color: var(--dusk-blue); }
+.bubble.marked { box-shadow: inset 2px 0 0 var(--dusk-blue); }
+.tag.decision {
+  color: var(--dusk-blue); border: 1px solid color-mix(in oklab, var(--dusk-blue) 40%, transparent);
+  padding: 1px 6px; border-radius: 999px; font: 10.5px var(--mono); letter-spacing: 0.05em;
+  text-transform: uppercase; margin-right: 4px;
+}

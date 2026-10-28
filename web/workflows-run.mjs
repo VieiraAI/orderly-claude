@@ -82,9 +82,28 @@ function renderRunActions() {
   bar.innerHTML = `
     <button class="run-btn" data-act="rerun-all" ${terminal ? '' : 'disabled'}
             title="Clone this run and start from the top">↻ Rerun</button>
+    <button class="run-btn" data-act="share" title="Signed URL to a static copy of this run">◎ Share</button>
     <button class="run-btn danger" data-act="delete"
             title="Delete this run folder">✕ Delete</button>`;
   bar.querySelector('[data-act="rerun-all"]').onclick = () => rerunFromCanvas(null);
+  bar.querySelector('[data-act="share"]').onclick = async () => {
+    const btn = bar.querySelector('[data-act="share"]');
+    const prev = btn.textContent;
+    btn.textContent = 'Signing…';
+    try {
+      const r = await fetch(`/api/runs/${encodeURIComponent(run.runId)}/share`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      }).then((x) => x.json());
+      if (!r.url) throw new Error(r.error || 'no url');
+      await navigator.clipboard?.writeText(r.url).catch(() => {});
+      btn.textContent = '◎ Copied';
+      window.open(r.url, '_blank', 'noopener');
+      setTimeout(() => { btn.textContent = prev; }, 1800);
+    } catch (e) {
+      btn.textContent = prev;
+      alert(`Share failed: ${e.message}`);
+    }
+  };
   bar.querySelector('[data-act="delete"]').onclick = async () => {
     if (!confirm('Delete this run? The folder and all its outputs will be removed.')) return;
     try {

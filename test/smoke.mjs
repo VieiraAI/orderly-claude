@@ -627,9 +627,9 @@ async function main() {
 
   console.log('\nServer\n');
 
-  // Keep smoke runs free and fast: skip the real Claude CLI handlers unless
-  // the caller explicitly opts in.
-  if (!process.env.ORDERLY_HANDLER_MODE) process.env.ORDERLY_HANDLER_MODE = 'mock';
+  // Keep smoke runs free and fast: force mock handlers unless the caller
+  // explicitly asked for the real CLI with ORDERLY_HANDLER_MODE=real.
+  if (process.env.ORDERLY_HANDLER_MODE !== 'real') process.env.ORDERLY_HANDLER_MODE = 'mock';
 
   const port = await freePort(7900);
   const { close } = await startServer({
@@ -733,7 +733,9 @@ async function main() {
     // Scheduler should march the graph without any client help. Poll until the
     // run reaches a terminal state or the budget elapses.
     let finished = null;
-    const budget = Date.now() + 8000;
+    // Mock handlers finish in under a second; a wider budget just absorbs
+    // the occasional cold-start spawn delay on CI.
+    const budget = Date.now() + 15000;
     while (Date.now() < budget) {
       await sleep(200);
       const r = (await get(`/api/runs/${started.run.runId}`)).run;
@@ -773,6 +775,39 @@ async function main() {
       `${shareHtml.status} ${shareHtml.headers.get('content-type')}`);
     const tampered = await fetch(`${base}/share/${shareResp.token.slice(0, -2)}aa`);
     check('tampered token is rejected', tampered.status === 410, String(tampered.status));
+
+    // Share a run — same signed-token mechanism.
+    const shareRun = await fetch(`${base}/api/runs/${started.run.runId}/share`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    check('POST /api/runs/:id/share returns a run token',
+      typeof shareRun.token === 'string' && shareRun.token.startsWith('run:'),
+      shareRun.token?.slice(0, 20));
+    const runPage = await fetch(`${base}/share/${shareRun.token}`);
+    check('/share/<run-token> serves HTML',
+      runPage.status === 200 && (runPage.headers.get('content-type') || '').includes('text/html'),
+      `${runPage.status}`);
+
+    // Share a decision — mark one first, then share.
+    await fetch(`${base}/api/decisions/mark`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'share-sess', stepId: 'share-step', note: 'shared' }),
+    });
+    const shareDec = await fetch(`${base}/api/decisions/share`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'share-sess', stepId: 'share-step' }),
+    }).then((r) => r.json());
+    check('POST /api/decisions/share returns a decision token',
+      typeof shareDec.token === 'string' && shareDec.token.startsWith('decision:'),
+      shareDec.token?.slice(0, 20));
+    const decPage = await fetch(`${base}/share/${shareDec.token}`);
+    check('/share/<decision-token> serves HTML',
+      decPage.status === 200 && (decPage.headers.get('content-type') || '').includes('text/html'),
+      `${decPage.status}`);
+    await fetch(`${base}/api/decisions/mark`, {
+      method: 'DELETE', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'share-sess', stepId: 'share-step' }),
+    });
 
     // Decisions — auto from ask-node answers, plus a mark round-trip.
     const dResp = await get('/api/decisions');
