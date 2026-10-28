@@ -73,11 +73,21 @@ async function alive(port, timeout = 350) {
  * thing. So prefer a server whose process was started inside the project,
  * and only fall back to the scan when none is.
  */
-export async function detectDevServer(projectDir) {
+export async function detectDevServer(projectDir, { selfPort = null } = {}) {
+  /*
+   * Never nominate ourselves. Orderly is a server started inside a project
+   * too, so a session opened from a parent directory (a home directory, say)
+   * matched this very process and the pill then announced it was watching the
+   * app while photographing the viewer. Our own pid covers every port we
+   * listen on; selfPort is belt and braces for the fixed-port fallback below.
+   */
+  const ours = (srv) => srv.pid === process.pid
+    || (selfPort != null && srv.port === Number(selfPort));
   if (projectDir) {
     const depth = (p) => p.split('/').filter(Boolean).length;
     const mine = [];
     for (const srv of listeningServers()) {
+      if (ours(srv)) continue;
       const cwd = processCwd(srv.pid);
       if (!cwd || cwd === '/') continue;
       if (cwd === projectDir || cwd.startsWith(`${projectDir}/`)) mine.push({ ...srv, cwd });
@@ -91,7 +101,9 @@ export async function detectDevServer(projectDir) {
     }
   }
 
-  const checks = PORTS.map(async (p) => ((await alive(p)) ? p : null));
+  const skip = new Set(listeningServers().filter(ours).map((s) => s.port));
+  const checks = PORTS.filter((p) => !skip.has(p) && p !== Number(selfPort))
+    .map(async (p) => ((await alive(p)) ? p : null));
   const found = (await Promise.all(checks)).filter(Boolean);
   return found.length ? `http://localhost:${found[0]}` : null;
 }

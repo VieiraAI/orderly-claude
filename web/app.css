@@ -127,6 +127,11 @@ kbd { font: 11px var(--mono); color: var(--faint); margin-left: 5px; }
 .ctx .cwd { color: rgba(255,255,255,.38); font: 11.5px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .actions { display: flex; align-items: center; gap: 7px; }
 .pill { font: 11px var(--mono); color: var(--faint); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; }
+/* The capture pill names its purpose, then its value: the label stays dim so
+ * the address reads first, and the pencil marks the whole thing as editable. */
+.pill-k { opacity: .62; margin-right: 6px; }
+.pill-pen { opacity: 0; margin-left: 7px; transition: opacity .14s ease; }
+.pill:hover .pill-pen { opacity: .75; }
 
 /* ---------- connection ---------- */
 .conn-banner {

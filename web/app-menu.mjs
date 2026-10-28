@@ -7,11 +7,11 @@
  * are injected. `here` lets the current page be marked.
  */
 const ITEMS = [
-  { key: 'viewer',    label: 'Viewer',    href: '/',                         hint: 'Live Claude Code sessions' },
-  { key: 'workflows', label: 'Workflows', href: '/workflows.html#workflows', hint: 'Graphs of typed-output cards' },
-  { key: 'prompts',   label: 'Prompts',   href: '/workflows.html#prompts',   hint: 'Named templates you can send' },
-  { key: 'runs',      label: 'Runs',      href: '/workflows.html#runs',      hint: 'Every invocation' },
-  { key: 'decisions', label: 'Decisions', href: '/workflows.html#decisions', hint: 'Moments you committed to a direction' },
+  { key: 'sessions',  label: 'Sessions',  href: '/',                         hint: 'Your live Claude Code terminals' },
+  { key: 'workflows', label: 'Workflows', href: '/workflows.html#workflows', hint: 'A job you run the same way every time' },
+  { key: 'prompts',   label: 'Prompts',   href: '/workflows.html#prompts',   hint: 'One saved message, with blanks to fill in' },
+  { key: 'runs',      label: 'Runs',      href: '/workflows.html#runs',      hint: 'The receipt for every workflow you ran' },
+  { key: 'decisions', label: 'Decisions', href: '/workflows.html#decisions', hint: 'Every time you chose a direction' },
   { key: 'skills',    label: 'Skills',    href: '/workflows.html#skills',    hint: 'What Claude knows how to do' },
 ];
 
