@@ -150,6 +150,18 @@ function summariseRun(r) {
   const done = nodes.filter((n) => n.status === 'done').length;
   const running = nodes.find((n) => n.status === 'running');
   const asking = nodes.find((n) => n.status === 'running' && n.kind === 'ask') || nodes.find((n) => n.kind === 'ask' && n.status !== 'done' && n.status !== 'pending');
+  // Roll up per-node meta for a budget-at-a-glance total.
+  const totals = { cost: 0, tokens: 0, elapsedS: 0 };
+  for (const n of nodes) {
+    const m = n.output?.meta;
+    if (!m) continue;
+    if (typeof m.cost === 'number')   totals.cost += m.cost;
+    if (typeof m.tokens === 'number') totals.tokens += m.tokens;
+    if (typeof m.elapsed === 'string') {
+      const s = parseFloat(m.elapsed);
+      if (Number.isFinite(s)) totals.elapsedS += s;
+    }
+  }
   return {
     runId: r.runId,
     workflowId: r.workflowId,
@@ -166,6 +178,9 @@ function summariseRun(r) {
     doneNodes: done,
     runningLabel: running ? running.title : null,
     askingLabel: asking ? asking.title : null,
+    totalCost:   totals.cost || null,
+    totalTokens: totals.tokens || null,
+    totalElapsed: totals.elapsedS ? `${totals.elapsedS.toFixed(1)} s` : null,
   };
 }
 
@@ -793,6 +808,12 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         const ok = deleteRun(runDeleteMatch[1]);
         if (ok) broadcast('run-finish', { runId: runDeleteMatch[1], status: 'deleted' });
         return ok ? send(200, { deleted: true }) : send(404, { error: 'run not found' });
+      }
+
+      if (url.pathname === '/api/runs/stop-all' && req.method === 'POST') {
+        let stopped = 0;
+        for (const s of schedulers.values()) if (s.stop()) stopped++;
+        return send(200, { stopped });
       }
 
       const runStopMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/stop$/);

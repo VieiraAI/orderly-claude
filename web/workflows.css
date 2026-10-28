@@ -466,3 +466,25 @@ main { max-width: 1280px; margin: 0 auto; padding: 0 56px 96px; }
 .decision-row .d-where { font: 10.5px var(--f-mono); color: var(--faint); margin-top: 4px; }
 .decision-row .open { font: 11px var(--f-mono); color: var(--faint); text-align: right; }
 .decision-row:hover .open { color: var(--accent); }
+
+/* --------------------------- Chip rows (filters) ------------------------- */
+.chips-row { display: flex; gap: 8px; align-items: center; margin: 4px 0 20px; flex-wrap: wrap; }
+.chip {
+  font: 11px var(--f-mono); color: var(--mute); letter-spacing: 0.04em;
+  background: transparent; border: 1px solid var(--edge-tint);
+  border-radius: 999px; padding: 5px 12px; cursor: pointer;
+  transition: color .14s var(--ease), border-color .14s var(--ease), background .14s var(--ease);
+}
+.chip:hover:not(:disabled) { color: var(--text); border-color: var(--edge-hi); }
+.chip.on { color: var(--accent); border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, transparent); }
+.chip:disabled { opacity: 0.4; cursor: not-allowed; }
+.chips-count { margin-left: auto; font: 11px var(--f-mono); color: var(--faint); }
+
+/* ----------------------------- Run totals -------------------------------- */
+.run-totals, .row-totals { color: var(--faint); font: 11px var(--f-mono); margin-left: 8px; }
+.run-row .state { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.run-row .row-totals { margin-left: 0; }
+
+/* Stop-all is a danger chip. */
+.chip.stop-all { color: var(--ship); border-color: color-mix(in oklab, var(--ship) 40%, transparent); }
+.chip.stop-all:hover { background: color-mix(in oklab, var(--ship) 12%, transparent); border-color: var(--ship); }

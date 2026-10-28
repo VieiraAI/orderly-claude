@@ -256,18 +256,33 @@ function renderEdges() {
   const svg = $('edEdges');
   const nodes = state.def.graph.nodes;
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
-  const paths = [];
-  for (const [a, b] of state.def.graph.edges || []) {
+  // Two paths per edge: the visible one and a fat invisible one that catches
+  // clicks without forcing the user to pixel-hunt the 1.4px stroke.
+  const parts = [];
+  (state.def.graph.edges || []).forEach(([a, b], i) => {
     const na = byId[a], nb = byId[b];
-    if (!na || !nb) continue;
+    if (!na || !nb) return;
     const ax = GUTTER + (na.col || 0) * COL_W + 200;         // right edge of source
     const ay = GUTTER + (na.row || 0) * ROW_H + 46;          // mid-height
     const bx = GUTTER + (nb.col || 0) * COL_W;               // left edge of target
     const by = GUTTER + (nb.row || 0) * ROW_H + 46;
     const dx = Math.max(40, (bx - ax) / 2);
-    paths.push(`<path d="M${ax},${ay} C${ax + dx},${ay} ${bx - dx},${by} ${bx},${by}" fill="none" stroke="#efb36c" stroke-width="1.4" opacity="0.7"/>`);
+    const d = `M${ax},${ay} C${ax + dx},${ay} ${bx - dx},${by} ${bx},${by}`;
+    parts.push(`<path class="edge-hit" data-i="${i}" d="${d}" fill="none" stroke="transparent" stroke-width="14"/>`);
+    parts.push(`<path class="edge" data-i="${i}" d="${d}" fill="none" stroke="#efb36c" stroke-width="1.4" opacity="0.7"/>`);
+  });
+  svg.innerHTML = parts.join('');
+  for (const hit of svg.querySelectorAll('.edge-hit')) {
+    hit.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const i = Number(hit.dataset.i);
+      const edge = state.def.graph.edges[i];
+      if (!edge) return;
+      if (!confirm(`Remove edge ${edge[0]} → ${edge[1]}?`)) return;
+      state.def.graph.edges.splice(i, 1);
+      render();
+    });
   }
-  svg.innerHTML = paths.join('');
 }
 
 function renderSelected() {

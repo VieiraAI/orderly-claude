@@ -83,7 +83,7 @@ export function exportRunHtml({ run }) {
 <style>${CSS}</style>
 </head><body>
 <header>
-  <div class="brand">◇ Orderly / <em>shared run</em></div>
+  <a class="brand" href="/" title="Open the Orderly viewer">◇ Orderly / <em>shared run</em></a>
   <h1>${title}</h1>
   <div class="meta">run ${esc(run.runId.slice(0, 8))} · ${esc(run.status)} · ${started} UTC</div>
 </header>
@@ -124,7 +124,7 @@ export function exportDecisionHtml({ decision }) {
 <style>${CSS}</style>
 </head><body>
 <header>
-  <div class="brand">◇ Orderly / <em>shared decision</em></div>
+  <a class="brand" href="/" title="Open the Orderly viewer">◇ Orderly / <em>shared decision</em></a>
   <h1>${q}</h1>
   <div class="meta">${where} · ${when} UTC</div>
 </header>
@@ -146,7 +146,7 @@ export function exportSessionHtml({ session, meta, sessionId, shotsDir }) {
 <style>${CSS}</style>
 </head><body>
 <header>
-  <div class="brand">◇ Orderly / <em>shared session</em></div>
+  <a class="brand" href="/" title="Open the Orderly viewer">◇ Orderly / <em>shared session</em></a>
   <h1>${title}</h1>
   <div class="meta">${cwd ? `<code>${cwd}</code> · ` : ''}${when}</div>
 </header>
@@ -203,7 +203,10 @@ const CSS = `
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 var(--sans); -webkit-font-smoothing: antialiased; }
 header { padding: 32px 48px 16px; border-bottom: 1px solid var(--edge); }
-.brand { font: 12px var(--mono); color: var(--faint); letter-spacing: 0.08em; margin-bottom: 10px; }
+.brand { display: inline-block; font: 12px var(--mono); color: var(--faint);
+  letter-spacing: 0.08em; margin-bottom: 10px; text-decoration: none;
+  padding: 4px 10px 4px 4px; border-radius: 8px; transition: background .12s; }
+.brand:hover { background: rgba(255,255,255,0.06); color: var(--text); }
 .brand em { color: var(--accent); font-style: normal; }
 h1 { margin: 0 0 6px; font: 500 32px/1.1 var(--sans); letter-spacing: -0.015em; }
 .meta { color: var(--mute); font-size: 13px; }

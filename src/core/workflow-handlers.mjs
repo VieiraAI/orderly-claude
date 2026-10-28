@@ -67,6 +67,10 @@ const HANDLERS = {
     const { text, meta } = await callClaude(prompt, {
       cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'haiku'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
+      // Stream the growing body into the card so the running state feels alive.
+      onStream: ({ text: running }) => ctx.onProgress({
+        partialOutput: { title: `${slug(node.title)}.md · streaming…`, body: running },
+      }),
     });
     const title = firstHeadline(text) || `${slug(node.title)}.md`;
     return { title: `${title}.md`, body: text.trim(), meta };
@@ -165,17 +169,23 @@ const HANDLERS = {
   shots: async (node, ctx) => {
     const origin = await pickOrigin(ctx);
     if (!origin) return { note: 'No dev server detected. Set inputs.devUrl or start one on a known port.' };
+    const baselineOrigin = (ctx.run.inputs?.baselineUrl || '').trim().replace(/\/+$/, '');
     const route = node.route || ctx.run.inputs?.route || '/';
-    const shot = await captureShot(`${origin}${route.startsWith('/') ? route : `/${route}`}`, ctx.signal);
-    if (!shot) return { note: `Capture failed for ${route}` };
-    return { route, origin, shot };
+    const path = route.startsWith('/') ? route : `/${route}`;
+    const after = await captureShot(`${origin}${path}`, ctx.signal);
+    const before = baselineOrigin ? await captureShot(`${baselineOrigin}${path}`, ctx.signal) : null;
+    if (!after) return { note: `Capture failed for ${route}` };
+    return { route, origin, baselineOrigin: baselineOrigin || null, before, after, shot: after };
   },
 
   'shots-set': async (node, ctx) => {
     // Walk one route at a time so the grid fills in on-screen. Each route is
-    // captured against the detected dev server (or inputs.devUrl) and the PNG
-    // lands in the shared blob store so the canvas can render it live.
+    // captured against the detected dev server (or inputs.devUrl); when
+    // inputs.baselineUrl is set, a matching before-shot comes from there so
+    // the card renders a real before/after pair.
     const origin = await pickOrigin(ctx);
+    const baselineOrigin = (ctx.run.inputs?.baselineUrl || '').trim().replace(/\/+$/, '');
+    const baselineName = (ctx.run.inputs?.baseline || '').trim();
     const routes = parseRoutes(ctx.run.inputs?.routes) || ['/', '/blog', '/about', '/pricing', '/contact'];
     const pairs = routes.map((r) => ({ route: r, status: origin ? 'waits' : 'skipped' }));
     if (!origin) {
@@ -189,14 +199,17 @@ const HANDLERS = {
       pairs[i].status = 'running';
       onProgressSnapshot(ctx, pairs, i);
       try {
-        const url = `${origin}${pairs[i].route.startsWith('/') ? pairs[i].route : `/${pairs[i].route}`}`;
-        const shot = await captureShot(url, ctx.signal);
-        if (shot) {
-          pairs[i].status = 'done';
-          pairs[i].shot = shot;
-        } else {
-          pairs[i].status = 'failed';
+        const path = pairs[i].route.startsWith('/') ? pairs[i].route : `/${pairs[i].route}`;
+        const after = await captureShot(`${origin}${path}`, ctx.signal);
+        if (after) {
+          pairs[i].after = after;
+          pairs[i].shot = after; // compat with old renderer that reads .shot
         }
+        if (baselineOrigin) {
+          const before = await captureShot(`${baselineOrigin}${path}`, ctx.signal);
+          if (before) pairs[i].before = before;
+        }
+        pairs[i].status = after ? 'done' : 'failed';
       } catch (e) {
         pairs[i].status = 'failed';
         pairs[i].error = e.message;
@@ -204,7 +217,13 @@ const HANDLERS = {
       onProgressSnapshot(ctx, pairs, i);
     }
     const done = pairs.filter((p) => p.status === 'done').length;
-    return { title: `${done} of ${pairs.length} captured`, origin, pairs };
+    const note = !baselineOrigin && baselineName
+      ? `No baselineUrl set. To compare against ${baselineName}, start a dev server on that branch and pass inputs.baselineUrl.`
+      : null;
+    return {
+      title: `${done} of ${pairs.length} captured${baselineOrigin ? ' · before/after' : ''}`,
+      origin, baselineOrigin: baselineOrigin || null, pairs, note,
+    };
   },
 
   _default: async (node, ctx) => {
@@ -225,7 +244,7 @@ const HANDLERS = {
  * Tests and demos set `ORDERLY_HANDLER_MODE=mock` to short-circuit the spawn
  * so the smoke suite does not bill the API on every run.
  */
-async function callClaude(prompt, { cwd, signal, model = 'sonnet', onProgress, timeoutMs = 180_000 } = {}) {
+async function callClaude(prompt, { cwd, signal, model = 'sonnet', onProgress, onStream, timeoutMs = 180_000 } = {}) {
   if (process.env.ORDERLY_HANDLER_MODE === 'mock') {
     onProgress?.('claude · mock');
     await new Promise((r) => setTimeout(r, 120));
@@ -244,6 +263,9 @@ async function callClaude(prompt, { cwd, signal, model = 'sonnet', onProgress, t
     onDelta: (delta, totals) => {
       const tail = text => text.slice(-40).replace(/\s+/g, ' ').trim();
       onProgress?.(`claude · ${model} · ${totals.tokens} tok · ${tail(totals.text)}`);
+      // Hand the running text to the handler so it can mirror it into the
+      // node's partialOutput — a document handler shows the body growing.
+      onStream?.(totals);
     },
   });
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);

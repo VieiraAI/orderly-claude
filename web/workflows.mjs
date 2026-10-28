@@ -15,7 +15,10 @@ const CAT_LABEL = { design: 'Design', review: 'Review', ship: 'Ship', plan: 'Pla
   build: 'Build', content: 'Content', io: 'I/O' };
 
 const state = { workflows: [], runs: [], skills: [], prompts: [], decisions: [],
-  open: null, openPrompt: null, liveSessionId: null };
+  open: null, openPrompt: null, liveSessionId: null,
+  decisionScope: 'all',    // 'all' or 'session'
+  catalogCategory: 'all',  // filter chip for the Workflows tab
+};
 
 async function loadCatalog() {
   const r = await fetch('/api/workflows').then((x) => x.json());
@@ -30,16 +33,21 @@ async function loadRuns() {
 }
 
 function renderTiles() {
+  renderCatalogChips();
+  const cat = state.catalogCategory;
   for (const scope of ['project', 'user', 'builtin']) {
-    const list = state.workflows.filter((w) => w.scope === scope);
+    const list = state.workflows.filter((w) =>
+      w.scope === scope && (cat === 'all' || w.category === cat));
     const mount = document.getElementById('tiles' + scope[0].toUpperCase() + scope.slice(1));
     const meta  = document.getElementById('meta'    + scope[0].toUpperCase() + scope.slice(1));
     meta.textContent = list.length
       ? `${list.length} workflow${list.length === 1 ? '' : 's'}`
-      : 'none yet';
+      : 'none here';
     if (!list.length) {
       mount.innerHTML = `<div class="empty" style="grid-column:1 / -1;background:var(--surface);">
-        Nothing in <code>${scopeHint(scope)}</code> yet.
+        ${cat === 'all'
+          ? `Nothing in <code>${scopeHint(scope)}</code> yet.`
+          : `No <strong>${esc(cat)}</strong> workflows in <code>${scopeHint(scope)}</code>.`}
       </div>`;
       continue;
     }
@@ -47,6 +55,24 @@ function renderTiles() {
   }
   for (const el of document.querySelectorAll('.tile')) {
     el.onclick = () => openSheet(el.dataset.id);
+  }
+}
+
+function renderCatalogChips() {
+  let bar = document.getElementById('catalogChips');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'catalogChips';
+    bar.className = 'chips-row';
+    document.getElementById('viewCatalog').prepend(bar);
+  }
+  const cats = ['all', ...new Set(state.workflows.map((w) => w.category).filter(Boolean))];
+  bar.innerHTML = cats.map((c) => {
+    const label = c === 'all' ? 'All' : (CAT_LABEL[c] || c);
+    return `<button class="chip ${c === state.catalogCategory ? 'on' : ''}" data-cat="${c}">${label}</button>`;
+  }).join('') + `<span class="chips-count">${state.workflows.length} total</span>`;
+  for (const c of bar.querySelectorAll('.chip')) {
+    c.onclick = () => { state.catalogCategory = c.dataset.cat; renderTiles(); };
   }
 }
 
@@ -133,17 +159,24 @@ async function runNow() {
 
 function renderRuns() {
   const mount = document.getElementById('runsBody');
+  const anyRunning = state.runs.some((r) => r.status === 'running');
+  const bar = `<div class="chips-row">
+    ${anyRunning ? `<button class="chip stop-all" id="btnStopAll">■ Stop all running</button>` : ''}
+    <span class="chips-count">${state.runs.length} total${anyRunning ? ' · live' : ''}</span>
+  </div>`;
   if (!state.runs.length) {
-    mount.innerHTML = '<div class="empty">No runs yet. Pick a workflow from the catalog.</div>';
+    mount.innerHTML = bar + '<div class="empty">No runs yet. Pick a workflow from the catalog.</div>';
+    bindStopAll();
     return;
   }
   const byDay = groupBy(state.runs, (r) => (r.startedAt || '').slice(0, 10));
-  const parts = [];
+  const parts = [bar];
   for (const [day, rows] of byDay) {
     parts.push(`<div class="day">${day}</div>`);
     for (const r of rows) parts.push(runRow(r));
   }
   mount.innerHTML = parts.join('');
+  bindStopAll();
   for (const el of document.querySelectorAll('.run-row')) {
     el.onclick = (ev) => {
       // Row-level actions handle their own navigation.
@@ -160,6 +193,20 @@ function renderRuns() {
       else if (b.dataset.act === 'delete') deleteRunRow(id);
     };
   }
+}
+
+function bindStopAll() {
+  const btn = document.getElementById('btnStopAll');
+  if (!btn) return;
+  btn.onclick = async () => {
+    if (!confirm('Stop every live scheduler?')) return;
+    btn.textContent = 'Stopping…';
+    try {
+      const r = await fetch('/api/runs/stop-all', { method: 'POST' }).then((x) => x.json());
+      btn.textContent = `Stopped ${r.stopped}`;
+      setTimeout(loadRuns, 500);
+    } catch (e) { alert(`Stop-all failed: ${e.message}`); }
+  };
 }
 
 async function shareRunRow(runId, btn) {
@@ -191,6 +238,13 @@ function runRow(r) {
     : r.status === 'done' ? 'done'
     : r.status === 'failed' ? 'failed'
     : `step ${r.doneNodes} of ${r.totalNodes}`;
+  const totalBits = [];
+  if (typeof r.totalCost === 'number' && r.totalCost > 0) {
+    totalBits.push(r.totalCost < 0.01 ? `$${r.totalCost.toFixed(4)}` : `$${r.totalCost.toFixed(3)}`);
+  }
+  if (r.totalElapsed) totalBits.push(r.totalElapsed);
+  if (r.totalTokens)  totalBits.push(`${r.totalTokens} tok`);
+  const totals = totalBits.length ? `<span class="row-totals">${totalBits.join(' · ')}</span>` : '';
   const pipCls = r.status === 'running' ? `${cat} running` : cat;
   return `<div class="run-row" data-id="${r.runId}">
     <span class="time">${time}</span>
@@ -202,7 +256,7 @@ function runRow(r) {
       </div>
     </div>
     <span class="trigger">${escapeHtml(r.trigger || '—')}</span>
-    <span class="state ${stateCls}">${escapeHtml(label)}</span>
+    <span class="state ${stateCls}">${escapeHtml(label)}${totals}</span>
     <span class="row-actions">
       <button class="row-btn" data-act="rerun"  data-id="${r.runId}" title="Start a new run from the same def">↻ rerun</button>
       <button class="row-btn" data-act="share"  data-id="${r.runId}" title="Signed URL to a static copy">◎ share</button>
@@ -244,29 +298,55 @@ function groupBy(arr, fn) {
 async function loadDecisions() {
   const r = await fetch('/api/decisions').then((x) => x.json());
   state.decisions = r.decisions || [];
+  // Learn the live session so the "this session" chip is accurate.
+  if (!state.liveSessionId) {
+    try {
+      const s = await fetch('/api/state').then((x) => x.json());
+      state.liveSessionId = s.instance?.sessionId || null;
+    } catch {}
+  }
   renderDecisions();
 }
 
 function renderDecisions() {
   const mount = document.getElementById('decisionsMount');
-  if (!state.decisions.length) {
-    mount.innerHTML = `<div class="empty">
-      Decisions show up here once a workflow asks a question and gets an answer, or once a step is marked as a decision in the viewer.
+  const scope = state.decisionScope;
+  const sessionId = state.liveSessionId;
+  const chips = `<div class="chips-row">
+    <button class="chip ${scope === 'all' ? 'on' : ''}" data-scope="all">All sessions</button>
+    <button class="chip ${scope === 'session' ? 'on' : ''}" data-scope="session"
+            ${sessionId ? '' : 'disabled title="No live session"'}>
+      This session ${sessionId ? `· ${esc(sessionId.slice(0, 8))}` : ''}
+    </button>
+    <span class="chips-count">${state.decisions.length} total</span>
+  </div>`;
+
+  const filtered = scope === 'session' && sessionId
+    ? state.decisions.filter((d) => d.sessionId === sessionId)
+    : state.decisions;
+
+  if (!filtered.length) {
+    mount.innerHTML = chips + `<div class="empty">
+      ${scope === 'session'
+        ? 'No decisions in this session yet. Mark a step with ⚑ in the viewer, or let a workflow ask-node resolve.'
+        : 'Decisions show up here once a workflow asks a question and gets an answer, or once a step is marked as a decision in the viewer.'}
     </div>`;
+    bindChips();
     return;
   }
   const byDay = new Map();
-  for (const d of state.decisions) {
+  for (const d of filtered) {
     const k = (d.at || '').slice(0, 10) || 'unknown';
     if (!byDay.has(k)) byDay.set(k, []);
     byDay.get(k).push(d);
   }
-  const parts = [];
+  const parts = [chips];
   for (const [day, rows] of byDay) {
     parts.push(`<div class="day">${esc(day)}</div>`);
     for (const d of rows) parts.push(decisionRow(d));
   }
   mount.innerHTML = parts.join('');
+  bindChips();
   for (const el of document.querySelectorAll('.decision-row')) {
     el.onclick = (ev) => {
       if (ev.target.closest('.row-btn')) return;
@@ -280,6 +360,15 @@ function renderDecisions() {
   }
   for (const b of document.querySelectorAll('.d-share')) {
     b.onclick = (ev) => { ev.stopPropagation(); shareDecisionRow(b.closest('.decision-row'), b); };
+  }
+}
+
+function bindChips() {
+  for (const chip of document.querySelectorAll('#decisionsMount .chip')) {
+    chip.onclick = () => {
+      state.decisionScope = chip.dataset.scope;
+      renderDecisions();
+    };
   }
 }
 

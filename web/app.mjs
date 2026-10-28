@@ -151,17 +151,28 @@ async function loadMarks() {
   } catch { state.markedSteps = new Set(); }
 }
 
-async function toggleDecisionMark(stepId, label) {
+async function toggleDecisionMark(stepId, label, { edit = false } = {}) {
   if (!state.sessionId) return;
   const marked = state.markedSteps.has(stepId);
-  const method = marked ? 'DELETE' : 'POST';
-  await fetch('/api/decisions/mark', {
-    method,
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ sessionId: state.sessionId, stepId, note: label || '' }),
-  });
-  if (marked) state.markedSteps.delete(stepId);
-  else state.markedSteps.add(stepId);
+  // Marking (new or editing): prompt for a one-line reason, defaulting to
+  // the step label. Unmarking is silent.
+  if (!marked || edit) {
+    const note = prompt('Why does this matter? (empty cancels)', label || '');
+    if (note === null) return;
+    await fetch('/api/decisions/mark', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: state.sessionId, stepId, note }),
+    });
+    state.markedSteps.add(stepId);
+  } else {
+    await fetch('/api/decisions/mark', {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: state.sessionId, stepId }),
+    });
+    state.markedSteps.delete(stepId);
+  }
   renderTimeline();
 }
 window.toggleDecisionMark = toggleDecisionMark;
@@ -223,11 +234,15 @@ function bubble(step) {
   if (marked) tags.push(el('span', { class: 'tag decision' }, 'decision'));
 
   // \u2691 is a sibling button so a click to mark doesn't open the drawer.
+  // Shift-click an already-marked step to edit its note.
   const mark = el('button', {
     class: `mark${marked ? ' on' : ''}`,
-    title: marked ? 'Unmark as decision' : 'Mark as decision',
+    title: marked ? 'Unmark \u00b7 shift-click to edit note' : 'Mark as decision',
     'aria-label': marked ? 'Unmark decision' : 'Mark as decision',
-    onclick: (e) => { e.stopPropagation(); toggleDecisionMark(step.id, step.label); },
+    onclick: (e) => {
+      e.stopPropagation();
+      toggleDecisionMark(step.id, step.label, { edit: marked && e.shiftKey });
+    },
   }, '\u2691');
 
   const bubbleBtn = el('button', {

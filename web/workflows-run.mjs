@@ -59,9 +59,27 @@ function render() {
   document.getElementById('runCatPip').className    = `pip ${run.category || ''}`;
   const nodes = run.graph?.nodes || [];
   const done = nodes.filter((n) => n.status === 'done').length;
+  // Running total — same roll-up logic as the server summariser so the
+  // header matches the Runs tab row.
+  const totals = { cost: 0, tokens: 0, elapsedS: 0 };
+  for (const n of nodes) {
+    const m = n.output?.meta;
+    if (!m) continue;
+    if (typeof m.cost === 'number') totals.cost += m.cost;
+    if (typeof m.tokens === 'number') totals.tokens += m.tokens;
+    if (typeof m.elapsed === 'string') {
+      const s = parseFloat(m.elapsed);
+      if (Number.isFinite(s)) totals.elapsedS += s;
+    }
+  }
+  const totalBits = [];
+  if (totals.cost)    totalBits.push(totals.cost < 0.01 ? `$${totals.cost.toFixed(4)}` : `$${totals.cost.toFixed(3)}`);
+  if (totals.elapsedS) totalBits.push(`${totals.elapsedS.toFixed(1)} s`);
+  if (totals.tokens)  totalBits.push(`${totals.tokens} tok`);
+  const totalStr = totalBits.length ? ` · <span class="run-totals">${totalBits.join(' · ')}</span>` : '';
   document.getElementById('runStatus').innerHTML = run.status === 'running'
-    ? `<span class="live-dot"></span>Running · ${done} of ${nodes.length} done`
-    : `${run.status} · ${done} of ${nodes.length} done`;
+    ? `<span class="live-dot"></span>Running · ${done} of ${nodes.length} done${totalStr}`
+    : `${run.status} · ${done} of ${nodes.length} done${totalStr}`;
   if (run.sessionId) {
     document.getElementById('runSession').textContent = `session ${run.sessionId.slice(0, 8)}`;
   }
@@ -215,7 +233,10 @@ function cardFootMeta(n, meta) {
 }
 
 function cardBody(n) {
-  const selfProgress = n.kind === 'shots-set';
+  // `selfProgress` kinds render their own in-progress UI (grids filling, text
+  // streaming); the generic running-note short-circuits for everyone else.
+  const selfProgress = n.kind === 'shots-set'
+    || (n.kind === 'document' && !!n.output?.body);
   if (n.status === 'waits')   return `<div class="wait-note">Waits for ${esc(n.waitsFor || 'upstream nodes')}</div>`;
   if (n.status === 'pending') return `<div class="wait-note">Pending</div>`;
   if (n.status === 'running' && !selfProgress) {
@@ -247,12 +268,17 @@ function cardBody(n) {
         <div class="doc-h" style="margin-top:2px;">${esc(o.name || 'mockup.html')}</div>
         <div class="doc-b">${esc(o.note || '')}</div>`;
     case 'shots': {
-      if (!o.shot?.ref) return `<div class="wait-note">${esc(o.note || 'No shot captured.')}</div>`;
-      return `<div class="shots-pair"><a class="shot" href="${blobUrl(o.shot.ref)}" target="_blank"
-        style="background-image:url('${blobUrl(o.shot.ref)}')"><span class="cap">${esc(o.route || '/')}</span></a></div>`;
+      const after = o.after?.ref || o.shot?.ref;
+      const before = o.before?.ref;
+      if (!after) return `<div class="wait-note">${esc(o.note || 'No shot captured.')}</div>`;
+      const shotEl = (ref, cap) => ref
+        ? `<a class="shot" href="${blobUrl(ref)}" target="_blank" style="background-image:url('${blobUrl(ref)}')"><span class="cap">${esc(cap)}</span></a>`
+        : `<div class="shot"><span class="cap">${esc(cap)}</span></div>`;
+      return `<div class="shots-pair">${before ? shotEl(before, 'before') : ''}${shotEl(after, before ? 'after' : esc(o.route || '/'))}</div>`;
     }
     case 'shots-set': {
       const pairs = (o.pairs || []).slice(0, 6);
+      const hasBaseline = pairs.some((p) => p.before?.ref);
       const rows = pairs.map((p) => {
         const cls = p.status === 'done' ? 'done'
           : p.status === 'running' ? 'running'
@@ -261,15 +287,23 @@ function cardBody(n) {
           : p.status === 'running' ? 'capturing…'
           : p.status === 'failed'  ? 'failed'
           : p.status === 'skipped' ? 'no server' : 'queued';
-        const shot = p.shot?.ref
-          ? `<a class="pair-shot filled real only" href="${blobUrl(p.shot.ref)}" target="_blank"
-               style="background-image:url('${blobUrl(p.shot.ref)}')" title="Open full-size"></a>`
-          : p.status === 'running' ? '<div class="pair-shot running"></div><div class="pair-shot running"></div>'
-          : p.status === 'failed'  ? '<div class="pair-shot failed"></div><div class="pair-shot failed"></div>'
-          : '<div class="pair-shot"></div><div class="pair-shot"></div>';
+        const after  = p.after?.ref  || p.shot?.ref;
+        const before = p.before?.ref;
+        const slot = (ref, title) => ref
+          ? `<a class="pair-shot filled real" href="${blobUrl(ref)}" target="_blank"
+               style="background-image:url('${blobUrl(ref)}')" title="${esc(title)}"></a>`
+          : p.status === 'running' ? '<div class="pair-shot running"></div>'
+          : p.status === 'failed'  ? '<div class="pair-shot failed"></div>'
+          : '<div class="pair-shot"></div>';
+        const content = hasBaseline
+          ? `${slot(before, 'before')}${slot(after, 'after')}`
+          : (after
+             ? `<a class="pair-shot filled real only" href="${blobUrl(after)}" target="_blank"
+                  style="background-image:url('${blobUrl(after)}')" title="Open full-size"></a>`
+             : slot(null));
         return `<div class="route-row ${cls}">
           <span class="route-label">${esc(p.route)}</span>
-          <div class="pair-mini${p.shot?.ref ? ' solo' : ''}">${shot}</div>
+          <div class="pair-mini${!hasBaseline && after ? ' solo' : ''}">${content}</div>
           <span class="route-state">${label}</span>
         </div>`;
       }).join('');
