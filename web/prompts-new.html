@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>New prompt — Orderly Claude</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/workflows.css">
+<style>
+  .editor { max-width: 1080px; margin: 0 auto; padding: 24px 56px 60px; display: grid; gap: 20px; }
+  .row { display: grid; grid-template-columns: 160px 1fr; gap: 12px; align-items: center; }
+  .row label { font: 12px var(--f-mono); color: var(--mute); letter-spacing: 0.04em; text-transform: uppercase; }
+  .row input, .row select {
+    width: 100%; padding: 8px 12px; font: 14px var(--f-ui); color: var(--text);
+    background: var(--surface); border: 1px solid var(--edge-tint); border-radius: 8px; outline: none;
+  }
+  .row input:focus, .row select:focus { border-color: var(--edge-hi); }
+  .md-ed {
+    width: 100%; min-height: 420px; padding: 14px;
+    font: 12.5px/1.55 var(--f-mono); color: var(--text);
+    background: var(--surface); border: 1px solid var(--edge-tint); border-radius: 10px; outline: none;
+    resize: vertical;
+  }
+  .md-ed:focus { border-color: var(--edge-hi); }
+  .actions-bar { display: flex; gap: 8px; align-items: center; }
+  .status { font: 11px var(--f-mono); color: var(--mute); margin-left: auto; }
+  .status.ok   { color: #90d6b0; }
+  .status.err  { color: var(--ship); }
+  .problems { background: color-mix(in oklab, var(--ship) 10%, transparent);
+    border: 1px solid color-mix(in oklab, var(--ship) 30%, transparent);
+    border-radius: 8px; padding: 10px 14px; font: 12px var(--f-mono); color: var(--text); }
+  .problems ul { margin: 0; padding-left: 18px; }
+  .problems .ok { color: #90d6b0; }
+</style>
+</head><body>
+
+<nav class="nav">
+  <span class="app-menu" id="appMenu"></span>
+  <span class="here">new prompt</span>
+  <span class="spacer"></span>
+  <a class="link" href="/workflows.html#prompts">← back to Prompts</a>
+</nav>
+<script type="module">
+  import { mountAppMenu } from '/app-menu.mjs';
+  mountAppMenu(document.getElementById('appMenu'), { here: 'prompts' });
+</script>
+
+<section class="hero">
+  <div class="eyebrow">Author · a prompt is one .md file</div>
+  <h1 class="display">New prompt.</h1>
+  <p>Set the slug and title, tweak the frontmatter + body, validate, save. Writes to the right <code>.claude/prompts/</code> for the chosen scope.</p>
+</section>
+
+<main class="editor">
+  <div class="row">
+    <label for="pId">slug</label>
+    <input id="pId" placeholder="hyphenated-slug" spellcheck="false">
+  </div>
+  <div class="row">
+    <label for="pTitle">title</label>
+    <input id="pTitle" placeholder="Human-readable title">
+  </div>
+  <div class="row">
+    <label for="pScope">scope</label>
+    <select id="pScope">
+      <option value="project">project (writes to &lt;repo&gt;/.claude/prompts/)</option>
+      <option value="user">user (writes to ~/.claude/prompts/)</option>
+    </select>
+  </div>
+
+  <div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <label style="font: 12px var(--f-mono); color: var(--mute); letter-spacing: 0.04em; text-transform: uppercase;">inputs</label>
+      <button id="btnAddInput" class="btn-ghost" style="padding:3px 10px;font:11px var(--f-mono);">+ add input</button>
+    </div>
+    <div id="inputsList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;"></div>
+  </div>
+
+  <div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <label style="font: 12px var(--f-mono); color: var(--mute); letter-spacing: 0.04em; text-transform: uppercase;">prompt .md</label>
+      <button id="btnScaffold" class="btn-ghost" style="padding:3px 10px;font:11px var(--f-mono);">↻ Fresh scaffold</button>
+    </div>
+    <textarea id="pMd" class="md-ed" spellcheck="false"></textarea>
+  </div>
+
+  <div id="problems" class="problems" style="display:none;"></div>
+
+  <div class="actions-bar">
+    <button class="btn-run" id="btnValidate">✓ Validate</button>
+    <button class="btn-run" id="btnSave" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent);">◆ Save</button>
+    <span id="status" class="status">Edit something.</span>
+  </div>
+</main>
+
+<script type="module" src="/prompts-new.mjs"></script>
+</body></html>

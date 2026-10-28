@@ -14,15 +14,25 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { USER_SKILLS_DIR, repoSkillsDir } from './paths.mjs';
+import { knownRepoRoots } from './workflows.mjs';
 
-export function listSkills({ repoRoot } = {}) {
+/*
+ * Orderly Claude spans every project, not just the one it was booted in.
+ * Walk every repo the sessions index knows about and emit any skills they
+ * declare under .claude/skills/, plus the global library under ~/.claude/skills/.
+ * Each entry carries its scope and the repo it belongs to so the client can
+ * group one section per project.
+ */
+export function listSkills() {
   const out = [];
-  if (repoRoot) out.push(...readRoot(repoSkillsDir(repoRoot), 'project'));
-  out.push(...readRoot(USER_SKILLS_DIR, 'user'));
+  for (const root of knownRepoRoots()) {
+    out.push(...readRoot(repoSkillsDir(root), 'project', root));
+  }
+  out.push(...readRoot(USER_SKILLS_DIR, 'user', null));
   return out;
 }
 
-function readRoot(root, scope) {
+function readRoot(root, scope, repoRoot) {
   if (!fs.existsSync(root)) return [];
   let dirs;
   try { dirs = fs.readdirSync(root, { withFileTypes: true }); } catch { return []; }
@@ -34,9 +44,11 @@ function readRoot(root, scope) {
     if (!fs.existsSync(mdPath)) continue;
     const parsed = readSkillMd(mdPath);
     out.push({
-      id:          `${scope}:${e.name}`,
+      id:          `${scope}:${repoRoot || 'global'}:${e.name}`,
       slug:        e.name,
       scope,
+      repoRoot:    repoRoot || null,
+      repoName:    repoRoot ? path.basename(repoRoot) : null,
       scopeRoot:   root,
       path:        skillPath,
       name:        parsed.name || e.name,
@@ -81,8 +93,11 @@ function readSkillMd(file) {
 
     if (indent === 0) {
       inMetadata = key === 'metadata' && !value;
-      if (value === '>' || value === '|') {
-        const [folded, used] = readBlockScalar(lines, i + 1, indent, value === '>');
+      // YAML block scalar introducers: `>` or `|` with optional chomp (`-`/`+`)
+      // and optional indent indicator (ignored here).
+      const block = /^([|>])[-+]?\d*\s*$/.exec(value);
+      if (block) {
+        const [folded, used] = readBlockScalar(lines, i + 1, indent, block[1] === '>');
         fields[key] = folded;
         i += 1 + used;
       } else {

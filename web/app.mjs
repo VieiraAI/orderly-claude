@@ -5,6 +5,7 @@ const state = {
   sessionId: null, live: true, session: null, activeStep: null,
   tab: 'detail', results: [], sel: 0, run: { status: 'idle', busy: false }, person: null, tabs: [],
   activity: null, devUrl: null, build: null, think: { word: 0, tick: 0, since: null },
+  runs: [], markedSteps: new Set(),
   voice: (() => {
     try { return localStorage.getItem('cz-voice-2') || 'genz'; } catch { return 'genz'; }
   })(),
@@ -122,6 +123,91 @@ let term = genz.next();
 
 const VOICE_ORDER = ['genz', 'plain', 'booth'];
 
+/* ---------- workflow runs in the timeline ---------- */
+
+/**
+ * The sessions index tells the backend which runs belong to this session.
+ * A run shows up as a highlighted bubble on the turn it kicked off from,
+ * and clicking it opens the canvas page scoped to that run id.
+ */
+async function loadRuns() {
+  if (!state.sessionId) return;
+  try {
+    const r = await api(`/api/runs?session=${state.sessionId}`);
+    state.runs = r?.runs || [];
+  } catch { state.runs = []; }
+}
+
+/** Steps the user has marked as decisions, pulled fresh each refresh. */
+async function loadMarks() {
+  if (!state.sessionId) return;
+  try {
+    const r = await api('/api/decisions');
+    state.markedSteps = new Set(
+      (r?.decisions || [])
+        .filter((d) => d.kind === 'marked' && d.sessionId === state.sessionId)
+        .map((d) => d.stepId),
+    );
+  } catch { state.markedSteps = new Set(); }
+}
+
+async function toggleDecisionMark(stepId, label, { edit = false } = {}) {
+  if (!state.sessionId) return;
+  const marked = state.markedSteps.has(stepId);
+  // Marking (new or editing): prompt for a one-line reason, defaulting to
+  // the step label. Unmarking is silent.
+  if (!marked || edit) {
+    const note = prompt('Why does this matter? (empty cancels)', label || '');
+    if (note === null) return;
+    await fetch('/api/decisions/mark', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: state.sessionId, stepId, note }),
+    });
+    state.markedSteps.add(stepId);
+  } else {
+    await fetch('/api/decisions/mark', {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: state.sessionId, stepId }),
+    });
+    state.markedSteps.delete(stepId);
+  }
+  renderTimeline();
+}
+window.toggleDecisionMark = toggleDecisionMark;
+
+function workflowBubble(run) {
+  const done = run.doneNodes ?? 0;
+  const total = run.totalNodes ?? 0;
+  const live = run.status === 'running';
+  const waiting = run.status === 'awaiting-answer';
+  const failed = run.status === 'failed';
+  const stopped = run.status === 'stopped';
+  const sub = waiting ? `waiting · ${run.askingLabel || 'needs you'}`
+    : live     ? (run.runningLabel ? run.runningLabel : `step ${done} of ${total}`)
+    : failed   ? 'failed'
+    : stopped  ? 'stopped'
+    : `done · ${done} of ${total}`;
+  const toneCls = waiting ? 'ask' : live ? 'running' : failed ? 'warn' : stopped ? 'warn' : 'done';
+  return el('a', {
+    class: `bubble workflow tone-${toneCls}`,
+    href: `/workflows-run.html#${run.runId}`,
+    target: '_blank', rel: 'noopener',
+    title: 'Open the canvas for this run',
+  }, [
+    el('span', { class: `icon t-workflow` }, '◇'),
+    el('span', { class: 'label' }, [
+      el('span', { class: 'text' }, [
+        el('span', { class: 'wf-tag' }, 'workflow'),
+        el('span', { class: 'wf-name' }, run.workflowTitle || run.workflowId),
+      ]),
+      el('span', { class: 'sub' }, sub),
+    ]),
+    el('span', { class: 'tags' }, el('span', { class: 'tag open-canvas' }, 'open canvas →')),
+  ]);
+}
+
 /* ---------- timeline ---------- */
 
 function bubble(step) {
@@ -144,9 +230,23 @@ function bubble(step) {
       step.changedPercent ? `before & after · ${step.changedPercent}%` : 'before & after'));
   }
   if (step.emergent && step.status === 'warn') tags.push(el('span', { class: 'tag emergent' }, 'unplanned'));
+  const marked = state.markedSteps.has(step.id);
+  if (marked) tags.push(el('span', { class: 'tag decision' }, 'decision'));
 
-  return el('button', {
-    class: `bubble tone-${tone}${state.activeStep === step.id ? ' active' : ''}`,
+  // \u2691 is a sibling button so a click to mark doesn't open the drawer.
+  // Shift-click an already-marked step to edit its note.
+  const mark = el('button', {
+    class: `mark${marked ? ' on' : ''}`,
+    title: marked ? 'Unmark \u00b7 shift-click to edit note' : 'Mark as decision',
+    'aria-label': marked ? 'Unmark decision' : 'Mark as decision',
+    onclick: (e) => {
+      e.stopPropagation();
+      toggleDecisionMark(step.id, step.label, { edit: marked && e.shiftKey });
+    },
+  }, '\u2691');
+
+  const bubbleBtn = el('button', {
+    class: `bubble tone-${tone}${state.activeStep === step.id ? ' active' : ''}${marked ? ' marked' : ''}`,
     title: TONE_TITLE[tone] || '',
     onclick: () => openStep(step.id),
   }, [
@@ -158,7 +258,9 @@ function bubble(step) {
         : bits.length ? el('span', { class: 'sub' }, bits.join(' \u00b7 ')) : null,
     ]),
     el('span', { class: 'tags' }, tags),
+    mark,
   ]);
+  return bubbleBtn;
 }
 
 const VOICE_LABEL = { plain: 'thinking', booth: 'in the booth' };
@@ -426,7 +528,16 @@ function renderTimeline() {
     const body = [];
     if (turn.intro) body.push(el('div', { class: 'msg-text md', html: md(turn.intro) }));
 
-    if (turn.steps.length || (turn.pending || []).length || liveNeedsRow || openAsk) {
+    // Any workflow runs that kicked off between this turn's prompt and the
+    // next turn's prompt belong to this turn.
+    const nextTurnAt = isLast ? Infinity : Date.parse(turns[index + 1].promptAt);
+    const turnAt = Date.parse(turn.promptAt || 0) || 0;
+    const myRuns = (state.runs || []).filter((r) => {
+      const t = Date.parse(r.startedAt);
+      return isFinite(t) && t >= turnAt && t < nextTurnAt;
+    });
+
+    if (turn.steps.length || (turn.pending || []).length || liveNeedsRow || openAsk || myRuns.length) {
       const list = el('div', { class: 'steps' });
       for (const s of turn.steps) list.append(bubble(s));
       for (const p of turn.pending || []) {
@@ -435,6 +546,7 @@ function renderTimeline() {
           el('span', { class: 'label' }, el('span', { class: 'text' }, p)),
         ]));
       }
+      for (const r of myRuns) list.append(workflowBubble(r));
       if (liveNeedsRow) list.append(thinkingBubble());
       else if (openAsk) list.append(waitingBubble(openAsk.label));
       body.push(list);
@@ -1089,6 +1201,8 @@ async function refresh() {
     ? `capturing ${data.devUrl.replace('http://', '')}`
     : 'set capture target';
   state.devUrl = data.devUrl || null;
+  await loadRuns();
+  await loadMarks();
   renderTimeline();
 }
 
@@ -1571,6 +1685,10 @@ events.addEventListener('session', (e) => {
     if (sessionId) { state.sessionId = sessionId; refresh(); loadRail(); }
   } catch {}
 });
+// Workflow runs this session is responsible for — pull them again so the
+// bubble appears, its status advances, and the "done · N of N" lands.
+events.addEventListener('run-start',  () => { loadRuns().then(renderTimeline); });
+events.addEventListener('run-finish', () => { loadRuns().then(renderTimeline); });
 
 /* ---------- search ---------- */
 
@@ -1630,11 +1748,38 @@ $('updateHint').onclick = () => { saveDraft(); location.reload(); };
 
 $('newSessionBtn').onclick = () => newSession();
 
+$('shareBtn')?.addEventListener('click', async () => {
+  if (!state.sessionId) { alert('No session to share yet.'); return; }
+  const btn = $('shareBtn');
+  const prev = btn.textContent;
+  btn.textContent = 'Signing…';
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(state.sessionId)}/share`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((x) => x.json());
+    if (!r.url) throw new Error(r.error || 'no url');
+    await navigator.clipboard?.writeText(r.url).catch(() => {});
+    btn.textContent = '◎ Copied';
+    window.open(r.url, '_blank', 'noopener');
+    setTimeout(() => { btn.textContent = prev; btn.disabled = false; }, 1800);
+  } catch (e) {
+    btn.textContent = prev;
+    btn.disabled = false;
+    alert(`Share failed: ${e.message}`);
+  }
+});
+
 $('railBtn').onclick = () => {
   const open = layoutEl().classList.toggle('rail-open');
   try { localStorage.setItem('cz-rail', open ? '1' : '0'); } catch {}
 };
-try { if (localStorage.getItem('cz-rail') === '1') layoutEl().classList.add('rail-open'); } catch {}
+// Rail is open by default so the ☰ affordance isn't a mystery; the user's
+// explicit toggle still sticks across reloads.
+try {
+  const pref = localStorage.getItem('cz-rail');
+  if (pref === null || pref === '1') layoutEl().classList.add('rail-open');
+} catch { layoutEl().classList.add('rail-open'); }
 
 function applyTheme(mode, remember = true) {
   document.documentElement.setAttribute('data-theme', mode);

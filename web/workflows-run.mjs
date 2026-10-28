@@ -59,14 +59,88 @@ function render() {
   document.getElementById('runCatPip').className    = `pip ${run.category || ''}`;
   const nodes = run.graph?.nodes || [];
   const done = nodes.filter((n) => n.status === 'done').length;
+  // Running total — same roll-up logic as the server summariser so the
+  // header matches the Runs tab row.
+  const totals = { cost: 0, tokens: 0, elapsedS: 0 };
+  for (const n of nodes) {
+    const m = n.output?.meta;
+    if (!m) continue;
+    if (typeof m.cost === 'number') totals.cost += m.cost;
+    if (typeof m.tokens === 'number') totals.tokens += m.tokens;
+    if (typeof m.elapsed === 'string') {
+      const s = parseFloat(m.elapsed);
+      if (Number.isFinite(s)) totals.elapsedS += s;
+    }
+  }
+  const totalBits = [];
+  if (totals.cost)    totalBits.push(totals.cost < 0.01 ? `$${totals.cost.toFixed(4)}` : `$${totals.cost.toFixed(3)}`);
+  if (totals.elapsedS) totalBits.push(`${totals.elapsedS.toFixed(1)} s`);
+  if (totals.tokens)  totalBits.push(`${totals.tokens} tok`);
+  const totalStr = totalBits.length ? ` · <span class="run-totals">${totalBits.join(' · ')}</span>` : '';
   document.getElementById('runStatus').innerHTML = run.status === 'running'
-    ? `<span class="live-dot"></span>Running · ${done} of ${nodes.length} done`
-    : `${run.status} · ${done} of ${nodes.length} done`;
+    ? `<span class="live-dot"></span>Running · ${done} of ${nodes.length} done${totalStr}`
+    : `${run.status} · ${done} of ${nodes.length} done${totalStr}`;
   if (run.sessionId) {
     document.getElementById('runSession').textContent = `session ${run.sessionId.slice(0, 8)}`;
   }
   renderPlanRail();
   layoutCanvas();
+  renderRunActions();
+}
+
+function renderRunActions() {
+  let bar = document.getElementById('runActions');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'runActions';
+    bar.className = 'run-actions';
+    document.querySelector('.panel .head').append(bar);
+  }
+  const terminal = ['done', 'failed', 'stopped'].includes(run.status);
+  bar.innerHTML = `
+    <button class="run-btn" data-act="rerun-all" ${terminal ? '' : 'disabled'}
+            title="Clone this run and start from the top">↻ Rerun</button>
+    <button class="run-btn" data-act="share" title="Signed URL to a static copy of this run">◎ Share</button>
+    <button class="run-btn danger" data-act="delete"
+            title="Delete this run folder">✕ Delete</button>`;
+  bar.querySelector('[data-act="rerun-all"]').onclick = () => rerunFromCanvas(null);
+  bar.querySelector('[data-act="share"]').onclick = async () => {
+    const btn = bar.querySelector('[data-act="share"]');
+    const prev = btn.textContent;
+    btn.textContent = 'Signing…';
+    try {
+      const r = await fetch(`/api/runs/${encodeURIComponent(run.runId)}/share`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      }).then((x) => x.json());
+      if (!r.url) throw new Error(r.error || 'no url');
+      await navigator.clipboard?.writeText(r.url).catch(() => {});
+      btn.textContent = '◎ Copied';
+      window.open(r.url, '_blank', 'noopener');
+      setTimeout(() => { btn.textContent = prev; }, 1800);
+    } catch (e) {
+      btn.textContent = prev;
+      alert(`Share failed: ${e.message}`);
+    }
+  };
+  bar.querySelector('[data-act="delete"]').onclick = async () => {
+    if (!confirm('Delete this run? The folder and all its outputs will be removed.')) return;
+    try {
+      const r = await fetch(`/api/runs/${encodeURIComponent(run.runId)}`, { method: 'DELETE' }).then((x) => x.json());
+      if (r.deleted) { location.href = '/workflows.html#runs'; return; }
+      throw new Error(r.error || 'delete failed');
+    } catch (e) { alert(`Delete failed: ${e.message}`); }
+  };
+}
+
+async function rerunFromCanvas(fromNodeId) {
+  try {
+    const r = await fetch(`/api/runs/${encodeURIComponent(run.runId)}/rerun`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fromNodeId }),
+    }).then((x) => x.json());
+    if (r.run?.runId) { location.href = `/workflows-run.html#${r.run.runId}`; return; }
+    throw new Error(r.error || 'rerun failed');
+  } catch (e) { alert(`Rerun failed: ${e.message}`); }
 }
 
 function renderPlanRail() {
@@ -118,28 +192,62 @@ function makeCard(n, pos, parent) {
   card.className = kls;
   card.style.cssText = `left:${pos.left}px;top:${pos.top}px;width:${pos.width}px`;
   card.dataset.id = n.id;
+  // The model label on the head uses the real model that ran if we have it,
+  // otherwise a kind-level default. Same with the credit on the foot.
+  const meta = n.output?.meta || {};
+  const modelLabel = meta.model
+    ? `claude · ${esc(meta.model)}`
+    : (KIND_MODEL[n.kind] || '');
+  const footMeta = cardFootMeta(n, meta);
   card.innerHTML = `
     <div class="c-head">
       <span class="k-icon">${ICON[n.kind] || ''}</span>
       <span class="k-name">${KIND_LABEL[n.kind] || n.kind}</span>
-      <span class="k-model">${KIND_MODEL[n.kind] || ''}</span>
+      <span class="k-model">${modelLabel}</span>
     </div>
     <div class="c-body">${cardBody(n)}</div>
     <div class="c-foot">
       <span>${esc(n.title)}</span>
-      <span class="credit">⚡ ${n.cost ?? 1}</span>
+      <span class="credit">${footMeta}</span>
     </div>`;
   card.onclick = () => selectNode(n.id);
   parent.append(card);
   return card;
 }
 
+/**
+ * The right-side bit on the card footer. When a handler called the CLI it
+ * returns `meta` with model, cost, elapsed, tokens; prefer that over the
+ * static cost token the def declared. Falls back to the static credit for
+ * local kinds (terminal, ask) and placeholder output.
+ */
+function cardFootMeta(n, meta) {
+  const bits = [];
+  if (typeof meta.cost === 'number') {
+    bits.push(meta.cost < 0.01 ? `$${meta.cost.toFixed(4)}` : `$${meta.cost.toFixed(3)}`);
+  }
+  if (meta.elapsed) bits.push(esc(String(meta.elapsed)));
+  if (typeof meta.tokens === 'number' && meta.tokens > 0) bits.push(`${meta.tokens} tok`);
+  if (bits.length) return bits.join(' · ');
+  return `⚡ ${n.cost ?? 1}`;
+}
+
 function cardBody(n) {
-  const selfProgress = n.kind === 'shots-set';
+  // `selfProgress` kinds render their own in-progress UI (grids filling, text
+  // streaming); the generic running-note short-circuits for everyone else.
+  const selfProgress = n.kind === 'shots-set'
+    || (n.kind === 'document' && !!n.output?.body);
   if (n.status === 'waits')   return `<div class="wait-note">Waits for ${esc(n.waitsFor || 'upstream nodes')}</div>`;
   if (n.status === 'pending') return `<div class="wait-note">Pending</div>`;
   if (n.status === 'running' && !selfProgress) {
     return `<div class="running-note"><span class="dot-pulse"></span>${esc(n.progress || 'Making…')}</div>`;
+  }
+  if (n.status === 'failed') {
+    const msg = n.output?.error || 'Handler threw. Open the run.json for the full trace.';
+    return `<div class="fail-note"><span class="fail-tag">failed</span>${esc(msg)}</div>`;
+  }
+  if (n.status === 'stopped') {
+    return `<div class="wait-note">Stopped before it finished.</div>`;
   }
   const o = n.output || {};
   switch (n.kind) {
@@ -159,23 +267,49 @@ function cardBody(n) {
         <div class="mock-ph"><div class="mini"><div class="bar a"></div><div class="bar b"></div><div class="bar c"></div></div></div>
         <div class="doc-h" style="margin-top:2px;">${esc(o.name || 'mockup.html')}</div>
         <div class="doc-b">${esc(o.note || '')}</div>`;
-    case 'shots':
-      return `<div class="shots-pair"><div class="shot"><span class="cap">before</span></div><div class="shot"><span class="cap">after</span></div></div>`;
+    case 'shots': {
+      const after = o.after?.ref || o.shot?.ref;
+      const before = o.before?.ref;
+      if (!after) return `<div class="wait-note">${esc(o.note || 'No shot captured.')}</div>`;
+      const shotEl = (ref, cap) => ref
+        ? `<a class="shot" href="${blobUrl(ref)}" target="_blank" style="background-image:url('${blobUrl(ref)}')"><span class="cap">${esc(cap)}</span></a>`
+        : `<div class="shot"><span class="cap">${esc(cap)}</span></div>`;
+      return `<div class="shots-pair">${before ? shotEl(before, 'before') : ''}${shotEl(after, before ? 'after' : esc(o.route || '/'))}</div>`;
+    }
     case 'shots-set': {
       const pairs = (o.pairs || []).slice(0, 6);
+      const hasBaseline = pairs.some((p) => p.before?.ref);
       const rows = pairs.map((p) => {
-        const cls = p.status === 'done' ? 'done' : p.status === 'running' ? 'running' : 'waits';
-        const label = p.status === 'done' ? 'done' : p.status === 'running' ? 'capturing…' : 'queued';
-        const shot = (st) => st === 'done' ? '<div class="pair-shot filled"></div>'
-          : st === 'running' ? '<div class="pair-shot running"></div>' : '<div class="pair-shot"></div>';
+        const cls = p.status === 'done' ? 'done'
+          : p.status === 'running' ? 'running'
+          : p.status === 'failed' ? 'failed' : 'waits';
+        const label = p.status === 'done' ? 'done'
+          : p.status === 'running' ? 'capturing…'
+          : p.status === 'failed'  ? 'failed'
+          : p.status === 'skipped' ? 'no server' : 'queued';
+        const after  = p.after?.ref  || p.shot?.ref;
+        const before = p.before?.ref;
+        const slot = (ref, title) => ref
+          ? `<a class="pair-shot filled real" href="${blobUrl(ref)}" target="_blank"
+               style="background-image:url('${blobUrl(ref)}')" title="${esc(title)}"></a>`
+          : p.status === 'running' ? '<div class="pair-shot running"></div>'
+          : p.status === 'failed'  ? '<div class="pair-shot failed"></div>'
+          : '<div class="pair-shot"></div>';
+        const content = hasBaseline
+          ? `${slot(before, 'before')}${slot(after, 'after')}`
+          : (after
+             ? `<a class="pair-shot filled real only" href="${blobUrl(after)}" target="_blank"
+                  style="background-image:url('${blobUrl(after)}')" title="Open full-size"></a>`
+             : slot(null));
         return `<div class="route-row ${cls}">
           <span class="route-label">${esc(p.route)}</span>
-          <div class="pair-mini">${shot(p.status)}${shot(p.status)}</div>
+          <div class="pair-mini${!hasBaseline && after ? ' solo' : ''}">${content}</div>
           <span class="route-state">${label}</span>
         </div>`;
       }).join('');
       const title = esc(o.title || `${pairs.filter((p) => p.status === 'done').length} of ${pairs.length} captured`);
-      return `<div class="doc-h">${title}</div><div class="shots-grid">${rows}</div>`;
+      const note = o.note ? `<div class="wait-note" style="margin-top:8px;">${esc(o.note)}</div>` : '';
+      return `<div class="doc-h">${title}</div><div class="shots-grid">${rows}</div>${note}`;
     }
     case 'terminal': {
       const prompt = esc(o.prompt || '$ (command)');
@@ -233,10 +367,32 @@ function selectNode(id) {
   for (const el of document.querySelectorAll('.card.sel, .plan-rail .item.sel')) el.classList.remove('sel');
   document.querySelector(`.card[data-id="${id}"]`)?.classList.add('sel');
   document.querySelector(`.plan-rail .item[data-id="${id}"]`)?.classList.add('sel');
+  // Offer "rerun from here" on the actions bar when the run is terminal.
+  const bar = document.getElementById('runActions');
+  if (!bar) return;
+  const terminal = ['done', 'failed', 'stopped'].includes(run.status);
+  let fromBtn = bar.querySelector('[data-act="rerun-from"]');
+  if (!terminal) { fromBtn?.remove(); return; }
+  if (!fromBtn) {
+    fromBtn = document.createElement('button');
+    fromBtn.className = 'run-btn';
+    fromBtn.dataset.act = 'rerun-from';
+    bar.prepend(fromBtn);
+  }
+  const node = run.graph.nodes.find((n) => n.id === id);
+  fromBtn.textContent = `↻ Rerun from ${node?.title || id}`;
+  fromBtn.title = 'Clone this run, keep outputs upstream of this node, re-run from here';
+  fromBtn.onclick = () => rerunFromCanvas(id);
 }
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/** Resolve a blob ref like `blob:sha256:<hex>:png` to its /api/blob URL. */
+function blobUrl(ref) {
+  const m = /^blob:sha256:([a-f0-9]{64})/.exec(String(ref || ''));
+  return m ? `/api/blob?sha=${m[1]}` : '';
 }
 
 /* Live updates — the broadcast carries no run payload, so refetch on signal.

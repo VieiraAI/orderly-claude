@@ -18,10 +18,13 @@ import { Runner } from '../core/runner.mjs';
 import { SHOTS_DIR, INSTANCES_FILE, ensureDirs, transcriptPathFor, uploadsFor } from '../core/paths.mjs';
 import { randomUUID } from 'node:crypto';
 import { loadShots, attachShots } from '../core/shots.mjs';
-import { listDefinitions, getDefinition, startRun, readRun, listRuns, runsForSession } from '../core/workflows.mjs';
+import { listDefinitions, getDefinition, startRun, readRun, listRuns, runsForSession, deleteRun, rerunRun, scaffoldWorkflow, writeWorkflow, validateDefinition } from '../core/workflows.mjs';
 import { Scheduler } from '../core/workflow-runner.mjs';
 import { openBlob } from '../core/blobs.mjs';
 import { listSkills } from '../core/skills.mjs';
+import { listPrompts, getPrompt, interpolate, scaffoldPrompt, writePrompt, validatePrompt } from '../core/prompts.mjs';
+import { listDecisions, markDecision, unmarkDecision } from '../core/decisions.mjs';
+import { generateToken, verifyToken, exportSessionHtml, exportRunHtml, exportDecisionHtml } from '../core/share.mjs';
 
 const WEB_DIR = path.resolve(fileURLToPath(new URL('../../web', import.meta.url)));
 const TYPES = { '.html': 'text/html', '.css': 'text/css', '.mjs': 'text/javascript',
@@ -147,6 +150,18 @@ function summariseRun(r) {
   const done = nodes.filter((n) => n.status === 'done').length;
   const running = nodes.find((n) => n.status === 'running');
   const asking = nodes.find((n) => n.status === 'running' && n.kind === 'ask') || nodes.find((n) => n.kind === 'ask' && n.status !== 'done' && n.status !== 'pending');
+  // Roll up per-node meta for a budget-at-a-glance total.
+  const totals = { cost: 0, tokens: 0, elapsedS: 0 };
+  for (const n of nodes) {
+    const m = n.output?.meta;
+    if (!m) continue;
+    if (typeof m.cost === 'number')   totals.cost += m.cost;
+    if (typeof m.tokens === 'number') totals.tokens += m.tokens;
+    if (typeof m.elapsed === 'string') {
+      const s = parseFloat(m.elapsed);
+      if (Number.isFinite(s)) totals.elapsedS += s;
+    }
+  }
   return {
     runId: r.runId,
     workflowId: r.workflowId,
@@ -163,6 +178,9 @@ function summariseRun(r) {
     doneNodes: done,
     runningLabel: running ? running.title : null,
     askingLabel: asking ? asking.title : null,
+    totalCost:   totals.cost || null,
+    totalTokens: totals.tokens || null,
+    totalElapsed: totals.elapsedS ? `${totals.elapsedS.toFixed(1)} s` : null,
   };
 }
 
@@ -583,14 +601,172 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
 
       // Workflow catalog, scoped to the repo this instance was started in so
       // repo-local defs win over user-global ones.
-      if (url.pathname === '/api/workflows') {
+      if (url.pathname === '/api/workflows' && req.method === 'GET') {
         return send(200, { workflows: listDefinitions({ repoRoot: liveCwd }) });
       }
 
-      // Skills — the pieces workflows draw on. Project > user, same ordering.
-      if (url.pathname === '/api/skills') {
-        return send(200, { skills: listSkills({ repoRoot: liveCwd }) });
+      // Create a workflow — three starter kinds plus a validator for the
+      // in-browser editor's "check" button.
+      if (url.pathname === '/api/workflows/scaffold' && req.method === 'GET') {
+        const id = url.searchParams.get('id') || 'untitled';
+        const title = url.searchParams.get('title') || null;
+        return send(200, { def: scaffoldWorkflow(id, { title }) });
       }
+      if (url.pathname === '/api/workflows/validate' && req.method === 'POST') {
+        const body = await readBody(req);
+        const problems = validateDefinition(body.def || {});
+        return send(200, { ok: problems.length === 0, problems });
+      }
+      if (url.pathname === '/api/workflows' && req.method === 'POST') {
+        const body = await readBody(req);
+        try {
+          const file = writeWorkflow({
+            def: body.def, scope: body.scope || 'project',
+            repoRoot: body.scope === 'project' ? (body.repoRoot || liveCwd) : null,
+            overwrite: !!body.overwrite,
+          });
+          return send(200, { saved: true, file });
+        } catch (e) { return send(400, { error: e.message }); }
+      }
+
+
+      // Skills — the pieces workflows draw on. Walks every repo the sessions
+      // index knows about plus the global library.
+      if (url.pathname === '/api/skills') {
+        return send(200, { skills: listSkills() });
+      }
+
+      // Shared session export — signed URL good for one week.
+      const shareMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/share$/);
+      if (shareMatch && req.method === 'POST') {
+        const view = resolveView(shareMatch[1]);
+        if (!view) return send(404, { error: 'session not found' });
+        const token = generateToken('session', shareMatch[1]);
+        const host = req.headers.host || `localhost:${port}`;
+        return send(200, { token, url: `http://${host}/share/${token}` });
+      }
+      // Share a workflow run — same signed-token mechanism.
+      const shareRunMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/share$/);
+      if (shareRunMatch && req.method === 'POST') {
+        const run = readRun(shareRunMatch[1], { repoRoot: liveCwd });
+        if (!run) return send(404, { error: 'run not found' });
+        const token = generateToken('run', shareRunMatch[1]);
+        const host = req.headers.host || `localhost:${port}`;
+        return send(200, { token, url: `http://${host}/share/${token}` });
+      }
+      // Share a decision — body is {sessionId, stepId} for marked, or just
+      // {runId, nodeId} for auto-extracted ones. Encoded into the id so the
+      // same /share/:token route can serve it.
+      if (url.pathname === '/api/decisions/share' && req.method === 'POST') {
+        const body = await readBody(req);
+        let id;
+        if (body.runId && body.nodeId) id = `auto__${body.runId}__${body.nodeId}`;
+        else if (body.sessionId && body.stepId) id = `marked__${body.sessionId}__${body.stepId}`;
+        else return send(400, { error: 'need (runId, nodeId) or (sessionId, stepId)' });
+        const token = generateToken('decision', id);
+        const host = req.headers.host || `localhost:${port}`;
+        return send(200, { token, url: `http://${host}/share/${token}` });
+      }
+
+      const shareOpenMatch = url.pathname.match(/^\/share\/(.+)$/);
+      if (shareOpenMatch && req.method === 'GET') {
+        const payload = verifyToken(shareOpenMatch[1]);
+        if (!payload) return send(410, 'This link has expired or is not valid.', 'text/plain');
+        if (payload.kind === 'session') {
+          const view = resolveView(payload.id);
+          if (!view) return send(404, 'Session not found.', 'text/plain');
+          return send(200, exportSessionHtml({
+            session: view.session, meta: view.meta, sessionId: payload.id, shotsDir: SHOTS_DIR,
+          }), 'text/html');
+        }
+        if (payload.kind === 'run') {
+          const run = readRun(payload.id, { repoRoot: liveCwd });
+          if (!run) return send(404, 'Run not found.', 'text/plain');
+          return send(200, exportRunHtml({ run }), 'text/html');
+        }
+        if (payload.kind === 'decision') {
+          const parts = payload.id.split('__');
+          const kind = parts[0];
+          let decision = null;
+          if (kind === 'auto' && parts.length === 3) {
+            const [, runId, nodeId] = parts;
+            const run = readRun(runId, { repoRoot: liveCwd });
+            const n = run?.graph?.nodes?.find((x) => x.id === nodeId);
+            if (run && n && n.kind === 'ask') decision = {
+              kind: 'auto', at: n.endedAt || run.startedAt,
+              workflowTitle: run.workflowTitle, nodeId,
+              question: n.output?.question || n.title, answer: n.output?.answer,
+            };
+          } else if (kind === 'marked' && parts.length === 3) {
+            const [, sessionId, stepId] = parts;
+            const marks = listDecisions();
+            decision = marks.find((d) => d.kind === 'marked' && d.sessionId === sessionId && d.stepId === stepId);
+          }
+          if (!decision) return send(404, 'Decision not found.', 'text/plain');
+          return send(200, exportDecisionHtml({ decision }), 'text/html');
+        }
+        return send(404, 'Unknown share kind.', 'text/plain');
+      }
+
+      // Decisions — auto-extracted from ask-node answers, plus user marks.
+      if (url.pathname === '/api/decisions' && req.method === 'GET') {
+        return send(200, { decisions: listDecisions() });
+      }
+      if (url.pathname === '/api/decisions/mark' && req.method === 'POST') {
+        const body = await readBody(req);
+        try { return send(200, { mark: markDecision(body) }); }
+        catch (e) { return send(400, { error: e.message }); }
+      }
+      if (url.pathname === '/api/decisions/mark' && req.method === 'DELETE') {
+        const body = await readBody(req);
+        unmarkDecision(body);
+        return send(200, { removed: true });
+      }
+
+      // Prompts — named templates you can send into a session.
+      if (url.pathname === '/api/prompts' && req.method === 'GET') {
+        return send(200, { prompts: listPrompts() });
+      }
+      if (url.pathname === '/api/prompts/scaffold' && req.method === 'GET') {
+        const slug = url.searchParams.get('slug') || 'untitled';
+        const title = url.searchParams.get('title') || null;
+        return send(200, { md: scaffoldPrompt(slug, { title }) });
+      }
+      if (url.pathname === '/api/prompts/validate' && req.method === 'POST') {
+        const body = await readBody(req);
+        const problems = validatePrompt(body.md || '');
+        return send(200, { ok: problems.length === 0, problems });
+      }
+      if (url.pathname === '/api/prompts' && req.method === 'POST') {
+        const body = await readBody(req);
+        try {
+          const file = writePrompt({
+            md: body.md, slug: body.slug, scope: body.scope || 'project',
+            repoRoot: body.scope === 'project' ? (body.repoRoot || liveCwd) : null,
+            overwrite: !!body.overwrite,
+          });
+          return send(200, { saved: true, file });
+        } catch (e) { return send(400, { error: e.message }); }
+      }
+      const promptMatch = url.pathname.match(/^\/api\/prompts\/(.+)$/);
+      if (promptMatch && req.method === 'GET' && !promptMatch[1].endsWith('/send')) {
+        const p = getPrompt(decodeURIComponent(promptMatch[1]));
+        return p ? send(200, { prompt: p }) : send(404, { error: 'prompt not found' });
+      }
+      const promptSendMatch = url.pathname.match(/^\/api\/prompts\/(.+)\/send$/);
+      if (promptSendMatch && req.method === 'POST') {
+        const p = getPrompt(decodeURIComponent(promptSendMatch[1]));
+        if (!p) return send(404, { error: 'prompt not found' });
+        const body = await readBody(req);
+        const text = interpolate(p.body, body.inputs || {});
+        const target = body.sessionId && watchers.has(body.sessionId) ? body.sessionId : liveId;
+        if (runnerFor(target).busy) runnerFor(target).stop();
+        const started = runnerFor(target).run({
+          sessionId: target, text, mode: body.mode || 'acceptEdits', fresh: false,
+        });
+        return send(200, { sent: true, sessionId: target, text, started });
+      }
+
 
       const wfMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)$/);
       if (wfMatch && req.method === 'GET') {
@@ -612,6 +788,32 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
           broadcast('run-start', { runId: run.runId, workflowId: run.workflowId });
           return send(200, { run });
         } catch (e) { return send(400, { error: e.message }); }
+      }
+
+      const runRerunMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/rerun$/);
+      if (runRerunMatch && req.method === 'POST') {
+        const body = await readBody(req).catch(() => ({}));
+        try {
+          const run = rerunRun(runRerunMatch[1], { fromNodeId: body.fromNodeId || null });
+          startScheduler(run);
+          broadcast('run-start', { runId: run.runId, workflowId: run.workflowId });
+          return send(200, { run });
+        } catch (e) { return send(400, { error: e.message }); }
+      }
+
+      const runDeleteMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
+      if (runDeleteMatch && req.method === 'DELETE') {
+        const s = schedulers.get(runDeleteMatch[1]);
+        if (s) s.stop();
+        const ok = deleteRun(runDeleteMatch[1]);
+        if (ok) broadcast('run-finish', { runId: runDeleteMatch[1], status: 'deleted' });
+        return ok ? send(200, { deleted: true }) : send(404, { error: 'run not found' });
+      }
+
+      if (url.pathname === '/api/runs/stop-all' && req.method === 'POST') {
+        let stopped = 0;
+        for (const s of schedulers.values()) if (s.stop()) stopped++;
+        return send(200, { stopped });
       }
 
       const runStopMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/stop$/);

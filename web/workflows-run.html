@@ -8,14 +8,19 @@
 <link rel="stylesheet" href="/workflows.css">
 </head><body>
 
-<div class="top-bar">
-  <a class="back" href="/workflows.html">← Catalog</a>
-  <div class="crumbs">
+<nav class="nav">
+  <span class="app-menu" id="appMenu"></span>
+  <span class="here">run</span>
+  <div class="crumbs" style="margin-left:16px;">
     <span>Runs</span><span>›</span><span class="here" id="crumbTitle">—</span>
   </div>
   <span class="spacer"></span>
   <span class="eyebrow" id="runSession"></span>
-</div>
+</nav>
+<script type="module">
+  import { mountAppMenu } from '/app-menu.mjs';
+  mountAppMenu(document.getElementById('appMenu'), { here: 'runs' });
+</script>
 
 <div class="app">
   <aside class="panel">

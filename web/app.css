@@ -108,6 +108,11 @@ kbd { font: 11px var(--mono); color: var(--faint); margin-left: 5px; }
 .top .update-hint:hover { color: var(--deep-black); border-color: var(--t-fix); opacity: .9; }
 .top .pill { color: rgba(255,255,255,.6); border-color: rgba(255,255,255,.16); cursor: pointer; background: none; }
 .top .pill:hover { color: var(--pure-white); border-color: rgba(255,255,255,.35); }
+.top .app-menu-btn { color: rgba(255,255,255,.9); }
+.top .app-menu-btn:hover,
+.top .app-menu-btn[aria-expanded="true"] { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.2); }
+.top .app-menu-glyph { color: var(--dusk-blue, #a3abff); }
+.top .app-menu-caret { color: rgba(255,255,255,.4); }
 .pill-input {
   font: 11px var(--mono); background: rgba(255,255,255,.08); color: var(--pure-white);
   border: 1px solid rgba(255,255,255,.3); border-radius: 999px; padding: 4px 11px;
@@ -585,3 +590,74 @@ pre.block.cmd { color: var(--text); }
 .bubble.live.waiting .vocab-term { color: var(--t-ask); }
 .bubble.live.stalled .icon { animation-duration: 2.6s; opacity: .55; }
 .bubble.live.stalled .vocab-term { color: var(--muted); font-weight: 500; }
+
+/* --------------------------- Global app menu ----------------------------- */
+.app-menu { position: relative; display: inline-flex; align-items: center; }
+.app-menu-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: transparent; border: 1px solid transparent;
+  padding: 6px 10px; border-radius: 10px;
+  color: var(--text); font: 500 15px/1 var(--sans);
+  letter-spacing: -0.02em; cursor: pointer;
+  transition: background .14s, border-color .14s;
+}
+.app-menu-btn:hover { background: var(--raised); border-color: var(--line); }
+.app-menu-btn[aria-expanded="true"] { background: var(--raised); border-color: var(--line); }
+.app-menu-glyph { color: var(--accent); font-size: 13px; }
+.app-menu-brand { font-weight: 560; }
+.app-menu-caret { color: var(--faint); font-size: 11px; }
+.app-menu-drop {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 20;
+  min-width: 280px; padding: 6px; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.12);
+}
+:root[data-theme="dark"] .app-menu-drop { box-shadow: 0 20px 40px rgba(0,0,0,0.5); }
+.app-menu-item {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 10px 12px; border-radius: 8px; color: var(--text);
+  text-decoration: none;
+}
+.app-menu-item:hover { background: var(--raised); }
+.app-menu-item.on { background: var(--raised); box-shadow: inset 2px 0 0 var(--accent); }
+.app-menu-item .k { font-size: 14px; font-weight: 500; }
+.app-menu-item .h { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+
+/* --------------------------- Workflow bubble ----------------------------- */
+/* A workflow run that fired in this session, rendered as a bubble inside the
+ * turn that kicked it off. Clicks open the canvas page scoped to the run. */
+.bubble.workflow {
+  text-decoration: none;
+  background: color-mix(in oklab, var(--dusk-blue) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--dusk-blue);
+}
+.bubble.workflow:hover { background: color-mix(in oklab, var(--dusk-blue) 18%, transparent); }
+.bubble.workflow .icon.t-workflow { color: var(--dusk-blue); background: transparent; }
+.bubble.workflow .wf-tag {
+  font: 10px var(--mono); color: var(--dusk-blue); letter-spacing: 0.08em;
+  text-transform: uppercase; margin-right: 10px;
+}
+.bubble.workflow .wf-name { font-weight: 500; }
+.bubble.workflow .tag.open-canvas {
+  font: 11px var(--mono); color: var(--dusk-blue);
+  padding: 2px 8px; border: 1px solid color-mix(in oklab, var(--dusk-blue) 40%, transparent);
+  border-radius: 999px;
+}
+.bubble.workflow.tone-running { box-shadow: inset 2px 0 0 var(--dusk-blue), 0 0 0 1px color-mix(in oklab, var(--dusk-blue) 30%, transparent); }
+.bubble.workflow.tone-done .wf-tag { color: color-mix(in oklab, var(--dusk-blue) 70%, var(--text)); }
+
+/* ------------------------- Decision marks on bubbles --------------------- */
+.bubble .mark {
+  background: transparent; border: 0; cursor: pointer;
+  color: var(--faint); font-size: 13px; padding: 2px 6px;
+  margin-left: 6px; border-radius: 6px; opacity: 0; transition: opacity .12s;
+}
+.bubble:hover .mark, .bubble .mark.on { opacity: 1; }
+.bubble .mark:hover { color: var(--text); background: var(--raised); }
+.bubble .mark.on { color: var(--dusk-blue); }
+.bubble.marked { box-shadow: inset 2px 0 0 var(--dusk-blue); }
+.tag.decision {
+  color: var(--dusk-blue); border: 1px solid color-mix(in oklab, var(--dusk-blue) 40%, transparent);
+  padding: 1px 6px; border-radius: 999px; font: 10.5px var(--mono); letter-spacing: 0.05em;
+  text-transform: uppercase; margin-right: 4px;
+}

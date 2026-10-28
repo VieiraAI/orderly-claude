@@ -8,11 +8,9 @@
 </head>
 <body>
 <header class="top">
+  <span class="app-menu" id="appMenu"></span>
   <button id="railBtn" class="btn ghost" title="Sessions" aria-label="Sessions">☰</button>
-  <div class="brand">
-    <span class="dot" id="liveDot" title="live"></span>
-    <span>Orderly Claude</span>
-  </div>
+  <span class="dot" id="liveDot" title="live"></span>
   <div class="ctx">
     <span id="sessionTitle" class="title">—</span>
     <span id="sessionCwd" class="cwd"></span>
@@ -21,11 +19,15 @@
     <button id="devUrl" class="pill" title="What the before/after screenshots point at">—</button>
     <input id="devUrlInput" class="pill-input hidden" placeholder="http://localhost:3000" spellcheck="false">
     <button id="updateHint" class="btn update-hint hidden" title="The interface changed on disk">Update ready — reload</button>
-    <a id="workflowsLink" class="btn ghost" href="/workflows.html" title="Workflows catalog">◇ Workflows</a>
+    <button id="shareBtn" class="btn ghost" title="Create a shareable link to this session">◎ Share</button>
     <button id="themeBtn" class="btn ghost" title="Light / dark">◐</button>
     <button id="searchBtn" class="btn">Search <kbd>⌘F</kbd></button>
   </div>
 </header>
+<script type="module">
+  import { mountAppMenu } from '/app-menu.mjs';
+  mountAppMenu(document.getElementById('appMenu'), { here: 'viewer' });
+</script>
 
 <div id="connBanner" class="conn-banner hidden" role="status">
   <span class="conn-dot"></span>

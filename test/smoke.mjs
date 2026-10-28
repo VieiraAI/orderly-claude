@@ -627,9 +627,9 @@ async function main() {
 
   console.log('\nServer\n');
 
-  // Keep smoke runs free and fast: skip the real Claude CLI handlers unless
-  // the caller explicitly opts in.
-  if (!process.env.ORDERLY_HANDLER_MODE) process.env.ORDERLY_HANDLER_MODE = 'mock';
+  // Keep smoke runs free and fast: force mock handlers unless the caller
+  // explicitly asked for the real CLI with ORDERLY_HANDLER_MODE=real.
+  if (process.env.ORDERLY_HANDLER_MODE !== 'real') process.env.ORDERLY_HANDLER_MODE = 'mock';
 
   const port = await freePort(7900);
   const { close } = await startServer({
@@ -733,7 +733,9 @@ async function main() {
     // Scheduler should march the graph without any client help. Poll until the
     // run reaches a terminal state or the budget elapses.
     let finished = null;
-    const budget = Date.now() + 8000;
+    // Mock handlers finish in under a second; a wider budget just absorbs
+    // the occasional cold-start spawn delay on CI.
+    const budget = Date.now() + 15000;
     while (Date.now() < budget) {
       await sleep(200);
       const r = (await get(`/api/runs/${started.run.runId}`)).run;
@@ -757,6 +759,165 @@ async function main() {
       method: 'POST', headers: { 'content-type': 'application/json' },
     });
     check('POST /api/runs/:id/stop returns 404 once the scheduler is gone', stopResp.status === 404);
+
+    // Share — signed URL round-trip. Token has three dot-separated parts; the
+    // /share/<token> route returns HTML; a tampered token comes back as 410.
+    const shareResp = await fetch(`${base}/api/sessions/${state.instance.sessionId}/share`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    check('POST /api/sessions/:id/share returns a token and url',
+      typeof shareResp.token === 'string' && shareResp.token.split('.').length === 3
+      && typeof shareResp.url === 'string' && shareResp.url.includes('/share/'),
+      shareResp.error);
+    const shareHtml = await fetch(`${base}/share/${shareResp.token}`);
+    check('/share/:token serves HTML', shareHtml.status === 200
+      && (shareHtml.headers.get('content-type') || '').includes('text/html'),
+      `${shareHtml.status} ${shareHtml.headers.get('content-type')}`);
+    const tampered = await fetch(`${base}/share/${shareResp.token.slice(0, -2)}aa`);
+    check('tampered token is rejected', tampered.status === 410, String(tampered.status));
+
+    // Share a run — same signed-token mechanism.
+    const shareRun = await fetch(`${base}/api/runs/${started.run.runId}/share`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    check('POST /api/runs/:id/share returns a run token',
+      typeof shareRun.token === 'string' && shareRun.token.startsWith('run:'),
+      shareRun.token?.slice(0, 20));
+    const runPage = await fetch(`${base}/share/${shareRun.token}`);
+    check('/share/<run-token> serves HTML',
+      runPage.status === 200 && (runPage.headers.get('content-type') || '').includes('text/html'),
+      `${runPage.status}`);
+
+    // Share a decision — mark one first, then share.
+    await fetch(`${base}/api/decisions/mark`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'share-sess', stepId: 'share-step', note: 'shared' }),
+    });
+    const shareDec = await fetch(`${base}/api/decisions/share`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'share-sess', stepId: 'share-step' }),
+    }).then((r) => r.json());
+    check('POST /api/decisions/share returns a decision token',
+      typeof shareDec.token === 'string' && shareDec.token.startsWith('decision:'),
+      shareDec.token?.slice(0, 20));
+    const decPage = await fetch(`${base}/share/${shareDec.token}`);
+    check('/share/<decision-token> serves HTML',
+      decPage.status === 200 && (decPage.headers.get('content-type') || '').includes('text/html'),
+      `${decPage.status}`);
+    await fetch(`${base}/api/decisions/mark`, {
+      method: 'DELETE', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'share-sess', stepId: 'share-step' }),
+    });
+
+    // Decisions — auto from ask-node answers, plus a mark round-trip.
+    const dResp = await get('/api/decisions');
+    check('GET /api/decisions returns an array',
+      Array.isArray(dResp.decisions), typeof dResp.decisions);
+    const mark = await fetch(`${base}/api/decisions/mark`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'test-sess', stepId: 'test-step', note: 'smoke' }),
+    }).then((r) => r.json());
+    check('POST /api/decisions/mark returns the row', mark.mark?.sessionId === 'test-sess');
+    const after = await get('/api/decisions');
+    check('mark shows up on next list', after.decisions.some((d) => d.sessionId === 'test-sess'));
+    await fetch(`${base}/api/decisions/mark`, {
+      method: 'DELETE', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'test-sess', stepId: 'test-step' }),
+    });
+    const cleaned = await get('/api/decisions');
+    check('DELETE removes the mark', !cleaned.decisions.some((d) => d.sessionId === 'test-sess'));
+
+    // Prompts — one Markdown file per prompt, grouped by repo + global.
+    const promptsResp = await get('/api/prompts');
+    check('GET /api/prompts returns an array',
+      Array.isArray(promptsResp.prompts), `${typeof promptsResp.prompts}`);
+    const starter = promptsResp.prompts.find((p) => p.slug === 'review-diff');
+    check('starter prompt review-diff is picked up',
+      !!starter && starter.inputs?.length >= 2, starter ? `${starter.inputs?.length} inputs` : 'missing');
+    const promptMod = await import('../src/core/prompts.mjs');
+    const interp = promptMod.interpolate('a {{x}} b {{y|default}} c', { x: 'X' });
+    check('interpolate fills vars and defaults', interp === 'a X b default c', JSON.stringify(interp));
+
+    // Authoring: scaffold a def, validate it, write it, confirm it's listed.
+    const sc = await get('/api/workflows/scaffold?id=smoke-authored');
+    check('GET /api/workflows/scaffold returns a starter def',
+      sc.def?.id === 'smoke-authored' && (sc.def?.graph?.nodes?.length || 0) >= 2);
+    const vd = await fetch(`${base}/api/workflows/validate`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: sc.def }),
+    }).then((r) => r.json());
+    check('POST /api/workflows/validate approves the scaffold', vd.ok === true,
+      vd.problems?.join('; '));
+    const saved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: sc.def, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    check('POST /api/workflows writes to .claude/workflows/',
+      saved.saved === true && typeof saved.file === 'string' && saved.file.endsWith('smoke-authored.json'),
+      saved.error);
+    const roundTrip = await get('/api/workflows');
+    check('new workflow shows up in the catalog',
+      roundTrip.workflows.some((w) => w.id === 'smoke-authored'));
+    // Clean up so the file doesn't drift between runs.
+    try { fs.unlinkSync(saved.file); } catch {}
+
+    // Workflow validator — accept good shapes, reject bad ones with a reason.
+    const wfMod = await import('../src/core/workflows.mjs');
+    const goodDef = { id: 'x', graph: {
+      nodes: [{ id: 'a', kind: 'terminal' }, { id: 'b', kind: 'document' }],
+      edges: [['a', 'b']],
+    } };
+    check('validator accepts a good def', wfMod.validateDefinition(goodDef).length === 0);
+    const noId  = wfMod.validateDefinition({ graph: { nodes: [{ id: 'a', kind: 'terminal' }], edges: [] } });
+    check('validator flags missing id', noId.some((p) => /id/i.test(p)), noId.join('; '));
+    const dupId = wfMod.validateDefinition({ id: 'x', graph: {
+      nodes: [{ id: 'a', kind: 't' }, { id: 'a', kind: 't' }], edges: [],
+    } });
+    check('validator flags duplicate node id', dupId.some((p) => /duplicate/i.test(p)), dupId.join('; '));
+    const danglingEdge = wfMod.validateDefinition({ id: 'x', graph: {
+      nodes: [{ id: 'a', kind: 't' }], edges: [['a', 'z']],
+    } });
+    check('validator flags edge to unknown node', danglingEdge.some((p) => /unknown node/i.test(p)),
+      danglingEdge.join('; '));
+    const cyclic = wfMod.validateDefinition({ id: 'x', graph: {
+      nodes: [{ id: 'a', kind: 't' }, { id: 'b', kind: 't' }],
+      edges: [['a', 'b'], ['b', 'a']],
+    } });
+    check('validator flags cycles', cyclic.some((p) => /cycle/i.test(p)), cyclic.join('; '));
+
+    // Rerun & delete.
+    const rerunResp = await fetch(`${base}/api/runs/${started.run.runId}/rerun`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    check('POST /api/runs/:id/rerun returns a new run', !!rerunResp.run?.runId
+      && rerunResp.run.runId !== started.run.runId, rerunResp.error);
+    check('the rerun carries the same inputs', JSON.stringify(rerunResp.run.inputs) ===
+      JSON.stringify(started.run.inputs));
+
+    // Rerun from a specific node: clone and keep upstream outputs. Wait for
+    // the fresh rerun to settle so we can target one of its done nodes.
+    let settled = null;
+    const budget2 = Date.now() + 8000;
+    while (Date.now() < budget2) {
+      await sleep(200);
+      const r2 = (await get(`/api/runs/${rerunResp.run.runId}`)).run;
+      if (r2 && ['done', 'failed', 'stopped'].includes(r2.status)) { settled = r2; break; }
+    }
+    if (settled) {
+      const target = settled.graph.nodes[settled.graph.nodes.length - 1];
+      const partial = await fetch(`${base}/api/runs/${settled.runId}/rerun`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ fromNodeId: target.id }),
+      }).then((r) => r.json());
+      check('rerun from node keeps upstream outputs',
+        partial.run?.graph?.nodes?.some((n) => n.id !== target.id && n.status === 'done'),
+        partial.error);
+    }
+
+    const delResp = await fetch(`${base}/api/runs/${rerunResp.run.runId}`, { method: 'DELETE' }).then((r) => r.json());
+    check('DELETE /api/runs/:id removes the folder', delResp.deleted === true, JSON.stringify(delResp));
+    const delMissing = await fetch(`${base}/api/runs/${rerunResp.run.runId}`).then((r) => r.status);
+    check('deleted run returns 404', delMissing === 404, String(delMissing));
 
     // Skills — read from the two .claude/skills roots.
     const skillsResp = await get('/api/skills');

@@ -20,6 +20,11 @@
  * dance and chrome launch that lives elsewhere in this repo.
  */
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { screenshot, detectDevServer } from './capture.mjs';
+import { putFile } from './blobs.mjs';
 
 /** Pick the handler for a kind. Unknown kinds get the generic placeholder. */
 export function getHandler(kind) {
@@ -60,8 +65,12 @@ const HANDLERS = {
       `Keep it concise: no more than ~400 words. Start with a single H1.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node) || 'sonnet',
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'haiku'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
+      // Stream the growing body into the card so the running state feels alive.
+      onStream: ({ text: running }) => ctx.onProgress({
+        partialOutput: { title: `${slug(node.title)}.md · streaming…`, body: running },
+      }),
     });
     const title = firstHeadline(text) || `${slug(node.title)}.md`;
     return { title: `${title}.md`, body: text.trim(), meta };
@@ -80,7 +89,7 @@ const HANDLERS = {
       `List at most five findings, most important first. If there is nothing to flag, return an empty array.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node) || 'sonnet',
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'sonnet'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const parsed = extractJson(text) || { findings: [] };
@@ -103,7 +112,7 @@ const HANDLERS = {
       `Return only the HTML (no code fences, no commentary). Use inline CSS. Keep it under 200 lines.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node) || 'sonnet',
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'sonnet'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const html = stripFences(text);
@@ -123,7 +132,7 @@ const HANDLERS = {
       `Keep the change tiny — ten hunks or fewer.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node) || 'sonnet',
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'sonnet'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const parsed = extractJson(text) || { file: 'unknown', hunks: [] };
@@ -142,7 +151,7 @@ const HANDLERS = {
       `{"title":"<pr title, under 70 chars>","body":"<short markdown body>"}`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: 'haiku',
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'haiku'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const parsed = extractJson(text) || {};
@@ -158,23 +167,63 @@ const HANDLERS = {
   },
 
   shots: async (node, ctx) => {
-    await nap(ctx, 400);
-    return { note: 'before/after placeholder — real capture lands with the dev-server dance' };
+    const origin = await pickOrigin(ctx);
+    if (!origin) return { note: 'No dev server detected. Set inputs.devUrl or start one on a known port.' };
+    const baselineOrigin = (ctx.run.inputs?.baselineUrl || '').trim().replace(/\/+$/, '');
+    const route = node.route || ctx.run.inputs?.route || '/';
+    const path = route.startsWith('/') ? route : `/${route}`;
+    const after = await captureShot(`${origin}${path}`, ctx.signal);
+    const before = baselineOrigin ? await captureShot(`${baselineOrigin}${path}`, ctx.signal) : null;
+    if (!after) return { note: `Capture failed for ${route}` };
+    return { route, origin, baselineOrigin: baselineOrigin || null, before, after, shot: after };
   },
 
   'shots-set': async (node, ctx) => {
-    // Walk one route at a time so the grid fills in on-screen. Real capture
-    // handler lands once the dev-server + headless-chrome dance is factored.
+    // Walk one route at a time so the grid fills in on-screen. Each route is
+    // captured against the detected dev server (or inputs.devUrl); when
+    // inputs.baselineUrl is set, a matching before-shot comes from there so
+    // the card renders a real before/after pair.
+    const origin = await pickOrigin(ctx);
+    const baselineOrigin = (ctx.run.inputs?.baselineUrl || '').trim().replace(/\/+$/, '');
+    const baselineName = (ctx.run.inputs?.baseline || '').trim();
     const routes = parseRoutes(ctx.run.inputs?.routes) || ['/', '/blog', '/about', '/pricing', '/contact'];
-    const pairs = routes.map((r) => ({ route: r, status: 'waits' }));
+    const pairs = routes.map((r) => ({ route: r, status: origin ? 'waits' : 'skipped' }));
+    if (!origin) {
+      return {
+        title: `0 of ${pairs.length} captured`,
+        pairs, note: 'No dev server detected. Set inputs.devUrl or start one on a known port.',
+      };
+    }
     for (let i = 0; i < pairs.length; i++) {
+      if (ctx.signal?.aborted) break;
       pairs[i].status = 'running';
       onProgressSnapshot(ctx, pairs, i);
-      await nap(ctx, 300);
-      pairs[i].status = 'done';
+      try {
+        const path = pairs[i].route.startsWith('/') ? pairs[i].route : `/${pairs[i].route}`;
+        const after = await captureShot(`${origin}${path}`, ctx.signal);
+        if (after) {
+          pairs[i].after = after;
+          pairs[i].shot = after; // compat with old renderer that reads .shot
+        }
+        if (baselineOrigin) {
+          const before = await captureShot(`${baselineOrigin}${path}`, ctx.signal);
+          if (before) pairs[i].before = before;
+        }
+        pairs[i].status = after ? 'done' : 'failed';
+      } catch (e) {
+        pairs[i].status = 'failed';
+        pairs[i].error = e.message;
+      }
       onProgressSnapshot(ctx, pairs, i);
     }
-    return { title: `${pairs.length} of ${pairs.length} captured`, pairs };
+    const done = pairs.filter((p) => p.status === 'done').length;
+    const note = !baselineOrigin && baselineName
+      ? `No baselineUrl set. To compare against ${baselineName}, start a dev server on that branch and pass inputs.baselineUrl.`
+      : null;
+    return {
+      title: `${done} of ${pairs.length} captured${baselineOrigin ? ' · before/after' : ''}`,
+      origin, baselineOrigin: baselineOrigin || null, pairs, note,
+    };
   },
 
   _default: async (node, ctx) => {
@@ -187,42 +236,88 @@ const HANDLERS = {
 
 /**
  * Spawn `claude -p` with the given prompt and return its text result.
- * The CLI runs with --output-format json so we get structured metadata
- * (duration, cost, session id, model usage) alongside the text.
+ * The CLI runs with --output-format stream-json so we can emit progress
+ * events as the text comes in — the card advances token-by-token instead
+ * of waiting for the whole response. The final `result` line carries the
+ * structured metadata (duration, cost, session id, model usage).
  *
  * Tests and demos set `ORDERLY_HANDLER_MODE=mock` to short-circuit the spawn
  * so the smoke suite does not bill the API on every run.
  */
-async function callClaude(prompt, { cwd, signal, model = 'sonnet', onProgress, timeoutMs = 180_000 } = {}) {
+async function callClaude(prompt, { cwd, signal, model = 'sonnet', onProgress, onStream, timeoutMs = 180_000 } = {}) {
   if (process.env.ORDERLY_HANDLER_MODE === 'mock') {
     onProgress?.('claude · mock');
     await new Promise((r) => setTimeout(r, 120));
     return mockReply(prompt, model);
   }
-  onProgress?.(`claude · ${model}`);
+  onProgress?.(`claude · ${model} · starting…`);
   const started = Date.now();
-  const argv = ['claude', '-p', '--output-format', 'json',
-    '--permission-mode', 'acceptEdits', '--model', model, prompt];
-  const { out, err, code } = await exec(argv, { cwd, signal, timeoutMs });
+  const argv = ['claude', '-p',
+    '--output-format', 'stream-json',
+    '--include-partial-messages',
+    '--verbose',
+    '--permission-mode', 'acceptEdits',
+    '--model', model, prompt];
+  const { finalPayload, text, code, err } = await execStream(argv, {
+    cwd, signal, timeoutMs,
+    onDelta: (delta, totals) => {
+      const tail = text => text.slice(-40).replace(/\s+/g, ' ').trim();
+      onProgress?.(`claude · ${model} · ${totals.tokens} tok · ${tail(totals.text)}`);
+      // Hand the running text to the handler so it can mirror it into the
+      // node's partialOutput — a document handler shows the body growing.
+      onStream?.(totals);
+    },
+  });
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-  if (code !== 0 && !out.trim()) {
-    throw new Error(`claude cli exited ${code}: ${(err || '').slice(0, 200)}`);
+  if (!finalPayload) {
+    throw new Error(`claude cli exited ${code} without a result: ${(err || '').slice(0, 200)}`);
   }
-  let payload;
-  try { payload = JSON.parse(out); }
-  catch { throw new Error(`claude cli returned non-JSON output: ${out.slice(0, 200)}`); }
-  if (payload.is_error) {
-    throw new Error(`claude cli reported error: ${payload.result || payload.subtype || 'unknown'}`);
+  if (finalPayload.is_error) {
+    throw new Error(`claude cli reported error: ${finalPayload.result || finalPayload.subtype || 'unknown'}`);
   }
-  const modelKey = Object.keys(payload.modelUsage || {})[0] || model;
+  const modelKey = Object.keys(finalPayload.modelUsage || {})[0] || model;
   const meta = {
     model: modelKey,
-    cost: payload.total_cost_usd,
+    cost: finalPayload.total_cost_usd,
     elapsed: `${elapsed} s`,
-    sessionId: payload.session_id,
-    tokens: payload.usage?.output_tokens,
+    sessionId: finalPayload.session_id,
+    tokens: finalPayload.usage?.output_tokens,
   };
-  return { text: String(payload.result || ''), meta };
+  return { text: String(finalPayload.result || text || ''), meta };
+}
+
+/** Spawn a process and stream its stdout line-by-line. Each line is parsed
+ *  as JSON; recognised event types feed onDelta so the card can advance. */
+function execStream(argv, { cwd, signal, timeoutMs = 180_000, onDelta } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(argv[0], argv.slice(1), { cwd, env: process.env });
+    let finalPayload = null;
+    let text = '';
+    let tokens = 0;
+    let err = '';
+    let stdoutBuf = '';
+    let timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} }, timeoutMs);
+    signal?.addEventListener('abort', () => { try { child.kill('SIGTERM'); } catch {} }, { once: true });
+    child.stdout.on('data', (chunk) => {
+      stdoutBuf += chunk.toString();
+      let nl;
+      while ((nl = stdoutBuf.indexOf('\n')) >= 0) {
+        const line = stdoutBuf.slice(0, nl);
+        stdoutBuf = stdoutBuf.slice(nl + 1);
+        if (!line.trim()) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.type === 'result') { finalPayload = msg; continue; }
+        if (msg.type === 'stream_event' && msg.event?.type === 'content_block_delta') {
+          const t = msg.event.delta?.text;
+          if (t) { text += t; tokens++; onDelta?.(t, { text, tokens }); }
+        }
+      }
+    });
+    child.stderr.on('data', (d) => { err += d.toString(); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ finalPayload, text, code: code ?? -1, err }); });
+    child.on('error', (e)   => { clearTimeout(timer); resolve({ finalPayload: null, text: '', code: -1, err: e.message }); });
+  });
 }
 
 /** A deterministic stub for each prompt shape. Keeps the output shape close
@@ -285,7 +380,9 @@ function inputBlock(inputs) {
   return `## Inputs\n${rows.map(([k, v]) => `- **${k}:** ${v}`).join('\n')}`;
 }
 
-function pickModel(node) { return node.model || null; }
+/** Resolve the model for a node: explicit `node.model` wins, otherwise the
+ *  kind's cheap default — most work is small enough for haiku. */
+function pickModel(node, fallback = 'haiku') { return node.model || fallback; }
 
 function firstHeadline(text) {
   const m = String(text || '').match(/^#\s+(.+?)\s*$/m);
@@ -320,6 +417,28 @@ function extractJson(text) {
   return null;
 }
 function tryParse(s) { try { return JSON.parse(s); } catch { return null; } }
+
+/**
+ * Pick an origin to capture against: explicit `inputs.devUrl` wins; otherwise
+ * detect a dev server running inside the repo. Returns null when nothing is
+ * reachable, so the handler can report "no dev server" instead of hanging.
+ */
+async function pickOrigin(ctx) {
+  const given = (ctx.run.inputs?.devUrl || '').trim();
+  if (given) return given.replace(/\/+$/, '');
+  return await detectDevServer(ctx.run.repoRoot);
+}
+
+/** Capture one URL and move the PNG into the content-addressed blob store. */
+async function captureShot(url, signal) {
+  if (signal?.aborted) throw new Error('aborted');
+  const tmp = path.join(os.tmpdir(), `orderly-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`);
+  const res = await screenshot(url, tmp, { width: 1400, height: 1000 });
+  if (!res.ok) return null;
+  const ref = putFile(tmp);
+  try { fs.unlinkSync(tmp); } catch {}
+  return { url, ref, capturedAt: new Date().toISOString() };
+}
 
 function onProgressSnapshot(ctx, pairs, i) {
   ctx.onProgress({
