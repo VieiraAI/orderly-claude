@@ -217,8 +217,10 @@ const HANDLERS = {
 
 /**
  * Spawn `claude -p` with the given prompt and return its text result.
- * The CLI runs with --output-format json so we get structured metadata
- * (duration, cost, session id, model usage) alongside the text.
+ * The CLI runs with --output-format stream-json so we can emit progress
+ * events as the text comes in — the card advances token-by-token instead
+ * of waiting for the whole response. The final `result` line carries the
+ * structured metadata (duration, cost, session id, model usage).
  *
  * Tests and demos set `ORDERLY_HANDLER_MODE=mock` to short-circuit the spawn
  * so the smoke suite does not bill the API on every run.
@@ -229,30 +231,71 @@ async function callClaude(prompt, { cwd, signal, model = 'sonnet', onProgress, t
     await new Promise((r) => setTimeout(r, 120));
     return mockReply(prompt, model);
   }
-  onProgress?.(`claude · ${model}`);
+  onProgress?.(`claude · ${model} · starting…`);
   const started = Date.now();
-  const argv = ['claude', '-p', '--output-format', 'json',
-    '--permission-mode', 'acceptEdits', '--model', model, prompt];
-  const { out, err, code } = await exec(argv, { cwd, signal, timeoutMs });
+  const argv = ['claude', '-p',
+    '--output-format', 'stream-json',
+    '--include-partial-messages',
+    '--verbose',
+    '--permission-mode', 'acceptEdits',
+    '--model', model, prompt];
+  const { finalPayload, text, code, err } = await execStream(argv, {
+    cwd, signal, timeoutMs,
+    onDelta: (delta, totals) => {
+      const tail = text => text.slice(-40).replace(/\s+/g, ' ').trim();
+      onProgress?.(`claude · ${model} · ${totals.tokens} tok · ${tail(totals.text)}`);
+    },
+  });
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-  if (code !== 0 && !out.trim()) {
-    throw new Error(`claude cli exited ${code}: ${(err || '').slice(0, 200)}`);
+  if (!finalPayload) {
+    throw new Error(`claude cli exited ${code} without a result: ${(err || '').slice(0, 200)}`);
   }
-  let payload;
-  try { payload = JSON.parse(out); }
-  catch { throw new Error(`claude cli returned non-JSON output: ${out.slice(0, 200)}`); }
-  if (payload.is_error) {
-    throw new Error(`claude cli reported error: ${payload.result || payload.subtype || 'unknown'}`);
+  if (finalPayload.is_error) {
+    throw new Error(`claude cli reported error: ${finalPayload.result || finalPayload.subtype || 'unknown'}`);
   }
-  const modelKey = Object.keys(payload.modelUsage || {})[0] || model;
+  const modelKey = Object.keys(finalPayload.modelUsage || {})[0] || model;
   const meta = {
     model: modelKey,
-    cost: payload.total_cost_usd,
+    cost: finalPayload.total_cost_usd,
     elapsed: `${elapsed} s`,
-    sessionId: payload.session_id,
-    tokens: payload.usage?.output_tokens,
+    sessionId: finalPayload.session_id,
+    tokens: finalPayload.usage?.output_tokens,
   };
-  return { text: String(payload.result || ''), meta };
+  return { text: String(finalPayload.result || text || ''), meta };
+}
+
+/** Spawn a process and stream its stdout line-by-line. Each line is parsed
+ *  as JSON; recognised event types feed onDelta so the card can advance. */
+function execStream(argv, { cwd, signal, timeoutMs = 180_000, onDelta } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(argv[0], argv.slice(1), { cwd, env: process.env });
+    let finalPayload = null;
+    let text = '';
+    let tokens = 0;
+    let err = '';
+    let stdoutBuf = '';
+    let timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} }, timeoutMs);
+    signal?.addEventListener('abort', () => { try { child.kill('SIGTERM'); } catch {} }, { once: true });
+    child.stdout.on('data', (chunk) => {
+      stdoutBuf += chunk.toString();
+      let nl;
+      while ((nl = stdoutBuf.indexOf('\n')) >= 0) {
+        const line = stdoutBuf.slice(0, nl);
+        stdoutBuf = stdoutBuf.slice(nl + 1);
+        if (!line.trim()) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.type === 'result') { finalPayload = msg; continue; }
+        if (msg.type === 'stream_event' && msg.event?.type === 'content_block_delta') {
+          const t = msg.event.delta?.text;
+          if (t) { text += t; tokens++; onDelta?.(t, { text, tokens }); }
+        }
+      }
+    });
+    child.stderr.on('data', (d) => { err += d.toString(); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ finalPayload, text, code: code ?? -1, err }); });
+    child.on('error', (e)   => { clearTimeout(timer); resolve({ finalPayload: null, text: '', code: -1, err: e.message }); });
+  });
 }
 
 /** A deterministic stub for each prompt shape. Keeps the output shape close
