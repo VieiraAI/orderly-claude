@@ -6,10 +6,18 @@
  * partialOutput}) along the way so a long-running node shows motion. Throwing
  * marks the node failed and stops the run.
  *
- * This first pass has one real handler (terminal) and real `ask`. The rest
- * write a plausible placeholder output after a short delay so the end-to-end
- * flow is wired and screenshots fill in. Each placeholder is one small
- * function — swap it for a real LLM/skill/capture call as that side lands.
+ * Most kinds shell out to the `claude` CLI with a prompt built from the run's
+ * workflow + inputs + any upstream outputs. The CLI runs with
+ * --permission-mode acceptEdits so it can read the repo it was pointed at,
+ * and the full skill shelf is available to it — a document handler can call
+ * the doc-coauthoring skill, a report handler can call code-review, and so on.
+ *
+ * Two kinds stay local:
+ *   terminal — spawns the declared command, captures stdout
+ *   ask      — pauses the run until a client posts an answer
+ *
+ * shots-set is still placeholder: a real capture handler needs the dev-server
+ * dance and chrome launch that lives elsewhere in this repo.
  */
 import { spawn } from 'node:child_process';
 
@@ -33,8 +41,6 @@ const HANDLERS = {
   },
 
   ask: async (node, { awaitAnswer }) => {
-    // The scheduler flips the run to `awaiting-answer`, writes the question,
-    // and resolves the promise once a client posts the answer.
     const answer = await awaitAnswer(node.id, {
       question: node.question || node.title,
       choices: node.choices || null,
@@ -43,85 +49,277 @@ const HANDLERS = {
   },
 
   document: async (node, ctx) => {
-    await nap(ctx, 700);
-    return {
-      title: `${node.title}.md`,
-      body: [
-        `# ${node.title}`,
-        '',
-        `Drafted for ${ctx.run.workflowTitle}. Replace this placeholder with a real document handler.`,
-        '',
-        '## Inputs',
-        ...Object.entries(ctx.run.inputs || {}).map(([k, v]) => `- **${k}:** ${v || '—'}`),
-      ].join('\n'),
-    };
+    const upstream = upstreamContext(node, ctx.run);
+    const prompt = [
+      `Draft a focused Markdown document for the "${ctx.run.workflowTitle}" workflow.`,
+      `This node is called "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
+      inputBlock(ctx.run.inputs),
+      upstream && `## Context from earlier steps\n${upstream}`,
+      '',
+      `Return only the Markdown body — no preamble, no closing commentary.`,
+      `Keep it concise: no more than ~400 words. Start with a single H1.`,
+    ].filter(Boolean).join('\n\n');
+    const { text, meta } = await callClaude(prompt, {
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node) || 'sonnet',
+      onProgress: (msg) => ctx.onProgress({ progress: msg }),
+    });
+    const title = firstHeadline(text) || `${slug(node.title)}.md`;
+    return { title: `${title}.md`, body: text.trim(), meta };
   },
 
   report: async (node, ctx) => {
-    await nap(ctx, 900);
+    const upstream = upstreamContext(node, ctx.run);
+    const prompt = [
+      `You are reviewing work produced by the "${ctx.run.workflowTitle}" workflow.`,
+      `This review node is "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
+      inputBlock(ctx.run.inputs),
+      upstream && `## What to review\n${upstream}`,
+      '',
+      `Return a JSON object with this exact shape and nothing else:`,
+      `{"findings":[{"tag":"<correctness|readability|perf|security|style>","text":"<one short sentence>"}]}`,
+      `List at most five findings, most important first. If there is nothing to flag, return an empty array.`,
+    ].filter(Boolean).join('\n\n');
+    const { text, meta } = await callClaude(prompt, {
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node) || 'sonnet',
+      onProgress: (msg) => ctx.onProgress({ progress: msg }),
+    });
+    const parsed = extractJson(text) || { findings: [] };
+    const findings = Array.isArray(parsed.findings) ? parsed.findings : [];
     return {
-      title: `${node.title.toLowerCase()}.md · 3 findings`,
-      findings: [
-        { tag: 'correctness', text: 'None found.' },
-        { tag: 'readability', text: 'A placeholder suggestion — replace with a real review handler.' },
-        { tag: 'perf',        text: 'Nothing hot on the fast path.' },
-      ],
+      title: `${slug(node.title)}.md · ${findings.length} finding${findings.length === 1 ? '' : 's'}`,
+      findings,
+      meta,
     };
   },
 
   mockup: async (node, ctx) => {
-    await nap(ctx, 1100);
-    return { name: `${slug(node.title)}.html`, note: 'Placeholder — a mockup handler lands later.' };
+    const upstream = upstreamContext(node, ctx.run);
+    const prompt = [
+      `Produce a single self-contained HTML mockup for the "${ctx.run.workflowTitle}" workflow.`,
+      `This node is "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
+      inputBlock(ctx.run.inputs),
+      upstream && `## Direction from earlier steps\n${upstream}`,
+      '',
+      `Return only the HTML (no code fences, no commentary). Use inline CSS. Keep it under 200 lines.`,
+    ].filter(Boolean).join('\n\n');
+    const { text, meta } = await callClaude(prompt, {
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node) || 'sonnet',
+      onProgress: (msg) => ctx.onProgress({ progress: msg }),
+    });
+    const html = stripFences(text);
+    return { name: `${slug(node.title)}.html`, html, note: `${html.split('\n').length} lines`, meta };
   },
 
   diff: async (node, ctx) => {
-    await nap(ctx, 700);
+    const upstream = upstreamContext(node, ctx.run);
+    const prompt = [
+      `Propose a small code change for the "${ctx.run.workflowTitle}" workflow.`,
+      `This node is "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
+      inputBlock(ctx.run.inputs),
+      upstream && `## What to work from\n${upstream}`,
+      '',
+      `Return a JSON object with this exact shape and nothing else:`,
+      `{"file":"<path>","hunks":[{"op":"add"|"del","line":"<raw line, no leading +/-/space>"}]}`,
+      `Keep the change tiny — ten hunks or fewer.`,
+    ].filter(Boolean).join('\n\n');
+    const { text, meta } = await callClaude(prompt, {
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node) || 'sonnet',
+      onProgress: (msg) => ctx.onProgress({ progress: msg }),
+    });
+    const parsed = extractJson(text) || { file: 'unknown', hunks: [] };
+    return { file: parsed.file || 'unknown', hunks: parsed.hunks || [], meta };
+  },
+
+  pr: async (node, ctx) => {
+    const upstream = upstreamContext(node, ctx.run);
+    const prompt = [
+      `Draft a GitHub pull request body for the "${ctx.run.workflowTitle}" workflow.`,
+      `This node is "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
+      inputBlock(ctx.run.inputs),
+      upstream && `## What this PR covers\n${upstream}`,
+      '',
+      `Return a JSON object with this exact shape and nothing else:`,
+      `{"title":"<pr title, under 70 chars>","body":"<short markdown body>"}`,
+    ].filter(Boolean).join('\n\n');
+    const { text, meta } = await callClaude(prompt, {
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: 'haiku',
+      onProgress: (msg) => ctx.onProgress({ progress: msg }),
+    });
+    const parsed = extractJson(text) || {};
+    const title = parsed.title || ctx.run.inputs?.title || ctx.run.workflowTitle;
+    const body  = parsed.body  || 'Draft PR body — generated by workflow.';
     return {
-      file: 'placeholder.css',
-      hunks: [
-        { op: 'del', line: '  padding: 24px;' },
-        { op: 'add', line: '  padding: 32px;' },
-        { op: 'add', line: '  gap: 12px;' },
-      ],
+      state: 'draft', number: '#—',
+      title,
+      bodyPreview: body.split('\n').slice(0, 8).join('\n'),
+      url: null,
+      meta,
     };
   },
 
   shots: async (node, ctx) => {
-    await nap(ctx, 900);
-    return { note: 'before/after placeholder' };
+    await nap(ctx, 400);
+    return { note: 'before/after placeholder — real capture lands with the dev-server dance' };
   },
 
   'shots-set': async (node, ctx) => {
-    // Walk one route at a time so the grid fills in on-screen.
+    // Walk one route at a time so the grid fills in on-screen. Real capture
+    // handler lands once the dev-server + headless-chrome dance is factored.
     const routes = parseRoutes(ctx.run.inputs?.routes) || ['/', '/blog', '/about', '/pricing', '/contact'];
     const pairs = routes.map((r) => ({ route: r, status: 'waits' }));
     for (let i = 0; i < pairs.length; i++) {
       pairs[i].status = 'running';
       onProgressSnapshot(ctx, pairs, i);
-      await nap(ctx, 400);
+      await nap(ctx, 300);
       pairs[i].status = 'done';
       onProgressSnapshot(ctx, pairs, i);
     }
     return { title: `${pairs.length} of ${pairs.length} captured`, pairs };
   },
 
-  pr: async (node, ctx) => {
-    await nap(ctx, 500);
-    return {
-      state: 'open', number: '#—',
-      title: ctx.run.inputs?.title || `[placeholder] ${ctx.run.workflowTitle}`,
-      bodyPreview: 'Open the PR in GitHub to see the full body.\nThis is a placeholder until the pr handler is wired.',
-      url: null,
-    };
-  },
-
   _default: async (node, ctx) => {
-    await nap(ctx, 500);
-    return { note: `output for ${node.kind} (placeholder)` };
+    await nap(ctx, 300);
+    return { note: `output for ${node.kind} (placeholder — no handler wired)` };
   },
 };
 
+/* --------------------------- Claude CLI driver --------------------------- */
+
+/**
+ * Spawn `claude -p` with the given prompt and return its text result.
+ * The CLI runs with --output-format json so we get structured metadata
+ * (duration, cost, session id, model usage) alongside the text.
+ *
+ * Tests and demos set `ORDERLY_HANDLER_MODE=mock` to short-circuit the spawn
+ * so the smoke suite does not bill the API on every run.
+ */
+async function callClaude(prompt, { cwd, signal, model = 'sonnet', onProgress, timeoutMs = 180_000 } = {}) {
+  if (process.env.ORDERLY_HANDLER_MODE === 'mock') {
+    onProgress?.('claude · mock');
+    await new Promise((r) => setTimeout(r, 120));
+    return mockReply(prompt, model);
+  }
+  onProgress?.(`claude · ${model}`);
+  const started = Date.now();
+  const argv = ['claude', '-p', '--output-format', 'json',
+    '--permission-mode', 'acceptEdits', '--model', model, prompt];
+  const { out, err, code } = await exec(argv, { cwd, signal, timeoutMs });
+  const elapsed = ((Date.now() - started) / 1000).toFixed(1);
+  if (code !== 0 && !out.trim()) {
+    throw new Error(`claude cli exited ${code}: ${(err || '').slice(0, 200)}`);
+  }
+  let payload;
+  try { payload = JSON.parse(out); }
+  catch { throw new Error(`claude cli returned non-JSON output: ${out.slice(0, 200)}`); }
+  if (payload.is_error) {
+    throw new Error(`claude cli reported error: ${payload.result || payload.subtype || 'unknown'}`);
+  }
+  const modelKey = Object.keys(payload.modelUsage || {})[0] || model;
+  const meta = {
+    model: modelKey,
+    cost: payload.total_cost_usd,
+    elapsed: `${elapsed} s`,
+    sessionId: payload.session_id,
+    tokens: payload.usage?.output_tokens,
+  };
+  return { text: String(payload.result || ''), meta };
+}
+
+/** A deterministic stub for each prompt shape. Keeps the output shape close
+ *  enough to the real thing that downstream parsers behave the same. */
+function mockReply(prompt, model) {
+  const meta = { model: `mock-${model}`, cost: 0, elapsed: '0.1 s', sessionId: 'mock', tokens: 0 };
+  if (/Return a JSON object .*findings/i.test(prompt)) {
+    return { text: JSON.stringify({
+      findings: [{ tag: 'readability', text: 'Mock finding — swap in a real review.' }],
+    }), meta };
+  }
+  if (/Return a JSON object .*hunks/i.test(prompt)) {
+    return { text: JSON.stringify({ file: 'mock.css', hunks: [
+      { op: 'del', line: '  padding: 24px;' },
+      { op: 'add', line: '  padding: 32px;' },
+    ] }), meta };
+  }
+  if (/Return a JSON object .*title.*body/i.test(prompt)) {
+    return { text: JSON.stringify({ title: '[mock] PR title', body: '## Summary\n\nMock body.' }), meta };
+  }
+  if (/single self-contained HTML mockup/i.test(prompt)) {
+    return { text: '<!doctype html><html><body><h1>Mock</h1></body></html>', meta };
+  }
+  // Default: a short Markdown document.
+  return { text: '# Mock document\n\nA stub body produced in `ORDERLY_HANDLER_MODE=mock`.', meta };
+}
+
 /* ------------------------------- Helpers -------------------------------- */
+
+function upstreamContext(node, run) {
+  // Pull in the output of every direct parent node, labelled by title.
+  const parents = (run.graph.edges || [])
+    .filter(([, b]) => b === node.id)
+    .map(([a]) => run.graph.nodes.find((n) => n.id === a))
+    .filter(Boolean);
+  const chunks = [];
+  for (const p of parents) {
+    if (!p.output) continue;
+    const body = outputToText(p);
+    if (body) chunks.push(`### ${p.title}\n${body}`);
+  }
+  return chunks.join('\n\n');
+}
+
+function outputToText(node) {
+  const o = node.output || {};
+  if (o.body)       return String(o.body);
+  if (o.text)       return String(o.text);
+  if (o.out)        return `\n\`\`\`\n${String(o.out).slice(0, 2000)}\n\`\`\``;
+  if (o.findings)   return o.findings.map((f) => `- **${f.tag}:** ${f.text}`).join('\n');
+  if (o.answer)     return `**${o.question || node.title}**\n${o.answer}`;
+  if (o.hunks)      return `\`${o.file || ''}\`: ${o.hunks.length} hunk(s)`;
+  if (o.title)      return o.title;
+  return '';
+}
+
+function inputBlock(inputs) {
+  const rows = Object.entries(inputs || {}).filter(([, v]) => v);
+  if (!rows.length) return null;
+  return `## Inputs\n${rows.map(([k, v]) => `- **${k}:** ${v}`).join('\n')}`;
+}
+
+function pickModel(node) { return node.model || null; }
+
+function firstHeadline(text) {
+  const m = String(text || '').match(/^#\s+(.+?)\s*$/m);
+  return m ? slug(m[1]) : null;
+}
+
+function stripFences(text) {
+  const t = String(text || '').trim();
+  const m = t.match(/^```(?:\w+)?\n([\s\S]*?)\n```$/);
+  return m ? m[1] : t;
+}
+
+/**
+ * Pull a JSON object out of a response. Models sometimes wrap JSON in a code
+ * fence or add commentary around it, so look for the outer braces first.
+ */
+function extractJson(text) {
+  const t = String(text || '').trim();
+  const direct = tryParse(t);
+  if (direct) return direct;
+  const fenced = t.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) {
+    const inside = tryParse(fenced[1]);
+    if (inside) return inside;
+  }
+  const brace = t.indexOf('{');
+  if (brace >= 0) {
+    const slice = t.slice(brace);
+    const parsed = tryParse(slice);
+    if (parsed) return parsed;
+  }
+  return null;
+}
+function tryParse(s) { try { return JSON.parse(s); } catch { return null; } }
 
 function onProgressSnapshot(ctx, pairs, i) {
   ctx.onProgress({

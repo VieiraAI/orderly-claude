@@ -627,6 +627,10 @@ async function main() {
 
   console.log('\nServer\n');
 
+  // Keep smoke runs free and fast: skip the real Claude CLI handlers unless
+  // the caller explicitly opts in.
+  if (!process.env.ORDERLY_HANDLER_MODE) process.env.ORDERLY_HANDLER_MODE = 'mock';
+
   const port = await freePort(7900);
   const { close } = await startServer({
     port,

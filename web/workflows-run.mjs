@@ -239,10 +239,13 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-/* Live updates — the broadcast carries no run payload, so refetch on signal. */
-const src = new EventSource('/events');
-src.addEventListener('update',    () => load().catch(() => {}));
-src.addEventListener('run-start', () => load().catch(() => {}));
+/* Live updates — the broadcast carries no run payload, so refetch on signal.
+ * `?snapshot=1` skips the stream so headless screenshotters can finish loading. */
+if (!new URLSearchParams(location.search).has('snapshot')) {
+  const src = new EventSource('/events');
+  src.addEventListener('update',    () => load().catch(() => {}));
+  src.addEventListener('run-start', () => load().catch(() => {}));
+}
 window.addEventListener('resize', () => run && drawEdges(document.getElementById('canvas'), document.getElementById('edges')));
 
 if (runId) load();
