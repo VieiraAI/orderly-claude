@@ -178,7 +178,7 @@ function parse(file) {
  * sessions index. This is the surface across which runs are discovered — any
  * repo not opened in Claude Code lately is simply not scanned, which keeps the
  * list bounded. */
-function knownRepoRoots() {
+export function knownRepoRoots() {
   const roots = new Set();
   for (const s of listSessions({ limit: 400 })) {
     if (s.cwd) roots.add(s.cwd);

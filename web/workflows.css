@@ -60,7 +60,13 @@ code { font-family: var(--f-mono); font-size: .92em; color: var(--accent); }
 
 /* Top nav */
 .nav { display: flex; align-items: center; gap: 20px; padding: 18px 56px; border-bottom: 1px solid var(--edge-tint); }
-.nav .brand { font-family: var(--f-display); font-weight: 560; letter-spacing: -0.02em; font-size: 15px; }
+.nav .brand { font-family: var(--f-display); font-weight: 560; letter-spacing: -0.02em; font-size: 15px;
+  display: inline-flex; align-items: center;
+  padding: 4px 10px 4px 4px; border-radius: 8px;
+  transition: background .14s var(--ease); }
+.nav .brand::before { content: "◇"; color: var(--accent); margin-right: 10px;
+  font-size: 13px; opacity: .9; }
+.nav .brand:hover { background: var(--raised); }
 .nav .brand .slash { color: var(--mute); font-weight: 400; margin: 0 6px; }
 .nav .here  { color: var(--accent); font-size: 13px; font-family: var(--f-mono); letter-spacing: 0.05em; }
 .nav .spacer { flex: 1; }
@@ -192,17 +198,17 @@ main { max-width: 1280px; margin: 0 auto; padding: 0 56px 96px; }
 
 /* ------------------------------- Canvas run ------------------------------ */
 
-.top-bar {
+.sub-bar {
   display: flex; align-items: center; gap: 20px;
-  padding: 14px 24px; border-bottom: 1px solid var(--edge-tint);
+  padding: 10px 56px; border-bottom: 1px solid var(--edge-tint);
+  background: var(--surface);
 }
-.top-bar .back { color: var(--mute); font-size: 13px; font-family: var(--f-mono); letter-spacing: 0.05em; }
-.top-bar .back:hover { color: var(--text); }
-.top-bar .crumbs { color: var(--mute); font-size: 13px; display: flex; gap: 8px; }
-.top-bar .crumbs .here { color: var(--text); }
-.top-bar .spacer { flex: 1; }
+.sub-bar .crumbs { color: var(--mute); font-size: 13px; display: flex; gap: 8px;
+  font-family: var(--f-mono); letter-spacing: 0.03em; }
+.sub-bar .crumbs .here { color: var(--text); }
+.sub-bar .spacer { flex: 1; }
 
-.app { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 54px); }
+.app { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 56px); }
 .panel { border-right: 1px solid var(--edge-tint); padding: 24px 22px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .panel .head { margin-bottom: 20px; }
 .panel .title-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
@@ -361,3 +367,34 @@ main { max-width: 1280px; margin: 0 auto; padding: 0 56px 96px; }
   margin-top: auto; padding-top: 6px;
   font-family: var(--f-mono); font-size: 10px; color: var(--faint); }
 .skill-tile .foot .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --------------------------- Global app menu ----------------------------- */
+.app-menu { position: relative; display: inline-flex; align-items: center; }
+.app-menu-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: transparent; border: 1px solid transparent;
+  padding: 6px 10px 6px 10px; border-radius: 10px;
+  color: var(--text); font-family: var(--f-display); font-weight: 560;
+  letter-spacing: -0.02em; font-size: 15px; cursor: pointer;
+  transition: background .14s var(--ease), border-color .14s var(--ease);
+}
+.app-menu-btn:hover { background: var(--raised); border-color: var(--edge-tint); }
+.app-menu-btn[aria-expanded="true"] { background: var(--raised); border-color: var(--edge-hi); }
+.app-menu-glyph { color: var(--accent); font-size: 13px; }
+.app-menu-brand { font-weight: 560; }
+.app-menu-caret { color: var(--faint); font-size: 11px; }
+.app-menu-drop {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 20;
+  min-width: 280px; padding: 6px; background: var(--surface);
+  border: 1px solid var(--edge-hi); border-radius: 12px;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+}
+.app-menu-item {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 10px 12px; border-radius: 8px; color: var(--text);
+  text-decoration: none;
+}
+.app-menu-item:hover { background: var(--raised); }
+.app-menu-item.on { background: var(--raised); box-shadow: inset 2px 0 0 var(--accent); }
+.app-menu-item .k { font-size: 14px; font-weight: 500; }
+.app-menu-item .h { font-size: 11px; color: var(--faint); font-family: var(--f-mono); }

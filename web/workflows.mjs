@@ -194,22 +194,57 @@ async function loadSkills() {
 }
 
 function renderSkills() {
-  for (const scope of ['project', 'user']) {
-    const list = state.skills.filter((s) => s.scope === scope);
-    const mount = document.getElementById('skills' + scope[0].toUpperCase() + scope.slice(1));
-    const meta  = document.getElementById('skMeta' + scope[0].toUpperCase() + scope.slice(1));
-    meta.textContent = list.length
-      ? `${list.length} skill${list.length === 1 ? '' : 's'}`
-      : 'none yet';
-    if (!list.length) {
-      mount.innerHTML = `<div class="empty" style="grid-column:1 / -1;background:var(--surface);">
-        Nothing in <code>${scope === 'project' ? '<repo>/.claude/skills/' : '~/.claude/skills/'}</code> yet.
-      </div>`;
-      continue;
+  // Orderly spans every project. Group by repoRoot so each project with a
+  // .claude/skills/ folder gets its own section, then the global library.
+  const mount = document.getElementById('skillsMount');
+  const projects = new Map(); // repoRoot → skills[]
+  const global = [];
+  for (const s of state.skills) {
+    if (s.scope === 'user') global.push(s);
+    else {
+      if (!projects.has(s.repoRoot)) projects.set(s.repoRoot, []);
+      projects.get(s.repoRoot).push(s);
     }
-    mount.innerHTML = list.map(skillTile).join('');
   }
+  const parts = [];
+  // Projects first, sorted by name for stability.
+  const sortedProjects = [...projects.entries()].sort(([a], [b]) =>
+    (a.split('/').pop() || '').localeCompare(b.split('/').pop() || ''));
+  for (const [root, list] of sortedProjects) {
+    parts.push(renderSkillSection(root.split('/').pop(), root.replace(/^.*?\.claude\//, '.claude/') ===
+      root ? `${root}/.claude/skills/` : root, list, root));
+  }
+  if (!sortedProjects.length) {
+    parts.push(`<section class="scope">
+      <header class="cat-head"><h2>Project libraries</h2><span class="meta">none yet</span></header>
+      <div class="empty" style="background:var(--surface);">
+        No projects with <code>.claude/skills/</code> are known yet. Open the project in Claude Code once and it will show up.
+      </div>
+    </section>`);
+  }
+  // Global library.
+  parts.push(renderSkillSection('Your global library', '~/.claude/skills/', global));
+  mount.innerHTML = parts.join('');
 }
+
+function renderSkillSection(title, pathLabel, list, repoRoot) {
+  const meta = list.length ? `${list.length} skill${list.length === 1 ? '' : 's'}` : 'none yet';
+  const body = list.length
+    ? `<div class="skills">${list.map(skillTile).join('')}</div>`
+    : `<div class="empty" style="background:var(--surface);">
+         Nothing in <code>${esc(pathLabel)}</code> yet.
+       </div>`;
+  return `<section class="scope"${repoRoot ? ` data-repo="${esc(repoRoot)}"` : ''}>
+    <header class="cat-head">
+      <h2>${esc(title)}</h2>
+      <code class="repo-path" style="font-family:var(--f-mono);font-size:11px;color:var(--faint);margin-left:12px;">${esc(pathLabel)}</code>
+      <span class="meta">${meta}</span>
+    </header>
+    ${body}
+  </section>`;
+}
+
+function esc(s) { return escapeHtml(s); }
 
 function skillTile(s) {
   const glyph = (s.slug || s.name || '?').slice(0, 2).toUpperCase();

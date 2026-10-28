@@ -587,9 +587,10 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         return send(200, { workflows: listDefinitions({ repoRoot: liveCwd }) });
       }
 
-      // Skills — the pieces workflows draw on. Project > user, same ordering.
+      // Skills — the pieces workflows draw on. Walks every repo the sessions
+      // index knows about plus the global library.
       if (url.pathname === '/api/skills') {
-        return send(200, { skills: listSkills({ repoRoot: liveCwd }) });
+        return send(200, { skills: listSkills() });
       }
 
       const wfMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)$/);

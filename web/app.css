@@ -108,6 +108,11 @@ kbd { font: 11px var(--mono); color: var(--faint); margin-left: 5px; }
 .top .update-hint:hover { color: var(--deep-black); border-color: var(--t-fix); opacity: .9; }
 .top .pill { color: rgba(255,255,255,.6); border-color: rgba(255,255,255,.16); cursor: pointer; background: none; }
 .top .pill:hover { color: var(--pure-white); border-color: rgba(255,255,255,.35); }
+.top .app-menu-btn { color: rgba(255,255,255,.9); }
+.top .app-menu-btn:hover,
+.top .app-menu-btn[aria-expanded="true"] { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.2); }
+.top .app-menu-glyph { color: var(--dusk-blue, #a3abff); }
+.top .app-menu-caret { color: rgba(255,255,255,.4); }
 .pill-input {
   font: 11px var(--mono); background: rgba(255,255,255,.08); color: var(--pure-white);
   border: 1px solid rgba(255,255,255,.3); border-radius: 999px; padding: 4px 11px;
@@ -585,3 +590,35 @@ pre.block.cmd { color: var(--text); }
 .bubble.live.waiting .vocab-term { color: var(--t-ask); }
 .bubble.live.stalled .icon { animation-duration: 2.6s; opacity: .55; }
 .bubble.live.stalled .vocab-term { color: var(--muted); font-weight: 500; }
+
+/* --------------------------- Global app menu ----------------------------- */
+.app-menu { position: relative; display: inline-flex; align-items: center; }
+.app-menu-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: transparent; border: 1px solid transparent;
+  padding: 6px 10px; border-radius: 10px;
+  color: var(--text); font: 500 15px/1 var(--sans);
+  letter-spacing: -0.02em; cursor: pointer;
+  transition: background .14s, border-color .14s;
+}
+.app-menu-btn:hover { background: var(--raised); border-color: var(--line); }
+.app-menu-btn[aria-expanded="true"] { background: var(--raised); border-color: var(--line); }
+.app-menu-glyph { color: var(--accent); font-size: 13px; }
+.app-menu-brand { font-weight: 560; }
+.app-menu-caret { color: var(--faint); font-size: 11px; }
+.app-menu-drop {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 20;
+  min-width: 280px; padding: 6px; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.12);
+}
+:root[data-theme="dark"] .app-menu-drop { box-shadow: 0 20px 40px rgba(0,0,0,0.5); }
+.app-menu-item {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 10px 12px; border-radius: 8px; color: var(--text);
+  text-decoration: none;
+}
+.app-menu-item:hover { background: var(--raised); }
+.app-menu-item.on { background: var(--raised); box-shadow: inset 2px 0 0 var(--accent); }
+.app-menu-item .k { font-size: 14px; font-weight: 500; }
+.app-menu-item .h { font-size: 11px; color: var(--faint); font-family: var(--mono); }

@@ -1634,7 +1634,12 @@ $('railBtn').onclick = () => {
   const open = layoutEl().classList.toggle('rail-open');
   try { localStorage.setItem('cz-rail', open ? '1' : '0'); } catch {}
 };
-try { if (localStorage.getItem('cz-rail') === '1') layoutEl().classList.add('rail-open'); } catch {}
+// Rail is open by default so the ☰ affordance isn't a mystery; the user's
+// explicit toggle still sticks across reloads.
+try {
+  const pref = localStorage.getItem('cz-rail');
+  if (pref === null || pref === '1') layoutEl().classList.add('rail-open');
+} catch { layoutEl().classList.add('rail-open'); }
 
 function applyTheme(mode, remember = true) {
   document.documentElement.setAttribute('data-theme', mode);
