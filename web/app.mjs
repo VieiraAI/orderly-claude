@@ -5,6 +5,7 @@ const state = {
   sessionId: null, live: true, session: null, activeStep: null,
   tab: 'detail', results: [], sel: 0, run: { status: 'idle', busy: false }, person: null, tabs: [],
   activity: null, devUrl: null, build: null, think: { word: 0, tick: 0, since: null },
+  runs: [],
   voice: (() => {
     try { return localStorage.getItem('cz-voice-2') || 'genz'; } catch { return 'genz'; }
   })(),
@@ -121,6 +122,52 @@ const genz = createRotation();
 let term = genz.next();
 
 const VOICE_ORDER = ['genz', 'plain', 'booth'];
+
+/* ---------- workflow runs in the timeline ---------- */
+
+/**
+ * The sessions index tells the backend which runs belong to this session.
+ * A run shows up as a highlighted bubble on the turn it kicked off from,
+ * and clicking it opens the canvas page scoped to that run id.
+ */
+async function loadRuns() {
+  if (!state.sessionId) return;
+  try {
+    const r = await api(`/api/runs?session=${state.sessionId}`);
+    state.runs = r?.runs || [];
+  } catch { state.runs = []; }
+}
+
+function workflowBubble(run) {
+  const done = run.doneNodes ?? 0;
+  const total = run.totalNodes ?? 0;
+  const live = run.status === 'running';
+  const waiting = run.status === 'awaiting-answer';
+  const failed = run.status === 'failed';
+  const stopped = run.status === 'stopped';
+  const sub = waiting ? `waiting · ${run.askingLabel || 'needs you'}`
+    : live     ? (run.runningLabel ? run.runningLabel : `step ${done} of ${total}`)
+    : failed   ? 'failed'
+    : stopped  ? 'stopped'
+    : `done · ${done} of ${total}`;
+  const toneCls = waiting ? 'ask' : live ? 'running' : failed ? 'warn' : stopped ? 'warn' : 'done';
+  return el('a', {
+    class: `bubble workflow tone-${toneCls}`,
+    href: `/workflows-run.html#${run.runId}`,
+    target: '_blank', rel: 'noopener',
+    title: 'Open the canvas for this run',
+  }, [
+    el('span', { class: `icon t-workflow` }, '◇'),
+    el('span', { class: 'label' }, [
+      el('span', { class: 'text' }, [
+        el('span', { class: 'wf-tag' }, 'workflow'),
+        el('span', { class: 'wf-name' }, run.workflowTitle || run.workflowId),
+      ]),
+      el('span', { class: 'sub' }, sub),
+    ]),
+    el('span', { class: 'tags' }, el('span', { class: 'tag open-canvas' }, 'open canvas →')),
+  ]);
+}
 
 /* ---------- timeline ---------- */
 
@@ -426,7 +473,16 @@ function renderTimeline() {
     const body = [];
     if (turn.intro) body.push(el('div', { class: 'msg-text md', html: md(turn.intro) }));
 
-    if (turn.steps.length || (turn.pending || []).length || liveNeedsRow || openAsk) {
+    // Any workflow runs that kicked off between this turn's prompt and the
+    // next turn's prompt belong to this turn.
+    const nextTurnAt = isLast ? Infinity : Date.parse(turns[index + 1].promptAt);
+    const turnAt = Date.parse(turn.promptAt || 0) || 0;
+    const myRuns = (state.runs || []).filter((r) => {
+      const t = Date.parse(r.startedAt);
+      return isFinite(t) && t >= turnAt && t < nextTurnAt;
+    });
+
+    if (turn.steps.length || (turn.pending || []).length || liveNeedsRow || openAsk || myRuns.length) {
       const list = el('div', { class: 'steps' });
       for (const s of turn.steps) list.append(bubble(s));
       for (const p of turn.pending || []) {
@@ -435,6 +491,7 @@ function renderTimeline() {
           el('span', { class: 'label' }, el('span', { class: 'text' }, p)),
         ]));
       }
+      for (const r of myRuns) list.append(workflowBubble(r));
       if (liveNeedsRow) list.append(thinkingBubble());
       else if (openAsk) list.append(waitingBubble(openAsk.label));
       body.push(list);
@@ -1089,6 +1146,7 @@ async function refresh() {
     ? `capturing ${data.devUrl.replace('http://', '')}`
     : 'set capture target';
   state.devUrl = data.devUrl || null;
+  await loadRuns();
   renderTimeline();
 }
 
@@ -1571,6 +1629,10 @@ events.addEventListener('session', (e) => {
     if (sessionId) { state.sessionId = sessionId; refresh(); loadRail(); }
   } catch {}
 });
+// Workflow runs this session is responsible for — pull them again so the
+// bubble appears, its status advances, and the "done · N of N" lands.
+events.addEventListener('run-start',  () => { loadRuns().then(renderTimeline); });
+events.addEventListener('run-finish', () => { loadRuns().then(renderTimeline); });
 
 /* ---------- search ---------- */
 

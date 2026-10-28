@@ -622,3 +622,26 @@ pre.block.cmd { color: var(--text); }
 .app-menu-item.on { background: var(--raised); box-shadow: inset 2px 0 0 var(--accent); }
 .app-menu-item .k { font-size: 14px; font-weight: 500; }
 .app-menu-item .h { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+
+/* --------------------------- Workflow bubble ----------------------------- */
+/* A workflow run that fired in this session, rendered as a bubble inside the
+ * turn that kicked it off. Clicks open the canvas page scoped to the run. */
+.bubble.workflow {
+  text-decoration: none;
+  background: color-mix(in oklab, var(--dusk-blue) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--dusk-blue);
+}
+.bubble.workflow:hover { background: color-mix(in oklab, var(--dusk-blue) 18%, transparent); }
+.bubble.workflow .icon.t-workflow { color: var(--dusk-blue); background: transparent; }
+.bubble.workflow .wf-tag {
+  font: 10px var(--mono); color: var(--dusk-blue); letter-spacing: 0.08em;
+  text-transform: uppercase; margin-right: 10px;
+}
+.bubble.workflow .wf-name { font-weight: 500; }
+.bubble.workflow .tag.open-canvas {
+  font: 11px var(--mono); color: var(--dusk-blue);
+  padding: 2px 8px; border: 1px solid color-mix(in oklab, var(--dusk-blue) 40%, transparent);
+  border-radius: 999px;
+}
+.bubble.workflow.tone-running { box-shadow: inset 2px 0 0 var(--dusk-blue), 0 0 0 1px color-mix(in oklab, var(--dusk-blue) 30%, transparent); }
+.bubble.workflow.tone-done .wf-tag { color: color-mix(in oklab, var(--dusk-blue) 70%, var(--text)); }
