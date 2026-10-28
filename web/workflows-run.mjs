@@ -67,6 +67,43 @@ function render() {
   }
   renderPlanRail();
   layoutCanvas();
+  renderRunActions();
+}
+
+function renderRunActions() {
+  let bar = document.getElementById('runActions');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'runActions';
+    bar.className = 'run-actions';
+    document.querySelector('.panel .head').append(bar);
+  }
+  const terminal = ['done', 'failed', 'stopped'].includes(run.status);
+  bar.innerHTML = `
+    <button class="run-btn" data-act="rerun-all" ${terminal ? '' : 'disabled'}
+            title="Clone this run and start from the top">↻ Rerun</button>
+    <button class="run-btn danger" data-act="delete"
+            title="Delete this run folder">✕ Delete</button>`;
+  bar.querySelector('[data-act="rerun-all"]').onclick = () => rerunFromCanvas(null);
+  bar.querySelector('[data-act="delete"]').onclick = async () => {
+    if (!confirm('Delete this run? The folder and all its outputs will be removed.')) return;
+    try {
+      const r = await fetch(`/api/runs/${encodeURIComponent(run.runId)}`, { method: 'DELETE' }).then((x) => x.json());
+      if (r.deleted) { location.href = '/workflows.html#runs'; return; }
+      throw new Error(r.error || 'delete failed');
+    } catch (e) { alert(`Delete failed: ${e.message}`); }
+  };
+}
+
+async function rerunFromCanvas(fromNodeId) {
+  try {
+    const r = await fetch(`/api/runs/${encodeURIComponent(run.runId)}/rerun`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fromNodeId }),
+    }).then((x) => x.json());
+    if (r.run?.runId) { location.href = `/workflows-run.html#${r.run.runId}`; return; }
+    throw new Error(r.error || 'rerun failed');
+  } catch (e) { alert(`Rerun failed: ${e.message}`); }
 }
 
 function renderPlanRail() {
@@ -264,6 +301,22 @@ function selectNode(id) {
   for (const el of document.querySelectorAll('.card.sel, .plan-rail .item.sel')) el.classList.remove('sel');
   document.querySelector(`.card[data-id="${id}"]`)?.classList.add('sel');
   document.querySelector(`.plan-rail .item[data-id="${id}"]`)?.classList.add('sel');
+  // Offer "rerun from here" on the actions bar when the run is terminal.
+  const bar = document.getElementById('runActions');
+  if (!bar) return;
+  const terminal = ['done', 'failed', 'stopped'].includes(run.status);
+  let fromBtn = bar.querySelector('[data-act="rerun-from"]');
+  if (!terminal) { fromBtn?.remove(); return; }
+  if (!fromBtn) {
+    fromBtn = document.createElement('button');
+    fromBtn.className = 'run-btn';
+    fromBtn.dataset.act = 'rerun-from';
+    bar.prepend(fromBtn);
+  }
+  const node = run.graph.nodes.find((n) => n.id === id);
+  fromBtn.textContent = `↻ Rerun from ${node?.title || id}`;
+  fromBtn.title = 'Clone this run, keep outputs upstream of this node, re-run from here';
+  fromBtn.onclick = () => rerunFromCanvas(id);
 }
 
 function esc(s) {

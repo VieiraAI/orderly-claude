@@ -144,7 +144,19 @@ function renderRuns() {
   }
   mount.innerHTML = parts.join('');
   for (const el of document.querySelectorAll('.run-row')) {
-    el.onclick = () => { location.href = `/workflows-run.html#${el.dataset.id}`; };
+    el.onclick = (ev) => {
+      // Row-level actions handle their own navigation.
+      if (ev.target.closest('.row-btn')) return;
+      location.href = `/workflows-run.html#${el.dataset.id}`;
+    };
+  }
+  for (const b of document.querySelectorAll('.row-btn')) {
+    b.onclick = (ev) => {
+      ev.stopPropagation();
+      const id = b.dataset.id;
+      if (b.dataset.act === 'rerun') rerunFromCatalog(id);
+      else if (b.dataset.act === 'delete') deleteRunRow(id);
+    };
   }
 }
 
@@ -171,8 +183,29 @@ function runRow(r) {
     </div>
     <span class="trigger">${escapeHtml(r.trigger || '—')}</span>
     <span class="state ${stateCls}">${escapeHtml(label)}</span>
-    <span class="open">open canvas →</span>
+    <span class="row-actions">
+      <button class="row-btn" data-act="rerun"  data-id="${r.runId}" title="Start a new run from the same def">↻ rerun</button>
+      <button class="row-btn danger" data-act="delete" data-id="${r.runId}" title="Delete this run folder">✕</button>
+      <span class="open">open canvas →</span>
+    </span>
   </div>`;
+}
+
+async function rerunFromCatalog(runId) {
+  try {
+    const r = await fetch(`/api/runs/${encodeURIComponent(runId)}/rerun`, { method: 'POST' }).then((x) => x.json());
+    if (r.run?.runId) { location.href = `/workflows-run.html#${r.run.runId}`; return; }
+    throw new Error(r.error || 'rerun failed');
+  } catch (e) { alert(`Rerun failed: ${e.message}`); }
+}
+
+async function deleteRunRow(runId) {
+  if (!confirm('Delete this run? The folder and all its outputs will be removed.')) return;
+  try {
+    const r = await fetch(`/api/runs/${encodeURIComponent(runId)}`, { method: 'DELETE' }).then((x) => x.json());
+    if (r.deleted) { loadRuns(); return; }
+    throw new Error(r.error || 'delete failed');
+  } catch (e) { alert(`Delete failed: ${e.message}`); }
 }
 
 function groupBy(arr, fn) {

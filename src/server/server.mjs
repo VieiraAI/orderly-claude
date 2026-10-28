@@ -18,7 +18,7 @@ import { Runner } from '../core/runner.mjs';
 import { SHOTS_DIR, INSTANCES_FILE, ensureDirs, transcriptPathFor, uploadsFor } from '../core/paths.mjs';
 import { randomUUID } from 'node:crypto';
 import { loadShots, attachShots } from '../core/shots.mjs';
-import { listDefinitions, getDefinition, startRun, readRun, listRuns, runsForSession } from '../core/workflows.mjs';
+import { listDefinitions, getDefinition, startRun, readRun, listRuns, runsForSession, deleteRun, rerunRun } from '../core/workflows.mjs';
 import { Scheduler } from '../core/workflow-runner.mjs';
 import { openBlob } from '../core/blobs.mjs';
 import { listSkills } from '../core/skills.mjs';
@@ -613,6 +613,26 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
           broadcast('run-start', { runId: run.runId, workflowId: run.workflowId });
           return send(200, { run });
         } catch (e) { return send(400, { error: e.message }); }
+      }
+
+      const runRerunMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/rerun$/);
+      if (runRerunMatch && req.method === 'POST') {
+        const body = await readBody(req).catch(() => ({}));
+        try {
+          const run = rerunRun(runRerunMatch[1], { fromNodeId: body.fromNodeId || null });
+          startScheduler(run);
+          broadcast('run-start', { runId: run.runId, workflowId: run.workflowId });
+          return send(200, { run });
+        } catch (e) { return send(400, { error: e.message }); }
+      }
+
+      const runDeleteMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
+      if (runDeleteMatch && req.method === 'DELETE') {
+        const s = schedulers.get(runDeleteMatch[1]);
+        if (s) s.stop();
+        const ok = deleteRun(runDeleteMatch[1]);
+        if (ok) broadcast('run-finish', { runId: runDeleteMatch[1], status: 'deleted' });
+        return ok ? send(200, { deleted: true }) : send(404, { error: 'run not found' });
       }
 
       const runStopMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/stop$/);

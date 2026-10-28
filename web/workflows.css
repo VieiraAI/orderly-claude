@@ -407,3 +407,18 @@ main { max-width: 1280px; margin: 0 auto; padding: 0 56px 96px; }
   letter-spacing: 0.08em; text-transform: uppercase; color: var(--ship);
   margin-right: 8px; padding: 1px 6px; border: 1px solid color-mix(in oklab, var(--ship) 40%, transparent);
   border-radius: 999px; }
+
+/* ---------------------- Run actions (delete / rerun) --------------------- */
+.run-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.run-btn, .row-btn {
+  font: 11px var(--f-mono); color: var(--mute);
+  background: transparent; border: 1px solid var(--edge-tint);
+  border-radius: 999px; padding: 4px 10px; cursor: pointer;
+  transition: color .14s var(--ease), border-color .14s var(--ease), background .14s var(--ease);
+}
+.run-btn:hover, .row-btn:hover { color: var(--text); border-color: var(--edge-hi); }
+.run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.run-btn.danger:hover, .row-btn.danger:hover {
+  color: var(--ship); border-color: color-mix(in oklab, var(--ship) 40%, transparent);
+}
+.run-row .row-actions { display: inline-flex; gap: 6px; align-items: center; justify-content: flex-end; }

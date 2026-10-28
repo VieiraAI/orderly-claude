@@ -782,6 +782,40 @@ async function main() {
     } });
     check('validator flags cycles', cyclic.some((p) => /cycle/i.test(p)), cyclic.join('; '));
 
+    // Rerun & delete.
+    const rerunResp = await fetch(`${base}/api/runs/${started.run.runId}/rerun`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    check('POST /api/runs/:id/rerun returns a new run', !!rerunResp.run?.runId
+      && rerunResp.run.runId !== started.run.runId, rerunResp.error);
+    check('the rerun carries the same inputs', JSON.stringify(rerunResp.run.inputs) ===
+      JSON.stringify(started.run.inputs));
+
+    // Rerun from a specific node: clone and keep upstream outputs. Wait for
+    // the fresh rerun to settle so we can target one of its done nodes.
+    let settled = null;
+    const budget2 = Date.now() + 8000;
+    while (Date.now() < budget2) {
+      await sleep(200);
+      const r2 = (await get(`/api/runs/${rerunResp.run.runId}`)).run;
+      if (r2 && ['done', 'failed', 'stopped'].includes(r2.status)) { settled = r2; break; }
+    }
+    if (settled) {
+      const target = settled.graph.nodes[settled.graph.nodes.length - 1];
+      const partial = await fetch(`${base}/api/runs/${settled.runId}/rerun`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ fromNodeId: target.id }),
+      }).then((r) => r.json());
+      check('rerun from node keeps upstream outputs',
+        partial.run?.graph?.nodes?.some((n) => n.id !== target.id && n.status === 'done'),
+        partial.error);
+    }
+
+    const delResp = await fetch(`${base}/api/runs/${rerunResp.run.runId}`, { method: 'DELETE' }).then((r) => r.json());
+    check('DELETE /api/runs/:id removes the folder', delResp.deleted === true, JSON.stringify(delResp));
+    const delMissing = await fetch(`${base}/api/runs/${rerunResp.run.runId}`).then((r) => r.status);
+    check('deleted run returns 404', delMissing === 404, String(delMissing));
+
     // Skills — read from the two .claude/skills roots.
     const skillsResp = await get('/api/skills');
     check('GET /api/skills returns an array',

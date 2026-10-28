@@ -217,6 +217,76 @@ export function runsForSession(sessionId) {
   return listRuns({ limit: 1000 }).filter((r) => r.sessionId === sessionId);
 }
 
+/** Delete a run folder. Returns true if the folder existed. */
+export function deleteRun(runId) {
+  for (const base of [...knownRepoRoots().map(repoRunsDir), SCRATCH_RUNS_DIR]) {
+    const dir = path.join(base, runId);
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Clone a finished run and start a new one. If `fromNodeId` is given, every
+ * node upstream of it keeps its output and is marked done; the fromNode and
+ * everything downstream start pending. Without a fromNodeId the whole graph
+ * resets to pending — a full rerun with the same inputs.
+ */
+export function rerunRun(runId, { fromNodeId = null } = {}) {
+  const prior = readRun(runId);
+  if (!prior) throw new Error(`run not found: ${runId}`);
+  const def = getDefinition(prior.workflowId, { repoRoot: prior.repoRoot });
+  if (!def) throw new Error(`workflow not found: ${prior.workflowId}`);
+  const newRunId = randomUUID();
+  const now = new Date().toISOString();
+  const preservedIds = fromNodeId
+    ? collectAncestors(def.graph, fromNodeId)
+    : new Set();
+  const nodes = (def.graph.nodes || []).map((n) => {
+    const prev = prior.graph?.nodes?.find((x) => x.id === n.id);
+    const keep = preservedIds.has(n.id) && prev?.status === 'done';
+    return {
+      id: n.id, title: n.title, kind: n.kind,
+      col: n.col, row: n.row, cost: n.cost,
+      status: keep ? 'done' : 'pending',
+      waitsFor: null,
+      output: keep ? prev.output : null,
+      startedAt: keep ? prev.startedAt : null,
+      endedAt:   keep ? prev.endedAt   : null,
+    };
+  });
+  const run = {
+    runId: newRunId, workflowId: prior.workflowId,
+    workflowTitle: def.title, category: def.category, scope: prior.scope,
+    status: 'running', trigger: `rerun of ${runId.slice(0, 8)}`,
+    sessionId: prior.sessionId, repoRoot: prior.repoRoot,
+    startedAt: now, endedAt: null,
+    inputs: { ...(prior.inputs || {}) },
+    graph: { nodes, edges: [...(def.graph.edges || [])] },
+  };
+  writeRun(run);
+  return run;
+}
+
+function collectAncestors(graph, nodeId) {
+  const parents = {};
+  for (const n of graph.nodes || []) parents[n.id] = [];
+  for (const [a, b] of graph.edges || []) if (parents[b]) parents[b].push(a);
+  const seen = new Set();
+  const walk = (id) => {
+    for (const p of parents[id] || []) {
+      if (seen.has(p)) continue;
+      seen.add(p);
+      walk(p);
+    }
+  };
+  walk(nodeId);
+  return seen;
+}
+
 function collectRuns(dir, repoRoot, out) {
   let kids;
   try { kids = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
