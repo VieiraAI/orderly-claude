@@ -227,23 +227,36 @@ function cardBody(n) {
         <div class="mock-ph"><div class="mini"><div class="bar a"></div><div class="bar b"></div><div class="bar c"></div></div></div>
         <div class="doc-h" style="margin-top:2px;">${esc(o.name || 'mockup.html')}</div>
         <div class="doc-b">${esc(o.note || '')}</div>`;
-    case 'shots':
-      return `<div class="shots-pair"><div class="shot"><span class="cap">before</span></div><div class="shot"><span class="cap">after</span></div></div>`;
+    case 'shots': {
+      if (!o.shot?.ref) return `<div class="wait-note">${esc(o.note || 'No shot captured.')}</div>`;
+      return `<div class="shots-pair"><a class="shot" href="${blobUrl(o.shot.ref)}" target="_blank"
+        style="background-image:url('${blobUrl(o.shot.ref)}')"><span class="cap">${esc(o.route || '/')}</span></a></div>`;
+    }
     case 'shots-set': {
       const pairs = (o.pairs || []).slice(0, 6);
       const rows = pairs.map((p) => {
-        const cls = p.status === 'done' ? 'done' : p.status === 'running' ? 'running' : 'waits';
-        const label = p.status === 'done' ? 'done' : p.status === 'running' ? 'capturing…' : 'queued';
-        const shot = (st) => st === 'done' ? '<div class="pair-shot filled"></div>'
-          : st === 'running' ? '<div class="pair-shot running"></div>' : '<div class="pair-shot"></div>';
+        const cls = p.status === 'done' ? 'done'
+          : p.status === 'running' ? 'running'
+          : p.status === 'failed' ? 'failed' : 'waits';
+        const label = p.status === 'done' ? 'done'
+          : p.status === 'running' ? 'capturing…'
+          : p.status === 'failed'  ? 'failed'
+          : p.status === 'skipped' ? 'no server' : 'queued';
+        const shot = p.shot?.ref
+          ? `<a class="pair-shot filled real only" href="${blobUrl(p.shot.ref)}" target="_blank"
+               style="background-image:url('${blobUrl(p.shot.ref)}')" title="Open full-size"></a>`
+          : p.status === 'running' ? '<div class="pair-shot running"></div><div class="pair-shot running"></div>'
+          : p.status === 'failed'  ? '<div class="pair-shot failed"></div><div class="pair-shot failed"></div>'
+          : '<div class="pair-shot"></div><div class="pair-shot"></div>';
         return `<div class="route-row ${cls}">
           <span class="route-label">${esc(p.route)}</span>
-          <div class="pair-mini">${shot(p.status)}${shot(p.status)}</div>
+          <div class="pair-mini${p.shot?.ref ? ' solo' : ''}">${shot}</div>
           <span class="route-state">${label}</span>
         </div>`;
       }).join('');
       const title = esc(o.title || `${pairs.filter((p) => p.status === 'done').length} of ${pairs.length} captured`);
-      return `<div class="doc-h">${title}</div><div class="shots-grid">${rows}</div>`;
+      const note = o.note ? `<div class="wait-note" style="margin-top:8px;">${esc(o.note)}</div>` : '';
+      return `<div class="doc-h">${title}</div><div class="shots-grid">${rows}</div>${note}`;
     }
     case 'terminal': {
       const prompt = esc(o.prompt || '$ (command)');
@@ -321,6 +334,12 @@ function selectNode(id) {
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/** Resolve a blob ref like `blob:sha256:<hex>:png` to its /api/blob URL. */
+function blobUrl(ref) {
+  const m = /^blob:sha256:([a-f0-9]{64})/.exec(String(ref || ''));
+  return m ? `/api/blob?sha=${m[1]}` : '';
 }
 
 /* Live updates — the broadcast carries no run payload, so refetch on signal.

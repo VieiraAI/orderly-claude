@@ -20,6 +20,11 @@
  * dance and chrome launch that lives elsewhere in this repo.
  */
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { screenshot, detectDevServer } from './capture.mjs';
+import { putFile } from './blobs.mjs';
 
 /** Pick the handler for a kind. Unknown kinds get the generic placeholder. */
 export function getHandler(kind) {
@@ -158,23 +163,48 @@ const HANDLERS = {
   },
 
   shots: async (node, ctx) => {
-    await nap(ctx, 400);
-    return { note: 'before/after placeholder — real capture lands with the dev-server dance' };
+    const origin = await pickOrigin(ctx);
+    if (!origin) return { note: 'No dev server detected. Set inputs.devUrl or start one on a known port.' };
+    const route = node.route || ctx.run.inputs?.route || '/';
+    const shot = await captureShot(`${origin}${route.startsWith('/') ? route : `/${route}`}`, ctx.signal);
+    if (!shot) return { note: `Capture failed for ${route}` };
+    return { route, origin, shot };
   },
 
   'shots-set': async (node, ctx) => {
-    // Walk one route at a time so the grid fills in on-screen. Real capture
-    // handler lands once the dev-server + headless-chrome dance is factored.
+    // Walk one route at a time so the grid fills in on-screen. Each route is
+    // captured against the detected dev server (or inputs.devUrl) and the PNG
+    // lands in the shared blob store so the canvas can render it live.
+    const origin = await pickOrigin(ctx);
     const routes = parseRoutes(ctx.run.inputs?.routes) || ['/', '/blog', '/about', '/pricing', '/contact'];
-    const pairs = routes.map((r) => ({ route: r, status: 'waits' }));
+    const pairs = routes.map((r) => ({ route: r, status: origin ? 'waits' : 'skipped' }));
+    if (!origin) {
+      return {
+        title: `0 of ${pairs.length} captured`,
+        pairs, note: 'No dev server detected. Set inputs.devUrl or start one on a known port.',
+      };
+    }
     for (let i = 0; i < pairs.length; i++) {
+      if (ctx.signal?.aborted) break;
       pairs[i].status = 'running';
       onProgressSnapshot(ctx, pairs, i);
-      await nap(ctx, 300);
-      pairs[i].status = 'done';
+      try {
+        const url = `${origin}${pairs[i].route.startsWith('/') ? pairs[i].route : `/${pairs[i].route}`}`;
+        const shot = await captureShot(url, ctx.signal);
+        if (shot) {
+          pairs[i].status = 'done';
+          pairs[i].shot = shot;
+        } else {
+          pairs[i].status = 'failed';
+        }
+      } catch (e) {
+        pairs[i].status = 'failed';
+        pairs[i].error = e.message;
+      }
       onProgressSnapshot(ctx, pairs, i);
     }
-    return { title: `${pairs.length} of ${pairs.length} captured`, pairs };
+    const done = pairs.filter((p) => p.status === 'done').length;
+    return { title: `${done} of ${pairs.length} captured`, origin, pairs };
   },
 
   _default: async (node, ctx) => {
@@ -322,6 +352,28 @@ function extractJson(text) {
   return null;
 }
 function tryParse(s) { try { return JSON.parse(s); } catch { return null; } }
+
+/**
+ * Pick an origin to capture against: explicit `inputs.devUrl` wins; otherwise
+ * detect a dev server running inside the repo. Returns null when nothing is
+ * reachable, so the handler can report "no dev server" instead of hanging.
+ */
+async function pickOrigin(ctx) {
+  const given = (ctx.run.inputs?.devUrl || '').trim();
+  if (given) return given.replace(/\/+$/, '');
+  return await detectDevServer(ctx.run.repoRoot);
+}
+
+/** Capture one URL and move the PNG into the content-addressed blob store. */
+async function captureShot(url, signal) {
+  if (signal?.aborted) throw new Error('aborted');
+  const tmp = path.join(os.tmpdir(), `orderly-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`);
+  const res = await screenshot(url, tmp, { width: 1400, height: 1000 });
+  if (!res.ok) return null;
+  const ref = putFile(tmp);
+  try { fs.unlinkSync(tmp); } catch {}
+  return { url, ref, capturedAt: new Date().toISOString() };
+}
 
 function onProgressSnapshot(ctx, pairs, i) {
   ctx.onProgress({

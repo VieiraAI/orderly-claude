@@ -290,6 +290,7 @@ main { max-width: 1280px; margin: 0 auto; padding: 0 56px 96px; }
 .route-row.done .route-label { color: var(--text); }
 .route-row .pair-mini { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
 .route-row .pair-shot { height: 16px; border-radius: 3px; background: var(--edge-tint); }
+.route-row .pair-shot.real { height: 32px; }
 .route-row .pair-shot.filled { background: var(--edge-hi); }
 .route-row .pair-shot.running { background: var(--accent); opacity: 0.65; }
 .route-row .route-state { font-family: var(--f-mono); font-size: 10px; color: var(--faint); text-align: right; }
@@ -422,3 +423,21 @@ main { max-width: 1280px; margin: 0 auto; padding: 0 56px 96px; }
   color: var(--ship); border-color: color-mix(in oklab, var(--ship) 40%, transparent);
 }
 .run-row .row-actions { display: inline-flex; gap: 6px; align-items: center; justify-content: flex-end; }
+
+/* --------------------- Real screenshots on the card ---------------------- */
+.pair-shot.real {
+  background-size: cover; background-position: top center;
+  display: block; cursor: zoom-in;
+  border: 1px solid var(--edge-tint);
+}
+.pair-shot.real:hover { border-color: var(--edge-hi); }
+.pair-mini.solo { grid-template-columns: 1fr; }
+.pair-shot.failed { background: color-mix(in oklab, var(--ship) 18%, transparent); }
+.shots-pair .shot {
+  background-size: cover; background-position: top center; cursor: zoom-in;
+  height: 120px; display: block; border-radius: 4px;
+  border: 1px solid var(--edge-tint);
+}
+.shots-pair .shot:hover { border-color: var(--edge-hi); }
+.route-row.failed .route-state { color: var(--ship); }
+.route-row.skipped .route-state { color: var(--faint); font-style: italic; }
