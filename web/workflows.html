@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Workflows — Orderly Claude</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/workflows.css">
+</head><body>
+
+<nav class="nav">
+  <a class="brand" href="/">Orderly<span class="slash">/</span>Workflows</a>
+  <span class="here" id="hereTab">catalog</span>
+  <span class="spacer"></span>
+  <a class="link on" href="#catalog" data-tab="catalog">Catalog</a>
+  <a class="link"    href="#runs"    data-tab="runs">Runs</a>
+  <a class="link"    href="#skills"  data-tab="skills">Skills</a>
+  <a class="link" href="/">← back to viewer</a>
+</nav>
+
+<section class="hero">
+  <div class="eyebrow" id="heroEyebrow">Catalog · workflows available in this project</div>
+  <h1 class="display" id="heroTitle">Pick a workflow.</h1>
+  <p id="heroDesc">Every tile is a graph of typed-output cards. Click one for the brief sheet, fill the inputs, and open it on the canvas.</p>
+</section>
+
+<main>
+  <section id="viewCatalog">
+    <section class="scope" data-scope="project">
+      <header class="cat-head">
+        <h2>This project</h2>
+        <span class="meta" id="metaProject">—</span>
+      </header>
+      <div class="tiles" id="tilesProject"></div>
+    </section>
+    <section class="scope" data-scope="user">
+      <header class="cat-head">
+        <h2>Your global library</h2>
+        <span class="meta" id="metaUser">—</span>
+      </header>
+      <div class="tiles" id="tilesUser"></div>
+    </section>
+    <section class="scope" data-scope="builtin">
+      <header class="cat-head">
+        <h2>Built-in</h2>
+        <span class="meta" id="metaBuiltin">—</span>
+      </header>
+      <div class="tiles" id="tilesBuiltin"></div>
+    </section>
+  </section>
+
+  <section id="viewRuns" style="display:none;">
+    <div id="runsBody"><div class="empty">No runs yet.</div></div>
+  </section>
+
+  <section id="viewSkills" style="display:none;">
+    <section class="scope" data-scope="project">
+      <header class="cat-head">
+        <h2>This project</h2>
+        <span class="meta" id="skMetaProject">—</span>
+      </header>
+      <div class="skills" id="skillsProject"></div>
+    </section>
+    <section class="scope" data-scope="user">
+      <header class="cat-head">
+        <h2>Your global library</h2>
+        <span class="meta" id="skMetaUser">—</span>
+      </header>
+      <div class="skills" id="skillsUser"></div>
+    </section>
+  </section>
+</main>
+
+<div class="scrim" id="scrim" onclick="closeSheet()"></div>
+<aside class="sheet" id="sheet" aria-hidden="true">
+  <button class="x" onclick="closeSheet()">×</button>
+  <div class="s-eyebrow" id="shEyebrow">Workflow</div>
+  <h2 id="shTitle">—</h2>
+  <p class="s-desc" id="shDesc"></p>
+
+  <div class="s-h">Inputs</div>
+  <div class="inputs" id="shInputs"></div>
+
+  <div class="s-h">Plan</div>
+  <ul style="margin:0 0 6px;padding:0;list-style:none;font-size:13px;color:var(--mute);" id="shPlan"></ul>
+
+  <div class="actions">
+    <button class="btn-run" id="shRun">◆ Run</button>
+    <button class="btn-ghost" onclick="closeSheet()">Cancel</button>
+    <span class="est" id="shEst">—</span>
+  </div>
+</aside>
+
+<script type="module" src="/workflows.mjs"></script>
+</body></html>

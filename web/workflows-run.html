@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Run — Orderly Claude</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/workflows.css">
+</head><body>
+
+<div class="top-bar">
+  <a class="back" href="/workflows.html">← Catalog</a>
+  <div class="crumbs">
+    <span>Runs</span><span>›</span><span class="here" id="crumbTitle">—</span>
+  </div>
+  <span class="spacer"></span>
+  <span class="eyebrow" id="runSession"></span>
+</div>
+
+<div class="app">
+  <aside class="panel">
+    <div class="head">
+      <div class="title-row">
+        <span class="pip" id="runCatPip"></span>
+        <h2 id="runTitle">—</h2>
+      </div>
+      <div class="sub" id="runSub"><span id="runStatus">loading…</span></div>
+    </div>
+    <div class="plan-rail" id="rail"></div>
+  </aside>
+  <div class="canvas-wrap">
+    <div class="canvas" id="canvas">
+      <svg class="edges" id="edges"></svg>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/workflows-run.mjs"></script>
+</body></html>

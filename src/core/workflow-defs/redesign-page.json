@@ -1,0 +1,32 @@
+{
+  "id": "redesign-page",
+  "title": "Redesign a page",
+  "category": "design",
+  "estimate": "about 12 min",
+  "desc": "Audit the page as-is, generate three directions as local mockups, pick one, apply it, verify with before/after shots.",
+  "inputs": [
+    { "key": "page", "label": "Page URL or route", "placeholder": "/pricing" },
+    { "key": "goals", "label": "What should the redesign achieve?", "placeholder": "Lead with the chart; cut the hero.", "textarea": true }
+  ],
+  "graph": {
+    "nodes": [
+      { "id": "brief",   "title": "Brief",      "kind": "document", "col": 1, "row": 0, "cost": 1 },
+      { "id": "audit",   "title": "Audit",      "kind": "report",   "col": 2, "row": 0, "cost": 2 },
+      { "id": "dir-a",   "title": "Direction 1", "kind": "mockup",  "col": 3, "row": 0, "cost": 3 },
+      { "id": "dir-b",   "title": "Direction 2", "kind": "mockup",  "col": 3, "row": 1, "cost": 3 },
+      { "id": "dir-c",   "title": "Direction 3", "kind": "mockup",  "col": 3, "row": 2, "cost": 3 },
+      { "id": "gallery", "title": "Gallery",    "kind": "shots",    "col": 4, "row": 1, "cost": 1 },
+      { "id": "pick",    "title": "Pick one",   "kind": "ask",      "col": 5, "row": 1, "cost": 0 },
+      { "id": "apply",   "title": "Apply",      "kind": "diff",     "col": 6, "row": 1, "cost": 2 },
+      { "id": "verify",  "title": "Before/after", "kind": "shots",  "col": 7, "row": 1, "cost": 1 }
+    ],
+    "edges": [
+      ["brief", "audit"],
+      ["audit", "dir-a"], ["audit", "dir-b"], ["audit", "dir-c"],
+      ["dir-a", "gallery"], ["dir-b", "gallery"], ["dir-c", "gallery"],
+      ["gallery", "pick"],
+      ["pick", "apply"],
+      ["apply", "verify"]
+    ]
+  }
+}

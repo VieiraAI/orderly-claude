@@ -2,3 +2,7 @@ node_modules/
 .DS_Store
 *.log
 .orderly-claude/
+experiments/
+# Workflow run artifacts are per-machine by default. Delete this line to
+# share your runs with teammates on clone.
+.claude/workflows/runs/

@@ -1,0 +1,24 @@
+{
+  "id": "visual-regression",
+  "title": "Hunt a visual regression",
+  "category": "review",
+  "estimate": "about 6 min",
+  "desc": "Boot the dev server, walk the routes, screenshot each one against a baseline, surface the diffs.",
+  "inputs": [
+    { "key": "baseline", "label": "Baseline (git ref)", "placeholder": "main" },
+    { "key": "routes",   "label": "Routes (comma or newline)", "placeholder": "/, /blog, /about, /pricing, /contact", "textarea": true }
+  ],
+  "graph": {
+    "nodes": [
+      { "id": "server", "title": "Dev server", "kind": "terminal", "col": 1, "row": 0, "cost": 1 },
+      { "id": "routes", "title": "Routes",     "kind": "document", "col": 2, "row": 0, "cost": 1 },
+      { "id": "shots",  "title": "Screenshots", "kind": "shots-set", "col": 3, "row": 0, "cost": 2 },
+      { "id": "moved",  "title": "What moved", "kind": "report",   "col": 4, "row": 0, "cost": 1 }
+    ],
+    "edges": [
+      ["server", "routes"],
+      ["routes", "shots"],
+      ["shots", "moved"]
+    ]
+  }
+}

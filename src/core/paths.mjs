@@ -12,6 +12,21 @@ const LEGACY_DATA_DIR = path.join(HOME, '.claudenized');
 export const SHOTS_DIR = path.join(DATA_DIR, 'shots');
 export const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 export const INSTANCES_FILE = path.join(DATA_DIR, 'instances.json');
+export const BLOBS_DIR = path.join(DATA_DIR, 'blobs');
+export const SCRATCH_RUNS_DIR = path.join(DATA_DIR, 'runs', '_scratch');
+export const USER_WORKFLOWS_DIR = path.join(CLAUDE_DIR, 'workflows');
+export const USER_SKILLS_DIR = path.join(CLAUDE_DIR, 'skills');
+
+/** The workflows and runs directories for a repo. The repo owns both. */
+export function repoWorkflowsDir(repoRoot) {
+  return path.join(repoRoot, '.claude', 'workflows');
+}
+export function repoRunsDir(repoRoot) {
+  return path.join(repoRoot, '.claude', 'workflows', 'runs');
+}
+export function repoSkillsDir(repoRoot) {
+  return path.join(repoRoot, '.claude', 'skills');
+}
 
 let migrated = false;
 
@@ -52,7 +67,7 @@ function adoptLegacyData() {
 }
 
 export function ensureDirs() {
-  for (const d of [DATA_DIR, SHOTS_DIR, UPLOADS_DIR]) fs.mkdirSync(d, { recursive: true });
+  for (const d of [DATA_DIR, SHOTS_DIR, UPLOADS_DIR, BLOBS_DIR]) fs.mkdirSync(d, { recursive: true });
   adoptLegacyData();
 }
 
