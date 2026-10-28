@@ -52,13 +52,79 @@ function readDir(dir) {
   const defs = [];
   for (const name of names) {
     if (!name.endsWith('.json')) continue; // yaml later
+    const file = path.join(dir, name);
+    let d;
     try {
-      const raw = fs.readFileSync(path.join(dir, name), 'utf8');
-      const d = JSON.parse(raw);
-      if (d && typeof d.id === 'string') defs.push(d);
-    } catch { /* skip bad files */ }
+      d = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (e) {
+      console.warn(`[workflows] ${file}: invalid JSON (${e.message})`);
+      continue;
+    }
+    const problems = validateDefinition(d);
+    if (problems.length) {
+      console.warn(`[workflows] ${file}: skipped (${problems.join('; ')})`);
+      continue;
+    }
+    defs.push(d);
   }
   return defs;
+}
+
+/**
+ * Validate a workflow definition. Returns a list of human-readable problems
+ * (empty means OK). Catches the handful of things the scheduler assumes:
+ *   - id is a non-empty string
+ *   - graph.nodes is a non-empty array of unique-id objects with a kind
+ *   - graph.edges is an array of [from, to] pairs with both ids present
+ *   - the graph is a DAG (no cycles reachable from any root)
+ */
+export function validateDefinition(d) {
+  const problems = [];
+  if (!d || typeof d !== 'object') return ['not an object'];
+  if (typeof d.id !== 'string' || !d.id.trim()) problems.push('missing id');
+  const nodes = d.graph?.nodes;
+  if (!Array.isArray(nodes) || nodes.length === 0) {
+    problems.push('graph.nodes is empty');
+    return problems; // nothing else to check
+  }
+  const ids = new Set();
+  for (const n of nodes) {
+    if (!n || typeof n.id !== 'string') { problems.push('a node has no id'); continue; }
+    if (ids.has(n.id))         problems.push(`duplicate node id: ${n.id}`);
+    if (!n.kind)               problems.push(`node ${n.id}: missing kind`);
+    ids.add(n.id);
+  }
+  const edges = d.graph?.edges;
+  if (!Array.isArray(edges)) {
+    problems.push('graph.edges is not an array');
+  } else {
+    for (const e of edges) {
+      if (!Array.isArray(e) || e.length !== 2) { problems.push(`bad edge: ${JSON.stringify(e)}`); continue; }
+      const [from, to] = e;
+      if (!ids.has(from)) problems.push(`edge from unknown node: ${from}`);
+      if (!ids.has(to))   problems.push(`edge to unknown node: ${to}`);
+    }
+    if (hasCycle(ids, edges)) problems.push('graph has a cycle');
+  }
+  return problems;
+}
+
+function hasCycle(ids, edges) {
+  const out = Object.fromEntries([...ids].map((id) => [id, []]));
+  for (const [a, b] of edges) if (out[a] && out[b]) out[a].push(b);
+  const WHITE = 0, GRAY = 1, BLACK = 2;
+  const color = Object.fromEntries([...ids].map((id) => [id, WHITE]));
+  const dfs = (u) => {
+    color[u] = GRAY;
+    for (const v of out[u] || []) {
+      if (color[v] === GRAY) return true;
+      if (color[v] === WHITE && dfs(v)) return true;
+    }
+    color[u] = BLACK;
+    return false;
+  };
+  for (const id of ids) if (color[id] === WHITE && dfs(id)) return true;
+  return false;
 }
 
 /* --------------------------------- Runs --------------------------------- */

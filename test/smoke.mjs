@@ -758,6 +758,30 @@ async function main() {
     });
     check('POST /api/runs/:id/stop returns 404 once the scheduler is gone', stopResp.status === 404);
 
+    // Workflow validator — accept good shapes, reject bad ones with a reason.
+    const wfMod = await import('../src/core/workflows.mjs');
+    const goodDef = { id: 'x', graph: {
+      nodes: [{ id: 'a', kind: 'terminal' }, { id: 'b', kind: 'document' }],
+      edges: [['a', 'b']],
+    } };
+    check('validator accepts a good def', wfMod.validateDefinition(goodDef).length === 0);
+    const noId  = wfMod.validateDefinition({ graph: { nodes: [{ id: 'a', kind: 'terminal' }], edges: [] } });
+    check('validator flags missing id', noId.some((p) => /id/i.test(p)), noId.join('; '));
+    const dupId = wfMod.validateDefinition({ id: 'x', graph: {
+      nodes: [{ id: 'a', kind: 't' }, { id: 'a', kind: 't' }], edges: [],
+    } });
+    check('validator flags duplicate node id', dupId.some((p) => /duplicate/i.test(p)), dupId.join('; '));
+    const danglingEdge = wfMod.validateDefinition({ id: 'x', graph: {
+      nodes: [{ id: 'a', kind: 't' }], edges: [['a', 'z']],
+    } });
+    check('validator flags edge to unknown node', danglingEdge.some((p) => /unknown node/i.test(p)),
+      danglingEdge.join('; '));
+    const cyclic = wfMod.validateDefinition({ id: 'x', graph: {
+      nodes: [{ id: 'a', kind: 't' }, { id: 'b', kind: 't' }],
+      edges: [['a', 'b'], ['b', 'a']],
+    } });
+    check('validator flags cycles', cyclic.some((p) => /cycle/i.test(p)), cyclic.join('; '));
+
     // Skills — read from the two .claude/skills roots.
     const skillsResp = await get('/api/skills');
     check('GET /api/skills returns an array',

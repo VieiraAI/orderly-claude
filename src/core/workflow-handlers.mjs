@@ -60,7 +60,7 @@ const HANDLERS = {
       `Keep it concise: no more than ~400 words. Start with a single H1.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node) || 'sonnet',
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'haiku'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const title = firstHeadline(text) || `${slug(node.title)}.md`;
@@ -80,7 +80,7 @@ const HANDLERS = {
       `List at most five findings, most important first. If there is nothing to flag, return an empty array.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node) || 'sonnet',
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'sonnet'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const parsed = extractJson(text) || { findings: [] };
@@ -103,7 +103,7 @@ const HANDLERS = {
       `Return only the HTML (no code fences, no commentary). Use inline CSS. Keep it under 200 lines.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node) || 'sonnet',
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'sonnet'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const html = stripFences(text);
@@ -123,7 +123,7 @@ const HANDLERS = {
       `Keep the change tiny — ten hunks or fewer.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node) || 'sonnet',
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'sonnet'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const parsed = extractJson(text) || { file: 'unknown', hunks: [] };
@@ -142,7 +142,7 @@ const HANDLERS = {
       `{"title":"<pr title, under 70 chars>","body":"<short markdown body>"}`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: 'haiku',
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'haiku'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const parsed = extractJson(text) || {};
@@ -285,7 +285,9 @@ function inputBlock(inputs) {
   return `## Inputs\n${rows.map(([k, v]) => `- **${k}:** ${v}`).join('\n')}`;
 }
 
-function pickModel(node) { return node.model || null; }
+/** Resolve the model for a node: explicit `node.model` wins, otherwise the
+ *  kind's cheap default — most work is small enough for haiku. */
+function pickModel(node, fallback = 'haiku') { return node.model || fallback; }
 
 function firstHeadline(text) {
   const m = String(text || '').match(/^#\s+(.+?)\s*$/m);

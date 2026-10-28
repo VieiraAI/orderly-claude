@@ -118,20 +118,44 @@ function makeCard(n, pos, parent) {
   card.className = kls;
   card.style.cssText = `left:${pos.left}px;top:${pos.top}px;width:${pos.width}px`;
   card.dataset.id = n.id;
+  // The model label on the head uses the real model that ran if we have it,
+  // otherwise a kind-level default. Same with the credit on the foot.
+  const meta = n.output?.meta || {};
+  const modelLabel = meta.model
+    ? `claude · ${esc(meta.model)}`
+    : (KIND_MODEL[n.kind] || '');
+  const footMeta = cardFootMeta(n, meta);
   card.innerHTML = `
     <div class="c-head">
       <span class="k-icon">${ICON[n.kind] || ''}</span>
       <span class="k-name">${KIND_LABEL[n.kind] || n.kind}</span>
-      <span class="k-model">${KIND_MODEL[n.kind] || ''}</span>
+      <span class="k-model">${modelLabel}</span>
     </div>
     <div class="c-body">${cardBody(n)}</div>
     <div class="c-foot">
       <span>${esc(n.title)}</span>
-      <span class="credit">⚡ ${n.cost ?? 1}</span>
+      <span class="credit">${footMeta}</span>
     </div>`;
   card.onclick = () => selectNode(n.id);
   parent.append(card);
   return card;
+}
+
+/**
+ * The right-side bit on the card footer. When a handler called the CLI it
+ * returns `meta` with model, cost, elapsed, tokens; prefer that over the
+ * static cost token the def declared. Falls back to the static credit for
+ * local kinds (terminal, ask) and placeholder output.
+ */
+function cardFootMeta(n, meta) {
+  const bits = [];
+  if (typeof meta.cost === 'number') {
+    bits.push(meta.cost < 0.01 ? `$${meta.cost.toFixed(4)}` : `$${meta.cost.toFixed(3)}`);
+  }
+  if (meta.elapsed) bits.push(esc(String(meta.elapsed)));
+  if (typeof meta.tokens === 'number' && meta.tokens > 0) bits.push(`${meta.tokens} tok`);
+  if (bits.length) return bits.join(' · ');
+  return `⚡ ${n.cost ?? 1}`;
 }
 
 function cardBody(n) {
@@ -140,6 +164,13 @@ function cardBody(n) {
   if (n.status === 'pending') return `<div class="wait-note">Pending</div>`;
   if (n.status === 'running' && !selfProgress) {
     return `<div class="running-note"><span class="dot-pulse"></span>${esc(n.progress || 'Making…')}</div>`;
+  }
+  if (n.status === 'failed') {
+    const msg = n.output?.error || 'Handler threw. Open the run.json for the full trace.';
+    return `<div class="fail-note"><span class="fail-tag">failed</span>${esc(msg)}</div>`;
+  }
+  if (n.status === 'stopped') {
+    return `<div class="wait-note">Stopped before it finished.</div>`;
   }
   const o = n.output || {};
   switch (n.kind) {
