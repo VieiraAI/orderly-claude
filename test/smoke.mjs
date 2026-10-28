@@ -627,6 +627,10 @@ async function main() {
 
   console.log('\nServer\n');
 
+  // Keep smoke runs free and fast: skip the real Claude CLI handlers unless
+  // the caller explicitly opts in.
+  if (!process.env.ORDERLY_HANDLER_MODE) process.env.ORDERLY_HANDLER_MODE = 'mock';
+
   const port = await freePort(7900);
   const { close } = await startServer({
     port,
@@ -694,6 +698,94 @@ async function main() {
     const sessionList = await get('/api/sessions');
     check('sessions say which are running now',
       sessionList.sessions.every((x) => typeof x.active === 'boolean'));
+
+    const wfs = await get('/api/workflows');
+    check('GET /api/workflows lists built-in defs',
+      Array.isArray(wfs.workflows) && wfs.workflows.length >= 3,
+      `${wfs.workflows?.length}`);
+    check('every workflow has a graph',
+      wfs.workflows.every((w) => w.graph?.nodes?.length > 0 && Array.isArray(w.graph.edges)));
+    const one = await get('/api/workflows/redesign-page');
+    check('GET /api/workflows/:id returns the def', one.workflow?.id === 'redesign-page');
+
+    const started = await fetch(`${base}/api/workflows/visual-regression/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ inputs: { baseline: 'main' } }),
+    }).then((r) => r.json());
+    check('POST /api/workflows/:id/run starts a run', !!started.run?.runId);
+    // The scheduler kicks in immediately, so the first node may already be
+    // past pending by the time this response lands. Assert the graph was
+    // seeded with the right shape instead.
+    const vrDef = (await get('/api/workflows/visual-regression')).workflow;
+    check('a run carries every node from the def',
+      started.run.graph.nodes.length === vrDef.graph.nodes.length,
+      `${started.run.graph.nodes.length} vs ${vrDef.graph.nodes.length}`);
+
+    const runs = await get('/api/runs');
+    check('GET /api/runs lists the new run',
+      runs.runs.some((r) => r.runId === started.run.runId));
+    check('run summaries carry progress fields',
+      runs.runs.every((r) => typeof r.totalNodes === 'number' && typeof r.doneNodes === 'number'));
+
+    const one2 = await get(`/api/runs/${started.run.runId}`);
+    check('GET /api/runs/:id reads the full run back', one2.run?.runId === started.run.runId);
+
+    // Scheduler should march the graph without any client help. Poll until the
+    // run reaches a terminal state or the budget elapses.
+    let finished = null;
+    const budget = Date.now() + 8000;
+    while (Date.now() < budget) {
+      await sleep(200);
+      const r = (await get(`/api/runs/${started.run.runId}`)).run;
+      if (r && (r.status === 'done' || r.status === 'failed' || r.status === 'stopped')) {
+        finished = r; break;
+      }
+    }
+    check('scheduler finishes the run on its own', finished?.status === 'done',
+      finished?.status || 'timed out');
+    check('every node reached done', !!finished
+      && finished.graph.nodes.every((n) => n.status === 'done'),
+      finished?.graph.nodes.map((n) => `${n.id}=${n.status}`).join(' '));
+    check('terminal node produced real stdout',
+      !!finished?.graph.nodes.find((n) => n.kind === 'terminal')?.output?.out,
+      finished?.graph.nodes.find((n) => n.kind === 'terminal')?.output?.out?.slice(0, 40));
+    check('shots-set node captured a per-route grid',
+      !!finished?.graph.nodes.find((n) => n.kind === 'shots-set')?.output?.pairs?.length);
+
+    // POST /stop on a finished run is a no-op; use it just to assert the route is wired.
+    const stopResp = await fetch(`${base}/api/runs/${started.run.runId}/stop`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+    });
+    check('POST /api/runs/:id/stop returns 404 once the scheduler is gone', stopResp.status === 404);
+
+    // Skills — read from the two .claude/skills roots.
+    const skillsResp = await get('/api/skills');
+    check('GET /api/skills returns an array',
+      Array.isArray(skillsResp.skills), `${typeof skillsResp.skills}`);
+    if (skillsResp.skills.length) {
+      const s = skillsResp.skills[0];
+      check('a skill carries slug, scope, name, category, path',
+        !!s.slug && !!s.scope && !!s.name && !!s.category && !!s.path,
+        JSON.stringify({ slug: s.slug, scope: s.scope, cat: s.category }));
+      check('skill scope is project or user',
+        skillsResp.skills.every((x) => x.scope === 'project' || x.scope === 'user'),
+        [...new Set(skillsResp.skills.map((x) => x.scope))].join(','));
+      // Hand-exercise the YAML reader: the global library almost always has
+      // at least one skill with a `description: >` folded block; a working
+      // reader produces a non-trivial description, a broken one yields ">".
+      const broken = skillsResp.skills.filter((x) => (x.description || '').length <= 2);
+      check('skills with folded descriptions parsed cleanly',
+        broken.length === 0,
+        broken.length ? broken[0].slug : 'ok');
+    }
+
+    // Blob store round-trip through the module directly.
+    const blobs = await import('../src/core/blobs.mjs');
+    const ref = blobs.putBuffer(Buffer.from('hello orderly'), { ext: 'txt' });
+    check('blob round-trip returns a ref', typeof ref === 'string' && ref.startsWith('blob:sha256:'));
+    const sha = ref.slice('blob:sha256:'.length).split(':')[0];
+    const got = await fetch(`${base}/api/blob?sha=${sha}`).then((r) => r.text());
+    check('GET /api/blob?sha=... serves the content', got === 'hello orderly', got.slice(0, 32));
 
     const other = sessionList.sessions.find((x) => x.sessionId !== state.instance.sessionId);
     if (other) {

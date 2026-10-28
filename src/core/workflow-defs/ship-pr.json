@@ -1,0 +1,24 @@
+{
+  "id": "ship-pr",
+  "title": "Ship a PR",
+  "category": "ship",
+  "estimate": "about 8 min",
+  "desc": "Run tests, self-review the diff for the five axes, draft the PR body, open the pull request.",
+  "inputs": [
+    { "key": "base",  "label": "Base branch",  "placeholder": "main" },
+    { "key": "title", "label": "PR title",     "placeholder": "" }
+  ],
+  "graph": {
+    "nodes": [
+      { "id": "tests",  "title": "Tests",      "kind": "terminal", "col": 1, "row": 0, "cost": 1 },
+      { "id": "review", "title": "Self-review", "kind": "report",  "col": 2, "row": 0, "cost": 2 },
+      { "id": "body",   "title": "PR body",    "kind": "document", "col": 3, "row": 0, "cost": 1 },
+      { "id": "pr",     "title": "Pull request", "kind": "pr",     "col": 4, "row": 0, "cost": 1 }
+    ],
+    "edges": [
+      ["tests", "review"],
+      ["review", "body"],
+      ["body", "pr"]
+    ]
+  }
+}

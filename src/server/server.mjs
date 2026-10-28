@@ -18,6 +18,10 @@ import { Runner } from '../core/runner.mjs';
 import { SHOTS_DIR, INSTANCES_FILE, ensureDirs, transcriptPathFor, uploadsFor } from '../core/paths.mjs';
 import { randomUUID } from 'node:crypto';
 import { loadShots, attachShots } from '../core/shots.mjs';
+import { listDefinitions, getDefinition, startRun, readRun, listRuns, runsForSession } from '../core/workflows.mjs';
+import { Scheduler } from '../core/workflow-runner.mjs';
+import { openBlob } from '../core/blobs.mjs';
+import { listSkills } from '../core/skills.mjs';
 
 const WEB_DIR = path.resolve(fileURLToPath(new URL('../../web', import.meta.url)));
 const TYPES = { '.html': 'text/html', '.css': 'text/css', '.mjs': 'text/javascript',
@@ -137,6 +141,31 @@ function readInstances() {
   } catch { return []; }
 }
 
+/** Trim a run down to what a list row renders — the node bodies stay on disk. */
+function summariseRun(r) {
+  const nodes = r.graph?.nodes || [];
+  const done = nodes.filter((n) => n.status === 'done').length;
+  const running = nodes.find((n) => n.status === 'running');
+  const asking = nodes.find((n) => n.status === 'running' && n.kind === 'ask') || nodes.find((n) => n.kind === 'ask' && n.status !== 'done' && n.status !== 'pending');
+  return {
+    runId: r.runId,
+    workflowId: r.workflowId,
+    workflowTitle: r.workflowTitle,
+    category: r.category,
+    status: r.status,
+    trigger: r.trigger,
+    sessionId: r.sessionId,
+    repoRoot: r.repoRoot,
+    startedAt: r.startedAt,
+    endedAt: r.endedAt,
+    cost: r.cost,
+    totalNodes: nodes.length,
+    doneNodes: done,
+    runningLabel: running ? running.title : null,
+    askingLabel: asking ? asking.title : null,
+  };
+}
+
 function readBody(req, limit = 1_000_000) {
   return new Promise((resolve, reject) => {
     let raw = '';
@@ -240,6 +269,18 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
   let liveId = sessionId;
   let liveTitle = title;
   let liveCwd = cwd;
+
+  // One scheduler per in-flight workflow run; dropped on terminal state.
+  const schedulers = new Map();
+  function startScheduler(run) {
+    const s = new Scheduler(run);
+    s.on('update', (e) => broadcast('update', { runId: e.runId, nodeId: e.nodeId || null }));
+    s.on('finish', (e) => { broadcast('run-finish', e); schedulers.delete(e.runId); });
+    s.on('fail',   (e) => { broadcast('run-finish', { ...e, status: 'failed' }); });
+    schedulers.set(run.runId, s);
+    s.start();
+    return s;
+  }
 
   // Claude forks a copy under a new id when the session is already open
   // elsewhere; follow whichever transcript the run actually went to.
@@ -540,6 +581,78 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         return fs.createReadStream(f).pipe(res);
       }
 
+      // Workflow catalog, scoped to the repo this instance was started in so
+      // repo-local defs win over user-global ones.
+      if (url.pathname === '/api/workflows') {
+        return send(200, { workflows: listDefinitions({ repoRoot: liveCwd }) });
+      }
+
+      // Skills — the pieces workflows draw on. Project > user, same ordering.
+      if (url.pathname === '/api/skills') {
+        return send(200, { skills: listSkills({ repoRoot: liveCwd }) });
+      }
+
+      const wfMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)$/);
+      if (wfMatch && req.method === 'GET') {
+        const def = getDefinition(wfMatch[1], { repoRoot: liveCwd });
+        return def ? send(200, { workflow: def }) : send(404, { error: 'workflow not found' });
+      }
+      const wfRunMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/run$/);
+      if (wfRunMatch && req.method === 'POST') {
+        const body = await readBody(req);
+        try {
+          const run = startRun({
+            workflowId: wfRunMatch[1],
+            inputs: body.inputs || {},
+            repoRoot: liveCwd,
+            sessionId: liveId,
+            trigger: body.trigger || 'you',
+          });
+          startScheduler(run);
+          broadcast('run-start', { runId: run.runId, workflowId: run.workflowId });
+          return send(200, { run });
+        } catch (e) { return send(400, { error: e.message }); }
+      }
+
+      const runStopMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/stop$/);
+      if (runStopMatch && req.method === 'POST') {
+        const s = schedulers.get(runStopMatch[1]);
+        if (!s) return send(404, { error: 'not running' });
+        return send(200, { stopped: s.stop() });
+      }
+
+      const runAnswerMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/answer$/);
+      if (runAnswerMatch && req.method === 'POST') {
+        const s = schedulers.get(runAnswerMatch[1]);
+        if (!s) return send(404, { error: 'not running' });
+        const body = await readBody(req);
+        if (!body.nodeId) return send(400, { error: 'nodeId required' });
+        const ok = s.answer(body.nodeId, body.answer);
+        return ok ? send(200, { answered: true }) : send(409, { error: 'no answer pending for that node' });
+      }
+
+      if (url.pathname === '/api/runs') {
+        const sessionFilter = url.searchParams.get('session');
+        const runs = sessionFilter ? runsForSession(sessionFilter) : listRuns();
+        return send(200, { runs: runs.map(summariseRun) });
+      }
+      const runMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
+      if (runMatch && req.method === 'GET') {
+        const run = readRun(runMatch[1], { repoRoot: liveCwd });
+        return run ? send(200, { run }) : send(404, { error: 'run not found' });
+      }
+
+      if (url.pathname === '/api/blob') {
+        const sha = url.searchParams.get('sha') || '';
+        const b = openBlob(sha);
+        if (!b) return send(404, { error: 'blob not found' });
+        const type = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+          svg: 'image/svg+xml', webm: 'video/webm', mp4: 'video/mp4',
+          txt: 'text/plain', json: 'application/json' }[b.ext] || 'application/octet-stream';
+        res.writeHead(200, { 'content-type': type, 'cache-control': 'max-age=31536000, immutable' });
+        return fs.createReadStream(b.path).pipe(res);
+      }
+
       // static
       const rel = url.pathname === '/' ? 'index.html' : url.pathname.replace(/^\//, '');
       const file = path.resolve(WEB_DIR, rel);
@@ -565,6 +678,8 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
   watcher().focused = true;
   const close = () => {
     for (const r of runners.values()) r.stop();
+    for (const s of schedulers.values()) s.stop();
+    schedulers.clear();
     for (const w of watchers.values()) w.stop();
     shutdownBrowser(); // otherwise the headless Chrome outlives the CLI
     server.close();
