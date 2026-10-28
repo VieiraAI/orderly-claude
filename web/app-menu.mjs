@@ -7,10 +7,12 @@
  * are injected. `here` lets the current page be marked.
  */
 const ITEMS = [
-  { key: 'viewer',  label: 'Viewer',   href: '/',                      hint: 'Live Claude Code sessions' },
-  { key: 'catalog', label: 'Catalog',  href: '/workflows.html#catalog', hint: 'Workflows you can run' },
-  { key: 'runs',    label: 'Runs',     href: '/workflows.html#runs',    hint: 'Every invocation' },
-  { key: 'skills',  label: 'Skills',   href: '/workflows.html#skills',  hint: 'What Claude knows how to do' },
+  { key: 'viewer',    label: 'Viewer',    href: '/',                         hint: 'Live Claude Code sessions' },
+  { key: 'workflows', label: 'Workflows', href: '/workflows.html#workflows', hint: 'Graphs of typed-output cards' },
+  { key: 'prompts',   label: 'Prompts',   href: '/workflows.html#prompts',   hint: 'Named templates you can send' },
+  { key: 'runs',      label: 'Runs',      href: '/workflows.html#runs',      hint: 'Every invocation' },
+  { key: 'decisions', label: 'Decisions', href: '/workflows.html#decisions', hint: 'Moments you committed to a direction' },
+  { key: 'skills',    label: 'Skills',    href: '/workflows.html#skills',    hint: 'What Claude knows how to do' },
 ];
 
 export function mountAppMenu(container, { here = null } = {}) {

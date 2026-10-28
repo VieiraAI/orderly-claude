@@ -14,7 +14,8 @@ const scopeTitles = {
 const CAT_LABEL = { design: 'Design', review: 'Review', ship: 'Ship', plan: 'Plan',
   build: 'Build', content: 'Content', io: 'I/O' };
 
-const state = { workflows: [], runs: [], skills: [], open: null };
+const state = { workflows: [], runs: [], skills: [], prompts: [], decisions: [],
+  open: null, openPrompt: null, liveSessionId: null };
 
 async function loadCatalog() {
   const r = await fetch('/api/workflows').then((x) => x.json());
@@ -218,6 +219,205 @@ function groupBy(arr, fn) {
   return m;
 }
 
+/* -------------------------------- Decisions ------------------------------ */
+
+async function loadDecisions() {
+  const r = await fetch('/api/decisions').then((x) => x.json());
+  state.decisions = r.decisions || [];
+  renderDecisions();
+}
+
+function renderDecisions() {
+  const mount = document.getElementById('decisionsMount');
+  if (!state.decisions.length) {
+    mount.innerHTML = `<div class="empty">
+      Decisions show up here once a workflow asks a question and gets an answer, or once a step is marked as a decision in the viewer.
+    </div>`;
+    return;
+  }
+  const byDay = new Map();
+  for (const d of state.decisions) {
+    const k = (d.at || '').slice(0, 10) || 'unknown';
+    if (!byDay.has(k)) byDay.set(k, []);
+    byDay.get(k).push(d);
+  }
+  const parts = [];
+  for (const [day, rows] of byDay) {
+    parts.push(`<div class="day">${esc(day)}</div>`);
+    for (const d of rows) parts.push(decisionRow(d));
+  }
+  mount.innerHTML = parts.join('');
+  for (const el of document.querySelectorAll('.decision-row')) {
+    el.onclick = () => {
+      const kind = el.dataset.kind;
+      if (kind === 'auto' && el.dataset.runId) {
+        location.href = `/workflows-run.html#${el.dataset.runId}`;
+      } else if (kind === 'marked' && el.dataset.sessionId) {
+        location.href = `/#${el.dataset.sessionId}/${el.dataset.stepId || ''}`;
+      }
+    };
+  }
+}
+
+function decisionRow(d) {
+  const time = (d.at || '').slice(11, 16);
+  const where = d.kind === 'auto'
+    ? `${esc(d.workflowTitle || 'workflow')} · ${esc(d.nodeId || '')}`
+    : `session ${d.sessionId ? d.sessionId.slice(0, 8) : '—'}`;
+  const q = d.kind === 'auto' ? esc(d.question) : esc(d.note || '(no note)');
+  const a = d.kind === 'auto' ? esc(d.answer)   : 'marked';
+  return `<div class="decision-row" data-kind="${d.kind}" data-run-id="${esc(d.runId || '')}"
+       data-session-id="${esc(d.sessionId || '')}" data-step-id="${esc(d.stepId || '')}">
+    <span class="time">${time}</span>
+    <span class="d-kind ${d.kind}">${d.kind}</span>
+    <div class="d-body">
+      <div class="d-q">${q}</div>
+      <div class="d-a">${a}</div>
+      <div class="d-where">${where}</div>
+    </div>
+    <span class="open">open →</span>
+  </div>`;
+}
+
+/* -------------------------------- Prompts -------------------------------- */
+
+async function loadPrompts() {
+  const r = await fetch('/api/prompts').then((x) => x.json());
+  state.prompts = r.prompts || [];
+  // Learn which session this orderly instance is bound to so the "send"
+  // action can tell the user where it will land.
+  try {
+    const s = await fetch('/api/state').then((x) => x.json());
+    state.liveSessionId = s.instance?.sessionId || null;
+  } catch {}
+  renderPrompts();
+}
+
+function renderPrompts() {
+  const mount = document.getElementById('promptsMount');
+  const projects = new Map();
+  const global = [];
+  for (const p of state.prompts) {
+    if (p.scope === 'user') global.push(p);
+    else {
+      if (!projects.has(p.repoRoot)) projects.set(p.repoRoot, []);
+      projects.get(p.repoRoot).push(p);
+    }
+  }
+  const parts = [];
+  const sortedProjects = [...projects.entries()].sort(([a], [b]) =>
+    (a.split('/').pop() || '').localeCompare(b.split('/').pop() || ''));
+  for (const [root, list] of sortedProjects) {
+    parts.push(renderPromptSection(root.split('/').pop(), root, list, root));
+  }
+  if (!sortedProjects.length) {
+    parts.push(`<section class="scope">
+      <header class="cat-head"><h2>Project libraries</h2><span class="meta">none yet</span></header>
+      <div class="empty" style="background:var(--surface);">
+        No projects with <code>.claude/prompts/</code> are known yet. Drop a <code>.md</code> in there to add one.
+      </div>
+    </section>`);
+  }
+  parts.push(renderPromptSection('Your global library', '~/.claude/prompts/', global));
+  mount.innerHTML = parts.join('');
+  for (const el of document.querySelectorAll('.prompt-tile')) {
+    el.onclick = () => openPromptSheet(el.dataset.id);
+  }
+}
+
+function renderPromptSection(title, pathLabel, list, repoRoot) {
+  const meta = list.length ? `${list.length} prompt${list.length === 1 ? '' : 's'}` : 'none yet';
+  const body = list.length
+    ? `<div class="tiles">${list.map(promptTile).join('')}</div>`
+    : `<div class="empty" style="background:var(--surface);">Nothing in <code>${esc(pathLabel)}</code> yet.</div>`;
+  return `<section class="scope"${repoRoot ? ` data-repo="${esc(repoRoot)}"` : ''}>
+    <header class="cat-head">
+      <h2>${esc(title)}</h2>
+      <code class="repo-path" style="font-family:var(--f-mono);font-size:11px;color:var(--faint);margin-left:12px;">${esc(pathLabel)}</code>
+      <span class="meta">${meta}</span>
+    </header>
+    ${body}
+  </section>`;
+}
+
+function promptTile(p) {
+  const cat = CAT_LABEL[p.category] || 'Prompt';
+  const vars = (p.inputs || []).map((i) => i.key).join(', ');
+  return `<div class="tile prompt-tile" data-id="${esc(p.id)}">
+    <span class="cat-chip ${p.category || 'build'}">${cat}</span>
+    <h3>${esc(p.title)}</h3>
+    <p>${esc(p.description || '')}</p>
+    <div class="foot">
+      <span>${(p.inputs || []).length ? vars : 'no inputs'}</span>
+      <span class="scope-tag">${p.scope}</span>
+    </div>
+  </div>`;
+}
+
+async function openPromptSheet(id) {
+  const r = await fetch(`/api/prompts/${encodeURIComponent(id)}`).then((x) => x.json());
+  const p = r.prompt;
+  if (!p) return;
+  state.openPrompt = p;
+  document.getElementById('pshEyebrow').textContent = `${CAT_LABEL[p.category] || 'Prompt'} · ${p.scope}`;
+  document.getElementById('pshTitle').textContent   = p.title;
+  document.getElementById('pshDesc').textContent    = p.description || '';
+  document.getElementById('pshInputs').innerHTML    = (p.inputs || []).map(inputField).join('')
+    || '<div style="color:var(--faint);font-size:13px;">No inputs — ready as-is.</div>';
+  document.getElementById('pshTarget').textContent  = state.liveSessionId
+    ? `will land in session ${state.liveSessionId.slice(0, 8)}`
+    : 'no live session';
+  document.getElementById('pshSend').onclick = sendPromptNow;
+  document.getElementById('pshSend').disabled = !state.liveSessionId;
+  updatePromptPreview();
+  for (const el of document.querySelectorAll('#pshInputs [data-key]')) {
+    el.oninput = updatePromptPreview;
+  }
+  document.getElementById('pScrim').classList.add('on');
+  document.getElementById('pSheet').setAttribute('aria-hidden', 'false');
+}
+
+function updatePromptPreview() {
+  const p = state.openPrompt;
+  if (!p) return;
+  const inputs = {};
+  for (const el of document.querySelectorAll('#pshInputs [data-key]')) inputs[el.dataset.key] = el.value.trim();
+  const text = String(p.body || '').replace(/\{\{([^}|]+?)(?:\|([^}]*))?\}\}/g, (_, k, def) => {
+    const v = inputs[k.trim()];
+    return v && v.trim() !== '' ? v : (def !== undefined ? def : '');
+  });
+  document.getElementById('pshPreview').textContent = text;
+}
+
+function closePromptSheet() {
+  state.openPrompt = null;
+  document.getElementById('pScrim').classList.remove('on');
+  document.getElementById('pSheet').setAttribute('aria-hidden', 'true');
+}
+window.closePromptSheet = closePromptSheet;
+
+async function sendPromptNow() {
+  const p = state.openPrompt;
+  if (!p) return;
+  const inputs = {};
+  for (const el of document.querySelectorAll('#pshInputs [data-key]')) inputs[el.dataset.key] = el.value.trim();
+  const btn = document.getElementById('pshSend');
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  try {
+    const r = await fetch(`/api/prompts/${encodeURIComponent(p.id)}/send`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ inputs, sessionId: state.liveSessionId }),
+    }).then((x) => x.json());
+    if (r.sent) { location.href = '/'; return; }
+    throw new Error(r.error || 'send failed');
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '◆ Send to session';
+    alert(`Send failed: ${e.message}`);
+  }
+}
+
 /* -------------------------------- Skills --------------------------------- */
 
 async function loadSkills() {
@@ -309,8 +509,8 @@ function shortenPath(p) {
 /* --------------------------------- Tabs ---------------------------------- */
 
 const TAB_COPY = {
-  catalog: {
-    eyebrow: 'Catalog · workflows available in this project',
+  workflows: {
+    eyebrow: 'Workflows · available in this project',
     title:   'Pick a workflow.',
     desc:    'Every tile is a graph of typed-output cards. Click one for the brief sheet, fill the inputs, and open it on the canvas.',
   },
@@ -324,24 +524,40 @@ const TAB_COPY = {
     title:   'What Claude knows how to do.',
     desc:    'Read from the two .claude/skills roots. A workflow node can call a skill by name; this is where you see what is on the shelf.',
   },
+  prompts: {
+    eyebrow: 'Prompts · named templates you can send into a session',
+    title:   'Pick a prompt.',
+    desc:    'Each prompt is one .md file with frontmatter and a body. Fill the inputs, hit Send, and it lands in the active Claude Code session.',
+  },
+  decisions: {
+    eyebrow: 'Decisions · the moments you committed to a direction',
+    title:   'What you decided, and why.',
+    desc:    'Auto-collected from workflow ask-nodes and from steps you mark as decisions in the viewer. Click a row to open where it happened.',
+  },
 };
 
 function switchTab(tab) {
-  document.getElementById('viewCatalog').style.display = tab === 'catalog' ? '' : 'none';
-  document.getElementById('viewRuns').style.display    = tab === 'runs'    ? '' : 'none';
-  document.getElementById('viewSkills').style.display  = tab === 'skills'  ? '' : 'none';
+  document.getElementById('viewCatalog').style.display   = tab === 'workflows' ? '' : 'none';
+  document.getElementById('viewRuns').style.display      = tab === 'runs'      ? '' : 'none';
+  document.getElementById('viewSkills').style.display    = tab === 'skills'    ? '' : 'none';
+  document.getElementById('viewPrompts').style.display   = tab === 'prompts'   ? '' : 'none';
+  document.getElementById('viewDecisions').style.display = tab === 'decisions' ? '' : 'none';
   for (const el of document.querySelectorAll('[data-tab]')) el.classList.toggle('on', el.dataset.tab === tab);
   document.getElementById('hereTab').textContent = tab;
-  const copy = TAB_COPY[tab] || TAB_COPY.catalog;
+  const copy = TAB_COPY[tab] || TAB_COPY.workflows;
   document.getElementById('heroEyebrow').textContent = copy.eyebrow;
   document.getElementById('heroTitle').textContent   = copy.title;
   document.getElementById('heroDesc').textContent    = copy.desc;
-  if (tab === 'runs')   loadRuns();
-  if (tab === 'skills') loadSkills();
+  if (tab === 'runs')      loadRuns();
+  if (tab === 'skills')    loadSkills();
+  if (tab === 'prompts')   loadPrompts();
+  if (tab === 'decisions') loadDecisions();
 }
 function tabFromHash() {
   const h = (location.hash || '').replace('#', '');
-  return h === 'runs' || h === 'skills' ? h : 'catalog';
+  // Keep #catalog as an alias so earlier links keep working.
+  if (h === 'catalog') return 'workflows';
+  return ['runs', 'skills', 'prompts', 'decisions'].includes(h) ? h : 'workflows';
 }
 window.addEventListener('hashchange', () => switchTab(tabFromHash()));
 

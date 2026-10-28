@@ -18,10 +18,13 @@ import { Runner } from '../core/runner.mjs';
 import { SHOTS_DIR, INSTANCES_FILE, ensureDirs, transcriptPathFor, uploadsFor } from '../core/paths.mjs';
 import { randomUUID } from 'node:crypto';
 import { loadShots, attachShots } from '../core/shots.mjs';
-import { listDefinitions, getDefinition, startRun, readRun, listRuns, runsForSession, deleteRun, rerunRun } from '../core/workflows.mjs';
+import { listDefinitions, getDefinition, startRun, readRun, listRuns, runsForSession, deleteRun, rerunRun, scaffoldWorkflow, writeWorkflow, validateDefinition } from '../core/workflows.mjs';
 import { Scheduler } from '../core/workflow-runner.mjs';
 import { openBlob } from '../core/blobs.mjs';
 import { listSkills } from '../core/skills.mjs';
+import { listPrompts, getPrompt, interpolate } from '../core/prompts.mjs';
+import { listDecisions, markDecision, unmarkDecision } from '../core/decisions.mjs';
+import { generateToken, verifyToken, exportSessionHtml } from '../core/share.mjs';
 
 const WEB_DIR = path.resolve(fileURLToPath(new URL('../../web', import.meta.url)));
 const TYPES = { '.html': 'text/html', '.css': 'text/css', '.mjs': 'text/javascript',
@@ -583,15 +586,100 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
 
       // Workflow catalog, scoped to the repo this instance was started in so
       // repo-local defs win over user-global ones.
-      if (url.pathname === '/api/workflows') {
+      if (url.pathname === '/api/workflows' && req.method === 'GET') {
         return send(200, { workflows: listDefinitions({ repoRoot: liveCwd }) });
       }
+
+      // Create a workflow — three starter kinds plus a validator for the
+      // in-browser editor's "check" button.
+      if (url.pathname === '/api/workflows/scaffold' && req.method === 'GET') {
+        const id = url.searchParams.get('id') || 'untitled';
+        const title = url.searchParams.get('title') || null;
+        return send(200, { def: scaffoldWorkflow(id, { title }) });
+      }
+      if (url.pathname === '/api/workflows/validate' && req.method === 'POST') {
+        const body = await readBody(req);
+        const problems = validateDefinition(body.def || {});
+        return send(200, { ok: problems.length === 0, problems });
+      }
+      if (url.pathname === '/api/workflows' && req.method === 'POST') {
+        const body = await readBody(req);
+        try {
+          const file = writeWorkflow({
+            def: body.def, scope: body.scope || 'project',
+            repoRoot: body.scope === 'project' ? (body.repoRoot || liveCwd) : null,
+            overwrite: !!body.overwrite,
+          });
+          return send(200, { saved: true, file });
+        } catch (e) { return send(400, { error: e.message }); }
+      }
+
 
       // Skills — the pieces workflows draw on. Walks every repo the sessions
       // index knows about plus the global library.
       if (url.pathname === '/api/skills') {
         return send(200, { skills: listSkills() });
       }
+
+      // Shared session export — signed URL good for one week.
+      const shareMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/share$/);
+      if (shareMatch && req.method === 'POST') {
+        const view = resolveView(shareMatch[1]);
+        if (!view) return send(404, { error: 'session not found' });
+        const token = generateToken(shareMatch[1]);
+        const host = req.headers.host || `localhost:${port}`;
+        return send(200, { token, url: `http://${host}/share/${token}` });
+      }
+      const shareOpenMatch = url.pathname.match(/^\/share\/(.+)$/);
+      if (shareOpenMatch && req.method === 'GET') {
+        const payload = verifyToken(shareOpenMatch[1]);
+        if (!payload) return send(410, 'This link has expired or is not valid.', 'text/plain');
+        const view = resolveView(payload.sessionId);
+        if (!view) return send(404, 'Session not found.', 'text/plain');
+        const html = exportSessionHtml({
+          session: view.session, meta: view.meta, sessionId: payload.sessionId, shotsDir: SHOTS_DIR,
+        });
+        return send(200, html, 'text/html');
+      }
+
+      // Decisions — auto-extracted from ask-node answers, plus user marks.
+      if (url.pathname === '/api/decisions' && req.method === 'GET') {
+        return send(200, { decisions: listDecisions() });
+      }
+      if (url.pathname === '/api/decisions/mark' && req.method === 'POST') {
+        const body = await readBody(req);
+        try { return send(200, { mark: markDecision(body) }); }
+        catch (e) { return send(400, { error: e.message }); }
+      }
+      if (url.pathname === '/api/decisions/mark' && req.method === 'DELETE') {
+        const body = await readBody(req);
+        unmarkDecision(body);
+        return send(200, { removed: true });
+      }
+
+      // Prompts — named templates you can send into a session.
+      if (url.pathname === '/api/prompts' && req.method === 'GET') {
+        return send(200, { prompts: listPrompts() });
+      }
+      const promptMatch = url.pathname.match(/^\/api\/prompts\/(.+)$/);
+      if (promptMatch && req.method === 'GET' && !promptMatch[1].endsWith('/send')) {
+        const p = getPrompt(decodeURIComponent(promptMatch[1]));
+        return p ? send(200, { prompt: p }) : send(404, { error: 'prompt not found' });
+      }
+      const promptSendMatch = url.pathname.match(/^\/api\/prompts\/(.+)\/send$/);
+      if (promptSendMatch && req.method === 'POST') {
+        const p = getPrompt(decodeURIComponent(promptSendMatch[1]));
+        if (!p) return send(404, { error: 'prompt not found' });
+        const body = await readBody(req);
+        const text = interpolate(p.body, body.inputs || {});
+        const target = body.sessionId && watchers.has(body.sessionId) ? body.sessionId : liveId;
+        if (runnerFor(target).busy) runnerFor(target).stop();
+        const started = runnerFor(target).run({
+          sessionId: target, text, mode: body.mode || 'acceptEdits', fresh: false,
+        });
+        return send(200, { sent: true, sessionId: target, text, started });
+      }
+
 
       const wfMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)$/);
       if (wfMatch && req.method === 'GET') {

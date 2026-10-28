@@ -441,3 +441,28 @@ main { max-width: 1280px; margin: 0 auto; padding: 0 56px 96px; }
 .shots-pair .shot:hover { border-color: var(--edge-hi); }
 .route-row.failed .route-state { color: var(--ship); }
 .route-row.skipped .route-state { color: var(--faint); font-style: italic; }
+
+/* ------------------------------- Decisions ------------------------------- */
+.decision-row {
+  display: grid; grid-template-columns: 56px 70px 1fr 90px; gap: 14px;
+  align-items: center; padding: 14px 16px; cursor: pointer;
+  background: var(--surface); border: 1px solid var(--edge-tint);
+  border-radius: 10px; margin-bottom: 8px;
+  transition: background .14s var(--ease);
+}
+.decision-row:hover { background: var(--raised); }
+.decision-row .time { font: 11px var(--f-mono); color: var(--faint); }
+.decision-row .d-kind {
+  font: 10px var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 3px 8px; border-radius: 999px;
+  border: 1px solid var(--edge-tint); color: var(--mute); text-align: center;
+}
+.decision-row .d-kind.auto   { color: var(--review); border-color: #82c1ee40; }
+.decision-row .d-kind.marked { color: var(--design); border-color: #efb36c40; }
+.decision-row .d-body { min-width: 0; }
+.decision-row .d-q { color: var(--text); font-weight: 500; }
+.decision-row .d-a { color: var(--mute); font-size: 13px; margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.decision-row .d-where { font: 10.5px var(--f-mono); color: var(--faint); margin-top: 4px; }
+.decision-row .open { font: 11px var(--f-mono); color: var(--faint); text-align: right; }
+.decision-row:hover .open { color: var(--accent); }

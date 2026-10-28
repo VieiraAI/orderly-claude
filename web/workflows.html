@@ -10,26 +10,29 @@
 
 <nav class="nav">
   <span class="app-menu" id="appMenu"></span>
-  <span class="here" id="hereTab">catalog</span>
+  <span class="here" id="hereTab">workflows</span>
   <span class="spacer"></span>
-  <a class="link on" href="#catalog" data-tab="catalog">Catalog</a>
-  <a class="link"    href="#runs"    data-tab="runs">Runs</a>
-  <a class="link"    href="#skills"  data-tab="skills">Skills</a>
+  <a class="link on" href="#workflows" data-tab="workflows">Workflows</a>
+  <a class="link"    href="#prompts"   data-tab="prompts">Prompts</a>
+  <a class="link"    href="#runs"      data-tab="runs">Runs</a>
+  <a class="link"    href="#decisions" data-tab="decisions">Decisions</a>
+  <a class="link"    href="#skills"    data-tab="skills">Skills</a>
 </nav>
 <script type="module">
   import { mountAppMenu } from '/app-menu.mjs';
-  const key = (location.hash || '').replace('#', '') || 'catalog';
+  const key = (location.hash || '').replace('#', '') || 'workflows';
   mountAppMenu(document.getElementById('appMenu'), { here: key });
   window.addEventListener('hashchange', () => {
-    const k = (location.hash || '').replace('#', '') || 'catalog';
+    const k = (location.hash || '').replace('#', '') || 'workflows';
     mountAppMenu(document.getElementById('appMenu'), { here: k });
   });
 </script>
 
 <section class="hero">
-  <div class="eyebrow" id="heroEyebrow">Catalog · workflows available in this project</div>
+  <div class="eyebrow" id="heroEyebrow">Workflows · available in this project</div>
   <h1 class="display" id="heroTitle">Pick a workflow.</h1>
   <p id="heroDesc">Every tile is a graph of typed-output cards. Click one for the brief sheet, fill the inputs, and open it on the canvas.</p>
+  <a href="/workflows-new.html" class="btn-ghost" style="margin-top:16px;display:inline-block;padding:6px 14px;font:12px var(--f-mono);color:var(--accent);border:1px solid color-mix(in oklab, var(--accent) 40%, transparent);border-radius:999px;">+ New workflow</a>
 </section>
 
 <main>
@@ -64,7 +67,35 @@
   <section id="viewSkills" style="display:none;">
     <div id="skillsMount"></div>
   </section>
+
+  <section id="viewPrompts" style="display:none;">
+    <div id="promptsMount"></div>
+  </section>
+
+  <section id="viewDecisions" style="display:none;">
+    <div id="decisionsMount"><div class="empty">No decisions yet.</div></div>
+  </section>
 </main>
+
+<div class="scrim" id="pScrim" onclick="closePromptSheet()"></div>
+<aside class="sheet" id="pSheet" aria-hidden="true">
+  <button class="x" onclick="closePromptSheet()">×</button>
+  <div class="s-eyebrow" id="pshEyebrow">Prompt</div>
+  <h2 id="pshTitle">—</h2>
+  <p class="s-desc" id="pshDesc"></p>
+
+  <div class="s-h">Inputs</div>
+  <div class="inputs" id="pshInputs"></div>
+
+  <div class="s-h">Will send</div>
+  <pre id="pshPreview" style="margin:0 0 10px;padding:10px 12px;background:var(--surface);border:1px solid var(--edge-tint);border-radius:8px;font:12px/1.5 var(--f-mono);color:var(--mute);white-space:pre-wrap;max-height:220px;overflow:auto;"></pre>
+
+  <div class="actions">
+    <button class="btn-run" id="pshSend">◆ Send to session</button>
+    <button class="btn-ghost" onclick="closePromptSheet()">Cancel</button>
+    <span class="est" id="pshTarget">—</span>
+  </div>
+</aside>
 
 <div class="scrim" id="scrim" onclick="closeSheet()"></div>
 <aside class="sheet" id="sheet" aria-hidden="true">

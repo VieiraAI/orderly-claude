@@ -16,6 +16,7 @@ export const BLOBS_DIR = path.join(DATA_DIR, 'blobs');
 export const SCRATCH_RUNS_DIR = path.join(DATA_DIR, 'runs', '_scratch');
 export const USER_WORKFLOWS_DIR = path.join(CLAUDE_DIR, 'workflows');
 export const USER_SKILLS_DIR = path.join(CLAUDE_DIR, 'skills');
+export const USER_PROMPTS_DIR = path.join(CLAUDE_DIR, 'prompts');
 
 /** The workflows and runs directories for a repo. The repo owns both. */
 export function repoWorkflowsDir(repoRoot) {
@@ -26,6 +27,9 @@ export function repoRunsDir(repoRoot) {
 }
 export function repoSkillsDir(repoRoot) {
   return path.join(repoRoot, '.claude', 'skills');
+}
+export function repoPromptsDir(repoRoot) {
+  return path.join(repoRoot, '.claude', 'prompts');
 }
 
 let migrated = false;

@@ -217,6 +217,52 @@ export function runsForSession(sessionId) {
   return listRuns({ limit: 1000 }).filter((r) => r.sessionId === sessionId);
 }
 
+/* ---------------------------- Authoring --------------------------------- */
+
+/**
+ * A starter definition for `id`, ready to tweak. Three nodes wired in a line
+ * so the file is immediately runnable and shows how edges work. Everything
+ * downstream of the scaffold reads the same shape as a hand-written def.
+ */
+export function scaffoldWorkflow(id, { title, category = 'build', estimate = '~1 min' } = {}) {
+  return {
+    id,
+    title: title || id.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+    category,
+    estimate,
+    desc: 'Describe what this workflow is for in one line.',
+    inputs: [],
+    graph: {
+      nodes: [
+        { id: 'brief',   title: 'Brief',   kind: 'document', col: 0, row: 0, cost: 1 },
+        { id: 'review',  title: 'Review',  kind: 'report',   col: 1, row: 0, cost: 2 },
+        { id: 'ship',    title: 'Ship',    kind: 'pr',       col: 2, row: 0, cost: 1 },
+      ],
+      edges: [['brief', 'review'], ['review', 'ship']],
+    },
+  };
+}
+
+/**
+ * Write a definition to disk at the right scope. Validates first; refuses to
+ * overwrite an existing file unless `overwrite: true`. Returns the final path.
+ */
+export function writeWorkflow({ def, scope = 'project', repoRoot = null, overwrite = false }) {
+  const problems = validateDefinition(def);
+  if (problems.length) throw new Error(`workflow invalid: ${problems.join('; ')}`);
+  const dir = scope === 'user' ? USER_WORKFLOWS_DIR
+    : scope === 'project' ? (repoRoot ? repoWorkflowsDir(repoRoot) : null)
+    : null;
+  if (!dir) throw new Error(`unknown scope: ${scope}`);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${def.id}.json`);
+  if (fs.existsSync(file) && !overwrite) {
+    throw new Error(`a workflow with id "${def.id}" already exists at ${file}`);
+  }
+  fs.writeFileSync(file, JSON.stringify(def, null, 2) + '\n');
+  return file;
+}
+
 /** Delete a run folder. Returns true if the folder existed. */
 export function deleteRun(runId) {
   for (const base of [...knownRepoRoots().map(repoRunsDir), SCRATCH_RUNS_DIR]) {

@@ -758,6 +758,74 @@ async function main() {
     });
     check('POST /api/runs/:id/stop returns 404 once the scheduler is gone', stopResp.status === 404);
 
+    // Share — signed URL round-trip. Token has three dot-separated parts; the
+    // /share/<token> route returns HTML; a tampered token comes back as 410.
+    const shareResp = await fetch(`${base}/api/sessions/${state.instance.sessionId}/share`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    check('POST /api/sessions/:id/share returns a token and url',
+      typeof shareResp.token === 'string' && shareResp.token.split('.').length === 3
+      && typeof shareResp.url === 'string' && shareResp.url.includes('/share/'),
+      shareResp.error);
+    const shareHtml = await fetch(`${base}/share/${shareResp.token}`);
+    check('/share/:token serves HTML', shareHtml.status === 200
+      && (shareHtml.headers.get('content-type') || '').includes('text/html'),
+      `${shareHtml.status} ${shareHtml.headers.get('content-type')}`);
+    const tampered = await fetch(`${base}/share/${shareResp.token.slice(0, -2)}aa`);
+    check('tampered token is rejected', tampered.status === 410, String(tampered.status));
+
+    // Decisions — auto from ask-node answers, plus a mark round-trip.
+    const dResp = await get('/api/decisions');
+    check('GET /api/decisions returns an array',
+      Array.isArray(dResp.decisions), typeof dResp.decisions);
+    const mark = await fetch(`${base}/api/decisions/mark`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'test-sess', stepId: 'test-step', note: 'smoke' }),
+    }).then((r) => r.json());
+    check('POST /api/decisions/mark returns the row', mark.mark?.sessionId === 'test-sess');
+    const after = await get('/api/decisions');
+    check('mark shows up on next list', after.decisions.some((d) => d.sessionId === 'test-sess'));
+    await fetch(`${base}/api/decisions/mark`, {
+      method: 'DELETE', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'test-sess', stepId: 'test-step' }),
+    });
+    const cleaned = await get('/api/decisions');
+    check('DELETE removes the mark', !cleaned.decisions.some((d) => d.sessionId === 'test-sess'));
+
+    // Prompts — one Markdown file per prompt, grouped by repo + global.
+    const promptsResp = await get('/api/prompts');
+    check('GET /api/prompts returns an array',
+      Array.isArray(promptsResp.prompts), `${typeof promptsResp.prompts}`);
+    const starter = promptsResp.prompts.find((p) => p.slug === 'review-diff');
+    check('starter prompt review-diff is picked up',
+      !!starter && starter.inputs?.length >= 2, starter ? `${starter.inputs?.length} inputs` : 'missing');
+    const promptMod = await import('../src/core/prompts.mjs');
+    const interp = promptMod.interpolate('a {{x}} b {{y|default}} c', { x: 'X' });
+    check('interpolate fills vars and defaults', interp === 'a X b default c', JSON.stringify(interp));
+
+    // Authoring: scaffold a def, validate it, write it, confirm it's listed.
+    const sc = await get('/api/workflows/scaffold?id=smoke-authored');
+    check('GET /api/workflows/scaffold returns a starter def',
+      sc.def?.id === 'smoke-authored' && (sc.def?.graph?.nodes?.length || 0) >= 2);
+    const vd = await fetch(`${base}/api/workflows/validate`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: sc.def }),
+    }).then((r) => r.json());
+    check('POST /api/workflows/validate approves the scaffold', vd.ok === true,
+      vd.problems?.join('; '));
+    const saved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: sc.def, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    check('POST /api/workflows writes to .claude/workflows/',
+      saved.saved === true && typeof saved.file === 'string' && saved.file.endsWith('smoke-authored.json'),
+      saved.error);
+    const roundTrip = await get('/api/workflows');
+    check('new workflow shows up in the catalog',
+      roundTrip.workflows.some((w) => w.id === 'smoke-authored'));
+    // Clean up so the file doesn't drift between runs.
+    try { fs.unlinkSync(saved.file); } catch {}
+
     // Workflow validator — accept good shapes, reject bad ones with a reason.
     const wfMod = await import('../src/core/workflows.mjs');
     const goodDef = { id: 'x', graph: {

@@ -1692,6 +1692,28 @@ $('updateHint').onclick = () => { saveDraft(); location.reload(); };
 
 $('newSessionBtn').onclick = () => newSession();
 
+$('shareBtn')?.addEventListener('click', async () => {
+  if (!state.sessionId) { alert('No session to share yet.'); return; }
+  const btn = $('shareBtn');
+  const prev = btn.textContent;
+  btn.textContent = 'Signing…';
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(state.sessionId)}/share`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((x) => x.json());
+    if (!r.url) throw new Error(r.error || 'no url');
+    await navigator.clipboard?.writeText(r.url).catch(() => {});
+    btn.textContent = '◎ Copied';
+    window.open(r.url, '_blank', 'noopener');
+    setTimeout(() => { btn.textContent = prev; btn.disabled = false; }, 1800);
+  } catch (e) {
+    btn.textContent = prev;
+    btn.disabled = false;
+    alert(`Share failed: ${e.message}`);
+  }
+});
+
 $('railBtn').onclick = () => {
   const open = layoutEl().classList.toggle('rail-open');
   try { localStorage.setItem('cz-rail', open ? '1' : '0'); } catch {}
