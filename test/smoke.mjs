@@ -1124,6 +1124,27 @@ async function main() {
       `${approved?.status} / approved=${approved?.graph.nodes[0]?.output?.approved}`);
     try { fs.unlinkSync(approveSaved.file); } catch {}
 
+    // Legacy compat: a workflow without schemaVersion still runs; the resulting
+    // run records schemaVersion: 1 so the canvas can badge it.
+    const legacyDef = {
+      id: 'smoke-legacy', title: 'Legacy smoke',
+      graph: {
+        nodes: [{ id: 'go', title: 'Go', kind: 'terminal', col: 1, row: 0, command: 'echo legacy' }],
+        edges: [],
+      },
+    };
+    const legacySaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: legacyDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const legacyStart = await fetch(`${base}/api/workflows/smoke-legacy/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    check('legacy run records schemaVersion: 1',
+      legacyStart.run?.schemaVersion === 1,
+      `schemaVersion=${legacyStart.run?.schemaVersion}`);
+    try { fs.unlinkSync(legacySaved.file); } catch {}
+
     // Rerun & delete.
     const rerunResp = await fetch(`${base}/api/runs/${started.run.runId}/rerun`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',

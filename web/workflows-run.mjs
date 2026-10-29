@@ -125,9 +125,12 @@ function render() {
   if (totals.elapsedS) totalBits.push(`${totals.elapsedS.toFixed(1)} s`);
   if (totals.tokens)  totalBits.push(`${totals.tokens} tok`);
   const totalStr = totalBits.length ? ` · <span class="run-totals">${totalBits.join(' · ')}</span>` : '';
+  const legacyPill = (run.schemaVersion || 1) < 2
+    ? ' · <span class="legacy-pill" title="This run was defined under the pre-v2 schema. Rendered through the compat layer.">legacy</span>'
+    : '';
   document.getElementById('runStatus').innerHTML = run.status === 'running'
-    ? `<span class="live-dot"></span>Running · ${done} of ${nodes.length} done${totalStr}`
-    : `${run.status} · ${done} of ${nodes.length} done${totalStr}`;
+    ? `<span class="live-dot"></span>Running · ${done} of ${nodes.length} done${totalStr}${legacyPill}`
+    : `${run.status} · ${done} of ${nodes.length} done${totalStr}${legacyPill}`;
   if (run.sessionId) {
     document.getElementById('runSession').textContent = `session ${run.sessionId.slice(0, 8)}`;
   }
@@ -400,6 +403,16 @@ function cardBody(n) {
       const hunks = (o.hunks || []).slice(0, 3);
       const rows = hunks.map((h) => `<div class="hunk-row ${esc(h.op)}"><span class="sign">${h.op === 'add' ? '+' : h.op === 'del' ? '−' : ' '}</span><span>${esc(h.line)}</span></div>`).join('');
       return `<div class="doc-h">${esc(o.file || 'diff')}</div><div class="hunks">${rows}</div>`;
+    }
+    case 'display': {
+      const sources = o.sources || [];
+      if (!sources.length) return `<div class="wait-note">No upstream to display.</div>`;
+      const rows = sources.map((s) => `<div class="src-row"><span class="src-kind">${esc(s.kind)}</span><span class="src-id">${esc(s.id)}</span><span class="src-title">${esc(s.title || '')}</span></div>`).join('');
+      return `<div class="doc-h">${esc(o.render || 'display')} · ${sources.length}</div>${rows}`;
+    }
+    case 'publish': {
+      // Non-PR publish target (e.g. file write).
+      return `<div class="doc-h">${esc(o.target || 'publish')}</div><div class="doc-b">${esc(o.path || '')} ${o.bytes ? `· ${o.bytes} B` : ''}</div>`;
     }
     default: return `<div class="doc-b">output ready</div>`;
   }

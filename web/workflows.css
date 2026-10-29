@@ -489,6 +489,16 @@ main { max-width: 1280px; margin: 0 auto; padding: 0 56px 96px; }
 .chip.stop-all { color: var(--ship); border-color: color-mix(in oklab, var(--ship) 40%, transparent); }
 .chip.stop-all:hover { background: color-mix(in oklab, var(--ship) 12%, transparent); border-color: var(--ship); }
 
+/* Legacy pill on a v1-era run's header. Faint; a hover-tooltip explains why. */
+.legacy-pill { display: inline-block; font: 10px var(--f-mono); padding: 1px 7px; border-radius: 999px;
+  color: var(--mute); border: 1px solid var(--edge-tint); background: color-mix(in oklab, var(--surface) 60%, transparent); }
+
+/* Display cards (v2) — a stacked list of upstream source rows. */
+.src-row { display: grid; grid-template-columns: auto auto 1fr; gap: 8px; align-items: baseline;
+  font: 11px var(--f-mono); color: var(--faint); padding: 2px 0; }
+.src-row .src-kind { color: var(--accent); }
+.src-row .src-id   { color: var(--text); }
+
 /* ----------------------- v2 kinds: check / inputs ------------------------ */
 /* Check cards: a pill + a plain-language reason, nothing else. */
 .check-row { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; }

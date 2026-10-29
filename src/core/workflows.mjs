@@ -234,6 +234,8 @@ export function startRun({ workflowId, inputs = {}, repoRoot, sessionId = null, 
     workflowTitle: def.title,
     category: def.category,
     scope: def.scope,
+    // Record which schema the def used so the renderer can mark legacy runs.
+    schemaVersion: def.schemaVersion || 1,
     status: 'running',
     trigger,
     sessionId,
@@ -398,6 +400,7 @@ export function rerunRun(runId, { fromNodeId = null } = {}) {
   const run = {
     runId: newRunId, workflowId: prior.workflowId,
     workflowTitle: def.title, category: def.category, scope: prior.scope,
+    schemaVersion: def.schemaVersion || prior.schemaVersion || 1,
     status: 'running', trigger: `rerun of ${runId.slice(0, 8)}`,
     sessionId: prior.sessionId, repoRoot: prior.repoRoot,
     startedAt: now, endedAt: null,
