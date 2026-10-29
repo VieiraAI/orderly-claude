@@ -25,6 +25,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { screenshot, detectDevServer } from './capture.mjs';
 import { putFile } from './blobs.mjs';
+import { resolveText, isExplicit } from './refs.mjs';
+import { runSpend } from './settings.mjs';
 import {
   loadBrand,
   colorsInPalette,
@@ -39,35 +41,63 @@ import { loadMcpConfig, resolveTool, interpolate, PUBLISH_TO_MCP } from './mcp.m
  *  path when one is set on the run; falls back to the repo root. */
 function cwdOf(run) { return run?.cwd || run?.repoRoot; }
 
+/** An error that retrying cannot fix: a missing reference, a rejection. */
+function final(message) { return Object.assign(new Error(message), { retryable: false }); }
+
+/**
+ * Resolve a node's text against the run. A reference to another node that
+ * comes back empty fails the node, naming the reference — a prompt with a
+ * silent hole in it produces confident nonsense. An empty input is allowed;
+ * the person may have left an optional field blank.
+ */
+function resolveOrFail(text, ctx, node, opts = {}) {
+  const { text: out, missing } = resolveText(text, { run: ctx.run, nodeId: node.id, ...opts });
+  const holes = missing.filter((m) => /\{\{\s*nodes\./.test(m));
+  if (holes.length) {
+    throw final(`${holes.join(', ')} ${holes.length === 1 ? 'was' : 'were'} empty when "${node.title || node.id}" started — check that the step it names produced that field`);
+  }
+  return out;
+}
+
 /** Pick the handler for a kind. Unknown kinds get the generic placeholder. */
 export function getHandler(kind) {
   return HANDLERS[kind] || HANDLERS._default;
 }
 
 const HANDLERS = {
-  terminal: async (node, { run, onProgress, signal }) => {
+  terminal: async (node, { run, onProgress, signal, timeoutMs, recordSent }) => {
     const cmd = pickTerminalCommand(node, run);
     const started = Date.now();
     onProgress({ progress: `$ ${cmd.display}` });
-    const { out, err, code } = await exec(cmd.argv, { cwd: cwdOf(run), signal, timeoutMs: 60_000 });
+    recordSent?.(`$ ${cmd.display}`);
+    // Ten minutes by default: a real test suite takes longer than a minute.
+    const res = await exec(cmd.argv, { cwd: cwdOf(run), signal, timeoutMs: timeoutMs || 600_000 });
     const elapsed = ((Date.now() - started) / 1000).toFixed(2);
-    return {
+    const text = [res.out, res.err].filter(Boolean).join('\n').trim();
+    const output = {
       prompt: `$ ${cmd.display}`,
-      out: (out || err || '').split('\n').slice(0, 20).join('\n'),
-      status: code === 0 ? `done · ${elapsed} s` : `exit ${code} · ${elapsed} s`,
+      // The tail, not the head: the summary line of a test run is at the end.
+      out: text.split('\n').slice(-40).join('\n'),
+      code: res.code,
+      status: res.code === 0 ? `done · ${elapsed} s` : `exit ${res.code} · ${elapsed} s`,
     };
+    // A command that failed fails its step, as it would in any build system,
+    // unless the author said a failure is something to look at, not to stop on.
+    if (res.code !== 0 && !node.spec?.allowFailure && !signal?.aborted) {
+      const last = text.split('\n').filter(Boolean).slice(-3).join(' · ');
+      throw new Error(`\`${cmd.display}\` exited ${res.code}${last ? ` — ${last.slice(0, 300)}` : ''}`);
+    }
+    return output;
   },
 
-  ask: async (node, { awaitAnswer }) => {
-    const answer = await awaitAnswer(node.id, {
-      question: node.question || node.title,
-      choices: node.choices || null,
-    });
-    return { question: node.question || node.title, answer };
+  ask: async (node, ctx) => {
+    const question = resolveOrFail(node.question || node.title, ctx, node);
+    const answer = await ctx.awaitAnswer(node.id, { question, choices: node.choices || null });
+    return { question, answer };
   },
 
   document: async (node, ctx) => {
-    const upstream = upstreamContext(node, ctx.run);
+    const upstream = node.explicit ? '' : upstreamContext(node, ctx.run);
     const prompt = [
       `Draft a focused Markdown document for the "${ctx.run.workflowTitle}" workflow.`,
       `This node is called "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
@@ -78,7 +108,7 @@ const HANDLERS = {
       `Keep it concise: no more than ~400 words. Start with a single H1.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'haiku'),
+      ctx, cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'haiku'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
       // Stream the growing body into the card so the running state feels alive.
       onStream: ({ text: running }) => ctx.onProgress({
@@ -90,7 +120,7 @@ const HANDLERS = {
   },
 
   report: async (node, ctx) => {
-    const upstream = upstreamContext(node, ctx.run);
+    const upstream = node.explicit ? '' : upstreamContext(node, ctx.run);
     const prompt = [
       `You are reviewing work produced by the "${ctx.run.workflowTitle}" workflow.`,
       `This review node is "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
@@ -102,7 +132,7 @@ const HANDLERS = {
       `List at most five findings, most important first. If there is nothing to flag, return an empty array.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'sonnet'),
+      ctx, cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'sonnet'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const parsed = extractJson(text) || { findings: [] };
@@ -115,7 +145,7 @@ const HANDLERS = {
   },
 
   mockup: async (node, ctx) => {
-    const upstream = upstreamContext(node, ctx.run);
+    const upstream = node.explicit ? '' : upstreamContext(node, ctx.run);
     const prompt = [
       `Produce a single self-contained HTML mockup for the "${ctx.run.workflowTitle}" workflow.`,
       `This node is "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
@@ -125,7 +155,7 @@ const HANDLERS = {
       `Return only the HTML (no code fences, no commentary). Use inline CSS. Keep it under 200 lines.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'sonnet'),
+      ctx, cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'sonnet'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const html = stripFences(text);
@@ -133,7 +163,7 @@ const HANDLERS = {
   },
 
   diff: async (node, ctx) => {
-    const upstream = upstreamContext(node, ctx.run);
+    const upstream = node.explicit ? '' : upstreamContext(node, ctx.run);
     const prompt = [
       `Propose a small code change for the "${ctx.run.workflowTitle}" workflow.`,
       `This node is "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
@@ -145,7 +175,7 @@ const HANDLERS = {
       `Keep the change tiny — ten hunks or fewer.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'sonnet'),
+      ctx, cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'sonnet'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const parsed = extractJson(text) || { file: 'unknown', hunks: [] };
@@ -153,7 +183,7 @@ const HANDLERS = {
   },
 
   pr: async (node, ctx) => {
-    const upstream = upstreamContext(node, ctx.run);
+    const upstream = node.explicit ? '' : upstreamContext(node, ctx.run);
     const prompt = [
       `Draft a GitHub pull request body for the "${ctx.run.workflowTitle}" workflow.`,
       `This node is "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
@@ -164,7 +194,7 @@ const HANDLERS = {
       `{"title":"<pr title, under 70 chars>","body":"<short markdown body>"}`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'haiku'),
+      ctx, cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'haiku'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const parsed = extractJson(text) || {};
@@ -245,21 +275,20 @@ const HANDLERS = {
    * old run.json records keep working unchanged. */
 
   agent: async (node, ctx) => {
-    const spec = node.spec || {};
-    const verify = spec.verify;
+    const verify = node.spec?.verify;
     const maxRetries = Number(verify?.maxRetries ?? 0);
     const attempts = [];
     let output;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const prevFailures = attempts.map((a) => a.failures).flat();
+      const prevFailures = attempts.flatMap((a) => a.failures);
       output = await runAgentOnce(node, ctx, prevFailures);
       if (!verify) return output;
       const result = await runVerify(node, output, ctx);
-      attempts.push({ attempt, pass: result.pass, failures: result.failures, verify: result });
+      attempts.push({ attempt, pass: result.pass, failures: result.failures });
       if (result.pass || attempt === maxRetries) {
         output.verify = { pass: result.pass, attempts, results: result.results };
         if (!result.pass && (verify.onFail || 'stop') === 'stop') {
-          throw new Error(`verify failed: ${result.failures.map((f) => f.reason).join('; ')}`);
+          throw final(`verify failed: ${result.failures.map((f) => f.reason).join('; ')}`);
         }
         return output;
       }
@@ -273,8 +302,14 @@ const HANDLERS = {
     if (spec.op === 'capture-shots') return HANDLERS['shots-set'](node, ctx);
     if (spec.op === 'capture-shot')  return HANDLERS.shots(node, ctx);
     // Shell command — reuse the terminal handler with the cmd shimmed on.
-    const shim = { ...node, command: spec.cmd || node.command };
-    return HANDLERS.terminal(shim, ctx);
+    // Substituted values are quoted, so an output cannot become a command.
+    const raw = spec.cmd || node.command;
+    const command = typeof raw === 'string' ? resolveOrFail(raw, ctx, node, { mode: 'shell' }) : raw;
+    const output = await HANDLERS.terminal({ ...node, command }, ctx);
+    // Pictures or clips the command made, shown on the run page — so a
+    // person can see what they are about to approve.
+    if (spec.show) output.images = collectShown(spec.show, ctx, node);
+    return output;
   },
 
   decision: async (node, ctx) => {
@@ -282,7 +317,7 @@ const HANDLERS = {
     const options = spec.options || [];
     const askNode = {
       ...node,
-      question: spec.question || node.title,
+      question: resolveOrFail(spec.question || node.title, ctx, node),
       choices: options.map((o) => o.label),
     };
     const base = await HANDLERS.ask(askNode, ctx);
@@ -315,8 +350,9 @@ const HANDLERS = {
       }
     } else if (a.type === 'contains') {
       const haystack = JSON.stringify(from?.output || '');
-      pass = haystack.includes(a.needle);
-      reason = pass ? `found "${a.needle}"` : `missing "${a.needle}"`;
+      const needle = resolveOrFail(String(a.needle ?? ''), ctx, node);
+      pass = needle !== '' && haystack.includes(needle);
+      reason = pass ? `found "${needle}"` : `missing "${needle}"`;
     } else if (a.type === 'manual') {
       const answer = await ctx.awaitAnswer(node.id, {
         question: a.question || spec.question || `Does ${from?.title || 'the upstream'} look right?`,
@@ -374,14 +410,23 @@ const HANDLERS = {
     const target = spec.target || 'pr';
     if (target === 'pr') return HANDLERS.pr(node, ctx);
     if (target === 'file') {
-      // Write upstream text to a file inside the repo; return a receipt.
-      const upstream = upstreamContext(node, ctx.run);
-      const relPath = spec.path || `.orderly-claude/outputs/${node.id}.md`;
+      // Write to a file inside the repo; return a receipt. `content` may name
+      // exactly what to write; without it, every parent's output is written.
+      const body = spec.content
+        ? resolveOrFail(spec.content, ctx, node)
+        : upstreamContext(node, ctx.run);
+      const relPath = resolveOrFail(spec.path || `.orderly-claude/outputs/${node.id}.md`, ctx, node);
       if (!cwdOf(ctx.run)) return { target, path: relPath, note: 'no repoRoot — skipped' };
-      const full = path.join(cwdOf(ctx.run), relPath);
+      const root = path.resolve(cwdOf(ctx.run));
+      const full = path.resolve(root, relPath);
+      // A path, possibly built from a model's output, may not leave the repo.
+      if (full !== root && !full.startsWith(root + path.sep)) {
+        throw final(`refusing to write outside the project: ${relPath}`);
+      }
       fs.mkdirSync(path.dirname(full), { recursive: true });
-      fs.writeFileSync(full, upstream || '', 'utf8');
-      return { target, path: relPath, bytes: Buffer.byteLength(upstream || '') };
+      fs.writeFileSync(full, body || '', 'utf8');
+      ctx.recordSent?.(body || '');
+      return { target, path: path.relative(root, full), bytes: Buffer.byteLength(body || ''), body: (body || '').slice(0, 4000) };
     }
     // External shorthand targets map to an MCP call: {server, tool} looked up
     // from .claude/mcp.json. Args come from the publish spec itself.
@@ -459,41 +504,76 @@ const HANDLERS = {
   // Control-flow kinds.
 
   // Loop runs a per-item action (script or agent) across an array resolved
-  // from spec.over, collecting results into an array. The scheduler stays
-  // topological — true subgraph fan-out is a follow-up.
+  // from spec.over, collecting results into an array. Bounded twice: `max`
+  // items (50 unless raised, never past 500) so a list a model produced
+  // cannot turn into ten thousand calls, and `concurrency` at once.
   loop: async (node, ctx) => {
     const spec = node.spec || {};
-    const items = resolveOver(spec.over, ctx.run);
-    const results = [];
-    for (let i = 0; i < items.length; i++) {
-      if (ctx.signal?.aborted) break;
-      ctx.onProgress({
-        progress: `item ${i + 1}/${items.length}: ${String(items[i]).slice(0, 40)}`,
-        partialOutput: { items, results: [...results], count: items.length, pos: i },
-      });
+    const all = resolveOver(spec.over, ctx.run);
+    const max = Math.min(500, Math.max(1, Number(spec.max) || 50));
+    const items = all.slice(0, max);
+    const width = Math.min(8, Math.max(1, Number(spec.concurrency) || 1));
+    const results = new Array(items.length);
+    const limit = Number(ctx.run.budgetUsd) || 0;
+    let spent = 0, done = 0, halted = null, next = 0;
+    const report = (i) => ctx.onProgress({
+      progress: `item ${done}/${items.length}${i != null ? `: ${String(items[i]).slice(0, 40)}` : ''}`,
+      partialOutput: { items, results: results.filter(Boolean), count: items.length, pos: done },
+    });
+
+    const one = async (i) => {
+      const item = items[i];
       try {
         if (spec.action === 'script' && spec.cmd) {
-          const cmd = String(spec.cmd).replaceAll('{{item}}', String(items[i]));
+          const cmd = resolveOrFail(String(spec.cmd), ctx, node, { item, mode: 'shell' });
           const { out, err, code } = await exec(['sh', '-c', cmd], {
-            cwd: cwdOf(ctx.run), signal: ctx.signal, timeoutMs: 30_000,
+            cwd: cwdOf(ctx.run), signal: ctx.signal, timeoutMs: ctx.timeoutMs || 120_000,
           });
-          results.push({ item: items[i], out: (out || err || '').slice(0, 500), code });
+          results[i] = { item, out: (out || err || '').slice(0, 2000), code };
         } else if (spec.action === 'agent' && spec.prompt) {
-          const prompt = String(spec.prompt).replaceAll('{{item}}', String(items[i]));
+          const prompt = resolveOrFail(String(spec.prompt), ctx, node, { item });
           const { text, meta } = await callClaude(prompt, {
-            cwd: cwdOf(ctx.run), signal: ctx.signal,
-            model: pickModel(node, 'haiku'),
+            cwd: cwdOf(ctx.run), signal: ctx.signal, timeoutMs: ctx.timeoutMs,
+            model: pickModel({ model: spec.model || node.model }, 'haiku'),
             onProgress: () => {}, onStream: () => {},
           });
-          results.push({ item: items[i], text, meta });
+          spent += Number(meta?.cost) || 0;
+          results[i] = { item, text, meta };
         } else {
-          results.push({ item: items[i] });
+          results[i] = { item };
         }
       } catch (e) {
-        results.push({ item: items[i], error: e.message });
+        if (ctx.signal?.aborted) throw e;
+        results[i] = { item, error: e.message };
       }
-    }
-    return { items, results, count: items.length };
+      done++;
+      report(i);
+    };
+
+    const worker = async () => {
+      while (next < items.length && !ctx.signal?.aborted && !halted) {
+        // The run's spend limit applies inside a loop too, between items.
+        if (limit && runSpend(ctx.run) + spent >= limit) { halted = 'budget'; break; }
+        await one(next++);
+      }
+    };
+    ctx.recordSent?.(spec.action === 'agent' ? String(spec.prompt || '') : String(spec.cmd || ''));
+    report(null);
+    await Promise.all(Array.from({ length: Math.min(width, items.length || 1) }, worker));
+
+    const ran = results.filter(Boolean);
+    const notes = [];
+    if (all.length > max) notes.push(`ran the first ${max} of ${all.length} items — raise the loop's limit to run more`);
+    if (halted) notes.push(`stopped after ${ran.length} of ${items.length} items at the run's spend limit`);
+    const failed = ran.filter((r) => r.error || (r.code != null && r.code !== 0)).length;
+    if (failed) notes.push(`${failed} item${failed === 1 ? '' : 's'} failed`);
+    return {
+      items, results: ran, count: items.length, total: all.length,
+      ...(notes.length ? { note: notes.join('; ') } : {}),
+      ...(halted ? { halted } : {}),
+      // One cost for the whole loop, so totals add up without counting twice.
+      ...(spent ? { meta: { model: 'loop', cost: spent, elapsed: null } } : {}),
+    };
   },
 
   // fanOut runs an action concurrently over an iterable, with bounded
@@ -527,7 +607,7 @@ const HANDLERS = {
           if (!rawPrompt) return { item, error: 'missing body.prompt' };
           const prompt = String(rawPrompt).replaceAll('{{item}}', String(item));
           const { text, meta } = await callClaude(prompt, {
-            cwd: cwdOf(ctx.run), signal: ctx.signal,
+            ctx, cwd: cwdOf(ctx.run), signal: ctx.signal,
             model: body.model || pickModel(node, 'haiku'),
             onProgress: () => {}, onStream: () => {},
           });
@@ -586,14 +666,14 @@ const HANDLERS = {
   approve: async (node, ctx) => {
     const spec = node.spec || {};
     const answer = await ctx.awaitAnswer(node.id, {
-      question: spec.question || spec.prompt || 'Approve?',
+      question: resolveOrFail(spec.question || spec.prompt || 'Approve?', ctx, node),
       choices: ['approve', 'reject'],
     });
     const approved = answer === 'approve';
     if (!approved) {
       // Signal rejection the same way Check-stop does: throw so the scheduler
-      // marks the node failed and finishes the run as failed.
-      throw new Error(`approve "${node.title}" rejected`);
+      // marks the node failed and finishes the run as failed. Never retried.
+      throw final(`approve "${node.title}" rejected`);
     }
     return { approved: true, answer };
   },
@@ -603,6 +683,42 @@ const HANDLERS = {
     return { note: `output for ${node.kind} (placeholder — no handler wired)` };
   },
 };
+
+/* ---------------------------- files to show ------------------------------ */
+
+const SHOWABLE = /\.(png|jpe?g|gif|webp|svg|mp4|webm)$/i;
+const SHOW_MAX = 12;
+
+/**
+ * Files a step asked to show, copied into the blob store so the run page can
+ * display them after the files themselves have changed or gone. `show` is a
+ * comma-separated list of paths inside the project; the last part of each
+ * may use `*`. Anything outside the project is ignored.
+ */
+function collectShown(show, ctx, node) {
+  const root = cwdOf(ctx.run) ? path.resolve(cwdOf(ctx.run)) : null;
+  if (!root) return [];
+  const patterns = resolveOrFail(String(show), ctx, node).split(',').map((x) => x.trim()).filter(Boolean);
+  const found = [];
+  for (const pattern of patterns) {
+    const full = path.resolve(root, pattern);
+    if (full !== root && !full.startsWith(root + path.sep)) continue;
+    const dir = path.dirname(full);
+    const base = path.basename(full);
+    let names = [base];
+    if (base.includes('*')) {
+      const re = new RegExp(`^${base.split('*').map((x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`);
+      try { names = fs.readdirSync(dir).filter((n) => re.test(n)).sort(); } catch { names = []; }
+    }
+    for (const name of names) {
+      const file = path.join(dir, name);
+      if (!SHOWABLE.test(name) || !fs.existsSync(file) || found.some((f) => f.file === file)) continue;
+      found.push({ file, name: path.relative(root, file), kind: /\.(mp4|webm)$/i.test(name) ? 'video' : 'image' });
+      if (found.length >= SHOW_MAX) break;
+    }
+  }
+  return found.map(({ file, name, kind }) => ({ ref: putFile(file), name, kind }));
+}
 
 /* --------------------------- Claude CLI driver --------------------------- */
 
@@ -616,10 +732,17 @@ const HANDLERS = {
  * Tests and demos set `ORDERLY_HANDLER_MODE=mock` to short-circuit the spawn
  * so the smoke suite does not bill the API on every run.
  */
-async function callClaude(prompt, { cwd, signal, model = 'sonnet', onProgress, onStream, timeoutMs = 180_000 } = {}) {
+async function callClaude(prompt, { ctx, cwd, signal, model = 'sonnet', onProgress, onStream, timeoutMs = 180_000 } = {}) {
+  ctx?.recordSent?.(prompt);
+  if (ctx?.timeoutMs) timeoutMs = ctx.timeoutMs;
   if (process.env.ORDERLY_HANDLER_MODE === 'mock') {
     onProgress?.('claude · mock');
-    await new Promise((r) => setTimeout(r, 120));
+    // A mock that can be slow, so timeouts can be tested without the API.
+    const delay = Number(process.env.ORDERLY_MOCK_DELAY_MS) || 120;
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(resolve, delay);
+      signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); }, { once: true });
+    });
     return mockReply(prompt, model);
   }
   onProgress?.(`claude · ${model} · starting…`);
@@ -662,14 +785,14 @@ async function callClaude(prompt, { cwd, signal, model = 'sonnet', onProgress, o
  *  as JSON; recognised event types feed onDelta so the card can advance. */
 function execStream(argv, { cwd, signal, timeoutMs = 180_000, onDelta } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(argv[0], argv.slice(1), { cwd, env: process.env });
+    const child = spawn(argv[0], argv.slice(1), { cwd, env: process.env, detached: true });
     let finalPayload = null;
     let text = '';
     let tokens = 0;
     let err = '';
     let stdoutBuf = '';
-    let timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} }, timeoutMs);
-    signal?.addEventListener('abort', () => { try { child.kill('SIGTERM'); } catch {} }, { once: true });
+    let timer = setTimeout(() => killTree(child), timeoutMs);
+    signal?.addEventListener('abort', () => killTree(child), { once: true });
     child.stdout.on('data', (chunk) => {
       stdoutBuf += chunk.toString();
       let nl;
@@ -695,7 +818,8 @@ function execStream(argv, { cwd, signal, timeoutMs = 180_000, onDelta } = {}) {
 /** A deterministic stub for each prompt shape. Keeps the output shape close
  *  enough to the real thing that downstream parsers behave the same. */
 function mockReply(prompt, model) {
-  const meta = { model: `mock-${model}`, cost: 0, elapsed: '0.1 s', sessionId: 'mock', tokens: 0 };
+  // ORDERLY_MOCK_COST lets the suite exercise spend limits without spending.
+  const meta = { model: `mock-${model}`, cost: Number(process.env.ORDERLY_MOCK_COST) || 0, elapsed: '0.1 s', sessionId: 'mock', tokens: 0 };
   if (/Return a JSON object .*findings/i.test(prompt)) {
     return { text: JSON.stringify({
       findings: [{ tag: 'readability', text: 'Mock finding — swap in a real review.' }],
@@ -861,10 +985,11 @@ function resolveOver(over, run) {
     if (typeof v === 'string') return v.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
     return v == null ? [] : [v];
   }
-  if (parts[0] === 'node' && parts[1]) {
+  if ((parts[0] === 'node' || parts[0] === 'nodes') && parts[1]) {
     const target = run.graph.nodes.find((n) => n.id === parts[1]);
     let v = target?.output || null;
-    for (const seg of parts.slice(2)) v = v?.[seg];
+    const path = parts[0] === 'nodes' && parts[2] === 'output' ? parts.slice(3) : parts.slice(2);
+    for (const seg of path) v = v?.[seg];
     if (Array.isArray(v)) return v;
     if (typeof v === 'string') return v.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
     return v == null ? [] : [v];
@@ -879,27 +1004,33 @@ function resolveOver(over, run) {
  */
 async function runAgentOnce(node, ctx, extraFailures = []) {
   const spec = node.spec || {};
-  const promptTail = extraFailures.length
-    ? `\n\n## Fix these on this pass\n${extraFailures.map((f) => `- ${f.type}: ${f.reason}`).join('\n')}`
-    : '';
-  const shim = {
-    ...node,
-    prompt: (spec.prompt || node.prompt || '') + promptTail,
-    model: spec.model || node.model,
-  };
+  const authored = spec.prompt || node.prompt || '';
+  let prompt = resolveOrFail(authored, ctx, node);
+  // Skills are named, not forced: the CLI decides whether one applies.
+  const uses = (spec.uses || []).filter(Boolean);
+  if (uses.length) prompt += `\n\nUse ${uses.length === 1 ? 'this skill' : 'these skills'} where ${uses.length === 1 ? 'it applies' : 'they apply'}: ${uses.join(', ')}.`;
+  if (extraFailures.length) {
+    prompt += `\n\n## Fix these on this pass\n${extraFailures.map((f) => `- ${f.type}: ${f.reason}`).join('\n')}`;
+  }
+  // Shim the spec onto the node so legacy handlers see their fields. A
+  // prompt that names its own references gets those and nothing else.
+  const shim = { ...node, prompt, model: spec.model || node.model, explicit: isExplicit(authored) };
   const out = (spec.output || 'markdown').toLowerCase();
-  if (out === 'markdown' || out === 'text')         return HANDLERS.document(shim, ctx);
+  if (out === 'markdown' || out === 'text')  return HANDLERS.document(shim, ctx);
   if (out === 'json-findings' || out === 'findings') return HANDLERS.report(shim, ctx);
-  if (out === 'html' || out === 'mockup')           return HANDLERS.mockup(shim, ctx);
-  if (out === 'json-hunks' || out === 'diff')       return HANDLERS.diff(shim, ctx);
-  const prompt = [
-    (spec.prompt || `Produce JSON for node "${node.title}".`) + promptTail,
+  if (out === 'html' || out === 'mockup')    return HANDLERS.mockup(shim, ctx);
+  if (out === 'json-hunks' || out === 'diff') return HANDLERS.diff(shim, ctx);
+  // Generic JSON — reuse the report-shape parser but return .data instead.
+  const upstream = shim.explicit ? '' : upstreamContext(node, ctx.run);
+  const jsonPrompt = [
+    prompt || `Produce JSON for node "${node.title}".`,
     inputBlock(ctx.run.inputs),
+    upstream && `## Context from earlier steps\n${upstream}`,
     '',
     'Return a JSON object and nothing else.',
   ].filter(Boolean).join('\n\n');
-  const { text, meta } = await callClaude(prompt, {
-    cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(shim, 'haiku'),
+  const { text, meta } = await callClaude(jsonPrompt, {
+    ctx, cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(shim, 'haiku'),
     onProgress: (msg) => ctx.onProgress({ progress: msg }),
   });
   return { title: `${slug(node.title)}.json`, data: extractJson(text) ?? text, meta };
@@ -1034,20 +1165,26 @@ function pickTerminalCommand(node, run) {
     const argv = typeof node.command === 'string' ? ['sh', '-c', node.command] : node.command;
     return { argv, display: typeof node.command === 'string' ? node.command : node.command.join(' ') };
   }
-  if (run.workflowId === 'visual-regression' && node.id === 'server') {
-    return { argv: ['sh', '-c', 'node -e "console.log(\'placeholder dev server ready on :5173\')"'], display: 'npm run dev' };
-  }
-  if (run.workflowId === 'ship-pr' && node.id === 'tests') {
-    return { argv: ['sh', '-c', 'echo "167 passed · placeholder"'], display: 'npm test' };
-  }
   return { argv: ['sh', '-c', `echo "node ${node.id}"`], display: `# ${node.id}` };
+}
+
+/*
+ * Kill a child and everything it started. `sh -c 'sleep 600'` forks, and
+ * killing only the shell leaves the sleep holding the output pipe open, so
+ * the step would still wait the full ten minutes. Children are spawned as
+ * their own process group so the whole group can be signalled.
+ */
+function killTree(child) {
+  if (!child.pid) return;
+  try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch {} }
+  setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, 2000).unref();
 }
 
 function exec(argv, { cwd, signal, timeoutMs = 30_000 }) {
   return new Promise((resolve) => {
     let out = '', err = '', timer = null;
-    const child = spawn(argv[0], argv.slice(1), { cwd, env: process.env });
-    const kill = (reason) => { try { child.kill('SIGTERM'); } catch {} out += reason ? `\n[${reason}]` : ''; };
+    const child = spawn(argv[0], argv.slice(1), { cwd, env: process.env, detached: true });
+    const kill = (reason) => { killTree(child); out += reason ? `\n[${reason}]` : ''; };
     timer = setTimeout(() => kill('timeout'), timeoutMs);
     signal?.addEventListener('abort', () => kill('aborted'), { once: true });
     child.stdout.on('data', (d) => { out += d.toString(); });

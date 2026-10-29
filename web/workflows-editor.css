@@ -1,0 +1,98 @@
+/*
+ * Additions to the workflow editor (workflow-editor.html), whose own layout
+ * and card styles live inline in that page. Nothing here restyles what the
+ * page already styles; it only adds the pieces for references, previews,
+ * limits, inputs and workflow settings.
+ */
+.hidden { display: none !important; }
+.ed-side .hint { color: var(--faint); font: 10.5px/1.45 var(--f-ui); letter-spacing: 0; text-transform: none; }
+.ed-side .block-hint { display: block; margin: 2px 0 8px; }
+.ed-side .sub-h { margin: 18px 0 6px; }
+.ed-side .count { font: 11px var(--f-mono); color: var(--faint); }
+.ed-side textarea.short { min-height: 52px; font: 13px/1.45 var(--f-ui); }
+.ed-side .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.ed-side .row2 label { margin-top: 4px; }
+.ed-side .check-line { display: flex; gap: 8px; align-items: flex-start; text-transform: none; letter-spacing: 0;
+  font: 12px var(--f-ui); color: var(--text); margin: 10px 0 0; }
+.ed-side .check-line input { width: auto; margin: 3px 0 0; }
+.ed-side .check-line .hint { display: block; }
+.ed-side .sel-kind { font: 11.5px/1.45 var(--f-ui); color: var(--mute); margin: -4px 0 8px; }
+.money { display: flex; align-items: center; gap: 6px; }
+.money span { font: 13px var(--f-mono); color: var(--mute); margin-bottom: 6px; }
+.file-btn { cursor: pointer; display: inline-block; }
+.ed-side .btn-row { margin-top: 8px; }
+
+.save-line { font: 11px var(--f-mono); color: var(--faint); margin-left: 6px; white-space: nowrap; }
+.save-line.dirty { color: var(--amber); }
+.save-line.clean { color: #90d6b0; }
+.banner { font: 12.5px/1.5 var(--f-ui); color: var(--text); padding: 9px 24px;
+  background: color-mix(in oklab, var(--amber) 10%, var(--surface)); border-bottom: 1px solid color-mix(in oklab, var(--amber) 30%, transparent); }
+.kind-desc { font: 11px/1.4 var(--f-ui); color: var(--faint); margin: 4px 0 0; min-height: 15px; }
+.ed-empty { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); pointer-events: none;
+  font: 13px var(--f-ui); color: var(--faint); text-align: center; max-width: 420px; }
+.ed-empty b { color: var(--mute); font-weight: 500; }
+
+/* Rows for inputs, choices and fields. */
+.list-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 4px; margin-bottom: 4px; align-items: center; }
+.list-row.three { grid-template-columns: 1fr 1fr 58px auto; }
+.list-row input, .list-row select { margin: 0 !important; padding: 5px 8px !important; font: 11.5px var(--f-mono) !important; }
+.list-row .wide { grid-column: 1 / 3; }
+.list-row.three .wide { grid-column: 1 / 4; }
+.list-row .tick { display: flex; align-items: center; gap: 4px; font: 10.5px var(--f-ui); color: var(--mute);
+  white-space: nowrap; text-transform: none; letter-spacing: 0; margin: 0; }
+.list-row .tick input { width: auto; margin: 0; }
+.list-row .x { padding: 3px 8px; }
+.list-empty { font: 11.5px var(--f-ui); color: var(--faint); margin: 0 0 6px; }
+.pick-list { display: flex; flex-direction: column; gap: 3px; max-height: 160px; overflow: auto; margin-bottom: 6px;
+  border: 1px solid var(--edge-tint); border-radius: 6px; padding: 6px 8px; background: var(--bg); }
+.pick-list label { display: flex !important; gap: 8px; align-items: baseline; margin: 0 !important; text-transform: none !important;
+  letter-spacing: 0 !important; font: 12px var(--f-ui) !important; color: var(--text) !important; }
+.pick-list input { width: auto !important; margin: 0 !important; }
+.pick-list .pd { color: var(--faint); font-size: 10.5px; }
+
+/* References: an insert button by the field, a popover, a live preview. */
+.field-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.ref-btn { font: 10.5px var(--f-mono); color: var(--accent); background: transparent; border: 0; padding: 0; margin: 4px 0; cursor: pointer; }
+.ref-btn:hover { text-decoration: underline; }
+.ref-pop { position: fixed; z-index: 60; width: 320px; max-height: 340px; overflow: auto;
+  background: var(--raised); border: 1px solid var(--edge-hi); border-radius: 10px; padding: 6px; box-shadow: 0 18px 50px rgba(0,0,0,.5); }
+.ref-pop .rg { font: 10px var(--f-mono); color: var(--faint); letter-spacing: .08em; text-transform: uppercase; padding: 6px 8px 2px; }
+.ref-pop button { display: flex; flex-direction: column; gap: 1px; width: 100%; text-align: left; padding: 6px 8px;
+  background: transparent; border: 0; border-radius: 6px; color: var(--text); cursor: pointer; }
+.ref-pop button:hover, .ref-pop button:focus { background: color-mix(in oklab, var(--accent) 14%, transparent); outline: none; }
+.ref-pop .rt { font: 11.5px var(--f-mono); color: var(--accent); }
+.ref-pop .rd { font: 11px var(--f-ui); color: var(--mute); }
+.ref-pop .none { font: 12px/1.45 var(--f-ui); color: var(--mute); padding: 8px; }
+.preview { margin-top: 10px; border: 1px solid var(--edge-tint); border-radius: 8px; background: var(--bg); }
+.preview-h { display: flex; justify-content: space-between; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--edge-tint);
+  font: 10.5px var(--f-mono); color: var(--mute); }
+.preview-src { color: var(--faint); }
+.preview pre { margin: 0; padding: 8px 10px; max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  font: 11.5px/1.5 var(--f-mono); color: var(--text); }
+.preview-missing { font: 11px/1.45 var(--f-ui); color: var(--amber); padding: 0 10px 8px; }
+.preview-missing:empty { display: none; }
+.advanced { margin-top: 12px; border-top: 1px dashed var(--edge-tint); padding-top: 8px; }
+.advanced > summary { cursor: pointer; font: 11.5px var(--f-ui); color: var(--mute); }
+
+/* Edge rows: a Decision's branch is picked, not typed. */
+.edge-row .lbl-pick { font: 10px var(--f-mono); color: var(--accent); background: var(--bg); width: auto; margin: 0 0 0 6px;
+  padding: 1px 4px; border-radius: 999px; border: 1px solid color-mix(in oklab, var(--accent) 40%, transparent); }
+.edge-row.flash { border-color: var(--accent); }
+
+/* Cards: what the step does, and anything to fix. */
+.n-card .n-what { font: 11px/1.4 var(--f-mono); color: var(--mute); overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.n-card .n-flags { color: var(--faint); }
+.n-card .n-flags .bad { color: var(--ship); }
+.n-card.has-problem { box-shadow: 0 0 0 1px color-mix(in oklab, var(--ship) 55%, transparent); }
+.n-card.connect-target:hover { border-color: var(--design); }
+.warnings { border-radius: 6px; padding: 8px 10px; font: 11.5px/1.5 var(--f-ui); color: var(--text); margin-top: 8px;
+  background: color-mix(in oklab, var(--amber) 8%, transparent); border: 1px solid color-mix(in oklab, var(--amber) 25%, transparent); }
+.problems ul, .warnings ul { margin: 4px 0 0; padding-left: 16px; }
+.ed-toast .status .act { color: var(--accent); background: none; border: 0; padding: 0; font: inherit; text-decoration: underline; cursor: pointer; }
+.hdr-problems { font: 11px var(--f-mono); color: var(--ship); cursor: pointer; background: none; border: 0; padding: 0 4px; }
+.run-btn.on { color: var(--accent); border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, transparent); }
+.ref-btn { white-space: nowrap; }
+.field-head label { flex: 1; }
+/* The name leads and gets the room; the short name is a short name. */
+header.wf-header { grid-template-columns: 1fr 200px 150px auto; }

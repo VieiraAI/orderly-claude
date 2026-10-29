@@ -180,16 +180,19 @@ window.toggleDecisionMark = toggleDecisionMark;
 function workflowBubble(run) {
   const done = run.doneNodes ?? 0;
   const total = run.totalNodes ?? 0;
+  const waiting = run.status === 'awaiting-answer' || !!run.needsYou;
   const live = run.status === 'running';
-  const waiting = run.status === 'awaiting-answer';
   const failed = run.status === 'failed';
   const stopped = run.status === 'stopped';
-  const sub = waiting ? `waiting · ${run.askingLabel || 'needs you'}`
+  const cut = run.status === 'interrupted';
+  const sub = waiting ? `waiting for you · ${run.needsYou?.title || run.askingLabel || 'a question'}`
     : live     ? (run.runningLabel ? run.runningLabel : `step ${done} of ${total}`)
-    : failed   ? 'failed'
+    : failed   ? (run.halt ? 'stopped at its spend limit' : run.failedNode ? `failed at ${run.failedNode.title}` : 'failed')
     : stopped  ? 'stopped'
+    // Not "done": it was cut short, and the Runs page can pick it back up.
+    : cut      ? `cut short at ${done} of ${total} — resume it from Runs`
     : `done · ${done} of ${total}`;
-  const toneCls = waiting ? 'ask' : live ? 'running' : failed ? 'warn' : stopped ? 'warn' : 'done';
+  const toneCls = waiting ? 'ask' : live ? 'running' : (failed || stopped || cut) ? 'warn' : 'done';
   return el('a', {
     class: `bubble workflow tone-${toneCls}`,
     href: `/workflows-run.html#${run.runId}`,

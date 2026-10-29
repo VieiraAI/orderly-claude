@@ -1,11 +1,13 @@
 <!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Workflow editor — Orderly Claude</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/workflows.css">
+<link rel="stylesheet" href="/workflows-editor.css">
 <style>
   .ed-layout { display: grid; grid-template-columns: 1fr 320px; gap: 0; height: calc(100vh - 56px); }
   .ed-canvas { position: relative; overflow: auto;
@@ -185,19 +187,19 @@
 </nav>
 
 <header class="wf-header">
-  <div class="wf-field wf-id">
-    <label for="wfId">Workflow id</label>
-    <input id="wfId" spellcheck="false" placeholder="hyphenated-id">
-  </div>
   <div class="wf-field wf-title">
-    <label for="wfTitle">Title</label>
-    <input id="wfTitle" placeholder="Human-readable title">
+    <label for="wfTitle">Name</label>
+    <input id="wfTitle" placeholder="Weekly report">
+  </div>
+  <div class="wf-field wf-id">
+    <label for="wfId">Short name</label>
+    <input id="wfId" spellcheck="false" placeholder="weekly-report">
   </div>
   <div class="wf-field">
-    <label for="wfScope">Save to</label>
-    <select id="wfScope">
+    <label for="wfScope">Keep it in</label>
+    <select id="wfScope" title="">
+      <option value="user">your library</option>
       <option value="project">this project</option>
-      <option value="user">global library</option>
     </select>
   </div>
   <div class="wf-actions">
@@ -205,31 +207,8 @@
       <button class="add-btn" id="btnAddNodeOpen">+ Add node</button>
       <div class="add-pop" id="addPop">
         <label for="newKind">Kind</label>
-        <select id="newKind">
-          <optgroup label="v2">
-            <option value="agent">agent — call Claude</option>
-            <option value="script">script — shell / capture</option>
-            <option value="decision">decision — human picks a branch</option>
-            <option value="check">check — pass / fail gate</option>
-            <option value="publish">publish — PR / file / Slack</option>
-            <option value="display">display — show upstream data</option>
-            <option value="inputs">inputs — collect fields</option>
-            <option value="loop">loop — map over an array</option>
-            <option value="delay">delay — wait</option>
-            <option value="approve">approve — human click-through</option>
-          </optgroup>
-          <optgroup label="legacy">
-            <option value="document">document</option>
-            <option value="report">report</option>
-            <option value="mockup">mockup</option>
-            <option value="diff">diff</option>
-            <option value="shots">shots</option>
-            <option value="shots-set">shots-set</option>
-            <option value="terminal">terminal</option>
-            <option value="ask">ask</option>
-            <option value="pr">pr</option>
-          </optgroup>
-        </select>
+        <select id="newKind"></select>
+        <div class="kind-desc" id="newKindDesc"></div>
         <label for="newAfter">After (input from)</label>
         <select id="newAfter"><option value="">— none —</option></select>
         <label for="newBefore">Before (next, optional)</label>
@@ -237,11 +216,17 @@
         <button class="add-btn add-pop-cta" id="btnAddNode">+ Add to canvas</button>
       </div>
     </div>
-    <button class="run-btn" id="btnValidate">✓ validate</button>
+    <button class="run-btn" id="btnTidy" title="Line the steps up left to right, in the order they run">⤳ Tidy</button>
+    <button class="run-btn" id="btnSettings" title="Description, inputs, spend limits, import and export">⚙ Settings</button>
+    <button class="run-btn" id="btnValidate">✓ check</button>
     <button class="run-btn" id="btnSave" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent);">◆ save</button>
-    <button class="run-btn" id="btnRun" title="Save, then start a run of this workflow">▶ run</button>
+    <button class="run-btn" id="btnRun" title="Save, then fill in its inputs and run it">▶ run</button>
+    <span class="save-line" id="saveLine">Not saved yet</span>
   </div>
 </header>
+<div class="banner hidden" id="builtinBanner">
+  Built-in workflows can't be changed. Saving makes <b>your own copy</b>, which replaces the built-in in your catalog. Delete your copy any time to get the original back.
+</div>
 <script type="module">
   import { mountAppMenu } from '/app-menu.mjs';
   mountAppMenu(document.getElementById('appMenu'), { here: 'workflows' });
@@ -264,41 +249,82 @@
       <button id="modeJson">{ } JSON</button>
     </div>
 
+    <div class="block" id="settingsBlock" style="display:none;">
+      <h3>Workflow</h3>
+      <label for="wfDesc">What it's for</label>
+      <textarea id="wfDesc" class="short" placeholder="One line on what this does and when to use it."></textarea>
+      <div class="row2">
+        <div><label for="wfCategory">Kind of work</label>
+          <select id="wfCategory"><option value="build">Build</option><option value="review">Review</option><option value="ship">Ship</option><option value="design">Design</option><option value="plan">Plan</option><option value="content">Content</option></select></div>
+        <div><label for="wfEstimate">Takes about</label><input id="wfEstimate" placeholder="5 min"></div>
+      </div>
+      <div class="hint block-hint" id="scopeHint"></div>
+
+      <h3 class="sub-h">Inputs <span class="count" id="inputsCount"></span></h3>
+      <div class="hint block-hint">What someone fills in each time they run it. Any step can use one as <code>{{inputs.<i>key</i>}}</code>.</div>
+      <div id="inputsList"></div>
+      <button class="run-btn" id="btnAddInput">+ add input</button>
+
+      <h3 class="sub-h">Limits</h3>
+      <label for="wfBudget">Stop a run once it has spent <span class="hint">empty = no limit</span></label>
+      <div class="money"><span>$</span><input id="wfBudget" inputmode="decimal" placeholder="no limit"></div>
+      <label for="wfConcurrency">Steps that may run at once</label>
+      <select id="wfConcurrency"><option value="">Default (4)</option><option>1</option><option>2</option><option>3</option><option>4</option><option>6</option><option>8</option></select>
+
+      <h3 class="sub-h">File</h3>
+      <div class="btn-row">
+        <button class="run-btn" id="btnExport">↓ Export</button>
+        <label class="run-btn file-btn">↑ Import<input type="file" id="importFile" accept=".json,application/json" hidden></label>
+        <button class="run-btn danger" id="btnDeleteWf">Delete</button>
+      </div>
+      <div class="btn-row"><button class="run-btn" id="btnCloseSettings">Done</button></div>
+    </div>
+
     <div class="block" id="selBlock">
-      <h3>Selected node</h3>
-      <label>id</label><input id="selId" spellcheck="false">
-      <label>title</label><input id="selTitle">
-      <label>kind</label>
-      <select id="selKind">
-        <optgroup label="v2">
-          <option>agent</option><option>script</option><option>decision</option>
-          <option>check</option><option>publish</option><option>display</option>
-          <option>inputs</option><option>loop</option><option>delay</option>
-          <option>approve</option>
-        </optgroup>
-        <optgroup label="legacy">
-          <option>document</option><option>report</option><option>mockup</option>
-          <option>diff</option><option>shots</option><option>shots-set</option>
-          <option>terminal</option><option>ask</option><option>pr</option>
-        </optgroup>
-      </select>
-      <label>cost</label><input id="selCost" type="number" min="0" step="1" value="1">
+      <h3 id="selSummary">Selected step</h3>
+      <div class="sel-kind" id="selKindLine"></div>
+      <label for="selTitle">Name</label><input id="selTitle">
+      <label for="selId">Short name <span class="hint">other steps use it in references</span></label><input id="selId" spellcheck="false">
+      <label for="selKind">Kind</label>
+      <select id="selKind"></select>
       <!-- Per-kind spec editor; populated by the editor script. -->
       <div id="selSpec" class="spec-form"></div>
+      <div class="preview hidden" id="preview">
+        <div class="preview-h"><span>Will send</span><span class="preview-src" id="previewSrc"></span></div>
+        <pre id="previewText"></pre>
+        <div class="preview-missing" id="previewMissing"></div>
+      </div>
+      <details class="advanced" id="advanced">
+        <summary>If it fails or hangs</summary>
+        <div class="row2">
+          <div><label for="advRetries">Try again</label>
+            <select id="advRetries"><option value="0">No</option><option value="1">Once</option><option value="2">Twice</option><option value="3">3 times</option><option value="5">5 times</option></select></div>
+          <div><label for="advBackoff">Wait between tries</label>
+            <select id="advBackoff"><option value="2000">2 s</option><option value="10000">10 s</option><option value="30000">30 s</option><option value="60000">1 min</option></select></div>
+        </div>
+        <label for="advTimeout">Give up after</label>
+        <select id="advTimeout"><option value="">Default</option><option value="30000">30 seconds</option><option value="120000">2 minutes</option><option value="600000">10 minutes</option><option value="1800000">30 minutes</option><option value="3600000">1 hour</option></select>
+        <label class="check-line" id="advIdemLine"><input type="checkbox" id="advIdem"> Safe to run twice <span class="hint">untick for a deploy or a push — Resume will then ask before repeating it</span></label>
+        <label class="check-line" id="advAllowLine"><input type="checkbox" id="advAllow"> Keep going if the command fails <span class="hint">so a later Check can look at the result</span></label>
+        <label for="selCost">Weight on the card <span class="hint">shown as ⚡; does not change what runs</span></label><input id="selCost" type="number" min="0" step="1" value="1">
+      </details>
       <!-- Flow editor: incoming (comes after) and outgoing (goes before). -->
       <div id="selEdges" class="edges-form"></div>
       <div class="btn-row" style="margin-top:6px;">
-        <button class="run-btn" id="btnConnect" title="Click a target node after this to draw an edge">↝ connect to…</button>
-        <button class="run-btn danger" id="btnDelete">✕ delete</button>
+        <button class="run-btn" id="btnConnect" title="Then click the step that should come after this one">↝ Connect to…</button>
+        <button class="run-btn danger" id="btnDelete">✕ Remove step</button>
       </div>
     </div>
   </aside>
 </div>
 <!-- Validation feedback as a floating toast at the bottom of the canvas. -->
 <div class="ed-toast" id="edToast" style="display:none;">
-  <div id="status" class="status"></div>
+  <div id="status" class="status" role="status"></div>
   <div id="problems" class="problems" style="display:none;"></div>
+  <div id="warnings" class="warnings" style="display:none;"></div>
 </div>
+<div class="ed-empty" id="edEmpty">Start with <b>+ Add node</b>. Each step's <b>Comes after</b> list joins it to the others.</div>
+<div class="ref-pop hidden" id="refPop" role="listbox"></div>
 
 <script type="module" src="/workflow-editor.mjs"></script>
 </body></html>

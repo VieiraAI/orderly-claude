@@ -79,6 +79,56 @@ transcript leaves your machine, and it works on sessions that already happened.
   Enter sends, Shift+Enter starts a new line, and the box grows with it. Each
   tab runs on its own, so a prompt in one never waits behind another.
 
+## Workflows
+
+A workflow is a job you run the same way every time — the steps you would
+otherwise type out one prompt at a time. You build it, it is yours, and it
+runs on your machine.
+
+- **Build one without writing a file.** Open **Workflows → + New workflow**
+  and add steps from plain-language kinds: *Ask Claude*, *Run a command*,
+  *Ask me to choose*, *Ask me to approve*, *Check*, *Repeat for each*,
+  *Save or publish*. Connect them in the order they should run. Every
+  setting the engine reads has a field in the panel; the file view is there
+  to diff, not to author in. Or start from a built-in with **Make it yours**.
+- **Steps name what they use.** `{{inputs.audience}}` is something typed when
+  the run starts; `{{nodes.research.output}}` is what an earlier step made,
+  and `{{nodes.tests.output.code}}` one field of it. **+ insert** offers only
+  what is upstream, and a live preview shows what will actually be sent,
+  using the last run. Naming a step that runs later is caught before you
+  can save. A value put into a shell command is quoted, so a model's output
+  can never become a command.
+- **Failures fail.** A command that exits non-zero fails its step, as in any
+  build system — tick *keep going* to let a later Check look at it instead.
+  Steps can retry with a growing wait, give up after a set time, and a run
+  never has more than a few steps going at once.
+- **Money has a ceiling.** Set a spend limit on a workflow, or one for every
+  run you start; a run stops before the step that would cross it and says
+  how much it spent. Raise the limit and it carries on without redoing what
+  it already paid for.
+- **The Runs page is the control panel.** What is running, what is waiting
+  on you — answer it right there — what failed and at which step, what it
+  cost. Click a run for each step's drill-down: what it was set to do, what
+  it was actually given, what it produced, why it failed, a timeline.
+- **Nothing is lost when Orderly closes.** A run cut short is marked so, not
+  left pretending to run, and **Resume** carries on from the step it was on.
+  A question you had not answered is still there, and can be answered after
+  a restart. A step marked *not safe to run twice* — a deploy, a push — is
+  never repeated without asking whether it already happened.
+- **Reruns repeat what ran.** Every run keeps the version of the workflow it
+  used, so editing a workflow never changes a run you already have.
+- **Schedules, honestly.** Set a workflow to repeat daily, weekly, or every
+  few hours. It runs **only while Orderly is open on this machine**: a time
+  slept through is counted as missed and never made up later, so you never
+  come back to a pile of runs you did not ask for. Every schedule carries a
+  spend limit, and scheduled runs share a daily one.
+- **Share them.** Export a workflow as one file; import one someone sent you.
+  Schedules stay yours — exporting shares the process, not your 7am.
+
+Still drafts, not actions: the *publish as pull request* step writes the
+title and description but does not open the PR on GitHub. See
+[docs/workflows-plan.md](docs/workflows-plan.md) for the design and what is next.
+
 ## Install
 
 Node 20 or newer. There are no npm dependencies to install.
@@ -200,7 +250,11 @@ npm test
 
 Boots a real server against a real session on disk, exercises every API
 route, then loads the page in headless Chrome and checks it rendered with no
-console errors, in both themes.
+console errors, in both themes. The workflow checks (`test/workflow-engine.mjs`,
+also runnable on its own) boot throwaway servers in a temp project, crash and
+restart them to test recovery, and drive the editor, Runs page and run page
+in Chrome. The suite never touches your real schedules or spend limits, and
+removes any run it starts.
 
 ## Layout
 
@@ -211,6 +265,8 @@ src/server/             HTTP API and server-sent events
 web/                    the UI
 plugin/                 the Claude Code mod (terminal pane)
 test/smoke.mjs          end-to-end smoke test
+test/workflow-engine.mjs  workflows: engine, durability, schedules, pages
+docs/                   design notes
 ```
 
 ## Contributing
