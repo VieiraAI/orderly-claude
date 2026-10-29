@@ -406,8 +406,10 @@ function makeCard(n, pos, parent) {
   // The model label on the head uses the real model that ran if we have it,
   // otherwise a kind-level default. Same with the credit on the foot.
   const meta = n.output?.meta || {};
+  // The model that actually ran, once known; it already says "claude".
   const modelLabel = meta.model
-    ? `claude · ${esc(meta.model)}`
+    ? esc(String(meta.model).replace(/^claude-/, 'claude · '))
+    : n.kind === 'publish' ? (n.spec?.target === 'pr' ? 'draft PR' : 'file')
     : (KIND_MODEL[n.kind] || '');
   const footMeta = cardFootMeta(n, meta);
   card.innerHTML = `
@@ -555,7 +557,7 @@ function cardBody(n) {
       const prompt = esc(o.prompt || '$ (command)');
       const lines = (o.out || '').split('\n').slice(0, 6).map((l) => esc(l) || '&nbsp;').join('<br>');
       const status = o.status ? `<div class="term-status">${esc(o.status)}</div>` : '';
-      return `<div class="term"><div class="term-prompt">${prompt}</div><div class="term-out">${lines}</div>${status}</div>`;
+      return `${shownStrip(o.images)}<div class="term"><div class="term-prompt">${prompt}</div><div class="term-out">${lines}</div>${status}</div>`;
     }
     case 'pr':
       return `
@@ -587,6 +589,16 @@ function cardBody(n) {
     }
     default: return `<div class="doc-b">output ready</div>`;
   }
+}
+
+/** What a step made and asked to show — pictures, and clips that play. */
+function shownStrip(images) {
+  if (!images?.length) return '';
+  const tiles = images.slice(0, 4).map((m) => m.kind === 'video'
+    ? `<video class="shown" src="${blobUrl(m.ref)}" muted loop autoplay playsinline title="${esc(m.name)}"></video>`
+    : `<a class="shown" href="${blobUrl(m.ref)}" target="_blank" style="background-image:url('${blobUrl(m.ref)}')" title="${esc(m.name)}"></a>`).join('');
+  const more = images.length > 4 ? `<span class="shown-more">+${images.length - 4}</span>` : '';
+  return `<div class="shown-strip">${tiles}${more}</div>`;
 }
 
 function drawEdges(canvas, edges) {
@@ -673,6 +685,9 @@ function openDrawer(id, { keepScroll = false } = {}) {
     ${n.lastError && n.status !== 'failed' ? sec('Earlier try failed', `<div class="dr-note">${esc(n.lastError)}</div>`) : ''}
     ${sec('Set up to', authored ? pre(authored) : '')}
     ${sec('What it was given', n.sent && n.sent.replace(/^\$ /, '') !== authored ? pre(n.sent) : '')}
+    ${sec('What it made', o.images?.length ? `<div class="dr-shown">${o.images.map((m) => m.kind === 'video'
+      ? `<figure><video src="${blobUrl(m.ref)}" controls muted loop autoplay playsinline></video><figcaption>${esc(m.name)}</figcaption></figure>`
+      : `<figure><a href="${blobUrl(m.ref)}" target="_blank"><img src="${blobUrl(m.ref)}" alt="${esc(m.name)}"></a><figcaption>${esc(m.name)}</figcaption></figure>`).join('')}</div>` : '')}
     ${sec('What it produced', made)}
     ${terminal && n.status !== 'pending' ? `<button class="run-btn" id="drRerun">⟲ Repeat from this step</button>` : ''}`;
   body.querySelector('#drRerun')?.addEventListener('click', () => rerunFromCanvas(n.id));

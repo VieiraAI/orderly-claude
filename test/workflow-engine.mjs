@@ -207,6 +207,21 @@ export async function runWorkflowEngineChecks({ check, session }) {
       node(r, 'w')?.status === 'failed' && /outside the project/.test(node(r, 'w')?.output?.error || '') && !fs.existsSync(path.join(tmp, 'outside.md')),
       node(r, 'w')?.output?.error);
 
+    // A 1×1 PNG, written twice inside the project and once outside it.
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    await save({ id: 'shows', title: 'Shows', graph: { nodes: [
+      script('make', `mkdir -p out && echo ${png} | base64 -d > out/a.png && cp out/a.png out/b.png && cp out/a.png ../outside.png`,
+        { show: 'out/*.png, ../outside.png' }),
+    ], edges: [] } });
+    r = await until((await start('shows')).run.runId, settled);
+    const shown = node(r, 'make')?.output?.images || [];
+    check('a command step shows the pictures it made', shown.length === 2 && shown.map((x) => x.name).join() === 'out/a.png,out/b.png',
+      JSON.stringify(shown.map((x) => x.name)));
+    check('…and never a file outside the project, even when asked', !shown.some((x) => /outside/.test(x.name)));
+    const sha = /^blob:sha256:([a-f0-9]{64})/.exec(shown[0]?.ref || '')?.[1];
+    const img = sha ? await fetch(`${base}/api/blob?sha=${sha}`) : null;
+    check('a shown picture is kept, and served as an image', img?.status === 200 && img.headers.get('content-type') === 'image/png');
+
     /* --------------------------- versions, reruns --------------------------- */
     console.log('\nWorkflows: versions\n');
 
@@ -565,6 +580,16 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     p = await open('/workflows-new.html?id=page-check');
     r = await p.ev(`return { path: location.pathname, cards: document.querySelectorAll('.n-card').length, edges: document.querySelectorAll('#edEdges .edge-hit').length, inputs: document.querySelectorAll('#inputsList .list-row').length };`);
     check('a saved workflow reopens as it was left, old links included', r.path === '/workflow-editor.html' && r.cards === 2 && r.edges === 1 && r.inputs === 1, JSON.stringify(r));
+    await p.close();
+    // "refs" was saved with both steps in the same spot; Tidy lines them up.
+    p = await open('/workflow-editor.html?from=refs');
+    r = await p.ev(`
+      const left = (id) => parseFloat(document.querySelector('.n-card[data-id="' + id + '"]').style.left);
+      const before = [left('src'), left('use')];
+      document.getElementById('btnTidy').click(); ${tick}
+      return { before, after: [left('src'), left('use')] };`);
+    check('Tidy lines steps up left to right in the order they run', r.before[0] === r.before[1] && r.after[0] < r.after[1], JSON.stringify(r));
+    check('Tidy raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
     // ship-pr was copied into this project above, and that copy rightly
     // shadows the built-in; visual-regression is still only a built-in.

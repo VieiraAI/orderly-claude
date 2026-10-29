@@ -300,7 +300,11 @@ const HANDLERS = {
     // Substituted values are quoted, so an output cannot become a command.
     const raw = spec.cmd || node.command;
     const command = typeof raw === 'string' ? resolveOrFail(raw, ctx, node, { mode: 'shell' }) : raw;
-    return HANDLERS.terminal({ ...node, command }, ctx);
+    const output = await HANDLERS.terminal({ ...node, command }, ctx);
+    // Pictures or clips the command made, shown on the run page — so a
+    // person can see what they are about to approve.
+    if (spec.show) output.images = collectShown(spec.show, ctx, node);
+    return output;
   },
 
   decision: async (node, ctx) => {
@@ -513,6 +517,42 @@ const HANDLERS = {
     return { note: `output for ${node.kind} (placeholder — no handler wired)` };
   },
 };
+
+/* ---------------------------- files to show ------------------------------ */
+
+const SHOWABLE = /\.(png|jpe?g|gif|webp|svg|mp4|webm)$/i;
+const SHOW_MAX = 12;
+
+/**
+ * Files a step asked to show, copied into the blob store so the run page can
+ * display them after the files themselves have changed or gone. `show` is a
+ * comma-separated list of paths inside the project; the last part of each
+ * may use `*`. Anything outside the project is ignored.
+ */
+function collectShown(show, ctx, node) {
+  const root = ctx.run.repoRoot ? path.resolve(ctx.run.repoRoot) : null;
+  if (!root) return [];
+  const patterns = resolveOrFail(String(show), ctx, node).split(',').map((x) => x.trim()).filter(Boolean);
+  const found = [];
+  for (const pattern of patterns) {
+    const full = path.resolve(root, pattern);
+    if (full !== root && !full.startsWith(root + path.sep)) continue;
+    const dir = path.dirname(full);
+    const base = path.basename(full);
+    let names = [base];
+    if (base.includes('*')) {
+      const re = new RegExp(`^${base.split('*').map((x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`);
+      try { names = fs.readdirSync(dir).filter((n) => re.test(n)).sort(); } catch { names = []; }
+    }
+    for (const name of names) {
+      const file = path.join(dir, name);
+      if (!SHOWABLE.test(name) || !fs.existsSync(file) || found.some((f) => f.file === file)) continue;
+      found.push({ file, name: path.relative(root, file), kind: /\.(mp4|webm)$/i.test(name) ? 'video' : 'image' });
+      if (found.length >= SHOW_MAX) break;
+    }
+  }
+  return found.map(({ file, name, kind }) => ({ ref: putFile(file), name, kind }));
+}
 
 /* --------------------------- Claude CLI driver --------------------------- */
 
