@@ -65,13 +65,13 @@ export function getHandler(kind) {
 }
 
 const HANDLERS = {
-  terminal: async (node, { run, onProgress, signal, timeoutMs, recordSent }) => {
+  terminal: async (node, { run, onProgress, signal, timeoutMs, recordSent, onData }) => {
     const cmd = pickTerminalCommand(node, run);
     const started = Date.now();
     onProgress({ progress: `$ ${cmd.display}` });
     recordSent?.(`$ ${cmd.display}`);
     // Ten minutes by default: a real test suite takes longer than a minute.
-    const res = await exec(cmd.argv, { cwd: cwdOf(run), signal, timeoutMs: timeoutMs || 600_000 });
+    const res = await exec(cmd.argv, { cwd: cwdOf(run), signal, timeoutMs: timeoutMs || 600_000, onData });
     const elapsed = ((Date.now() - started) / 1000).toFixed(2);
     const text = [res.out, res.err].filter(Boolean).join('\n').trim();
     const output = {
@@ -324,10 +324,18 @@ const HANDLERS = {
     // Substituted values are quoted, so an output cannot become a command.
     const raw = spec.cmd || node.command;
     const command = typeof raw === 'string' ? resolveOrFail(raw, ctx, node, { mode: 'shell' }) : raw;
-    const output = await HANDLERS.terminal({ ...node, command }, ctx);
+    const live = watchScript(spec.show, ctx, node);
+    let output;
+    try {
+      output = await HANDLERS.terminal({ ...node, command }, { ...ctx, onData: live.onData });
+    } finally {
+      live.stop();
+    }
     // Pictures or clips the command made, shown on the run page — so a
-    // person can see what they are about to approve.
-    if (spec.show) output.images = collectShown(spec.show, ctx, node);
+    // person can see what they are about to approve. Unlike the live view,
+    // this shows every match, so a step that skipped pictures it had already
+    // drawn still shows them at the end.
+    if (spec.show) output.images = collectShown(spec.show, ctx, node, live.stored);
     return output;
   },
 
@@ -645,7 +653,12 @@ const SHOW_MAX = 48;
  * comma-separated list of paths inside the project; the last part of each
  * may use `*`. Anything outside the project is ignored.
  */
-function collectShown(show, ctx, node) {
+function collectShown(show, ctx, node, stored) {
+  return matchShown(show, ctx, node).map(({ file, name, kind }) => ({ ref: storedRef(file, stored) || putFile(file), name, kind }));
+}
+
+/** The files a step's show globs match, in order, inside the project only. */
+function matchShown(show, ctx, node) {
   const root = cwdOf(ctx.run) ? path.resolve(cwdOf(ctx.run)) : null;
   if (!root) return [];
   const patterns = resolveOrFail(String(show), ctx, node).split(',').map((x) => x.trim()).filter(Boolean);
@@ -667,7 +680,83 @@ function collectShown(show, ctx, node) {
       if (found.length >= SHOW_MAX) break;
     }
   }
-  return found.map(({ file, name, kind }) => ({ ref: putFile(file), name, kind }));
+  return found;
+}
+
+/** The blob already kept for a file, if it has not changed since. */
+function storedRef(file, stored) {
+  if (!stored) return null;
+  try {
+    const st = fs.statSync(file);
+    return stored.get(`${file}:${st.size}:${st.mtimeMs}`) || null;
+  } catch { return null; }
+}
+
+// How often a running command step looks for new pictures and output.
+const LIVE_TICK_MS = 2000;
+
+/**
+ * Show a running command step's progress: the last few lines it printed and,
+ * when it has show globs, each picture as soon as it is finished — a step
+ * that draws twenty pictures over a quarter of an hour shows each one as it
+ * lands, not all of them at the end.
+ *
+ * A picture is kept only once it has stopped growing (same size and time on
+ * two looks in a row), so a half-written file never shows. A picture that
+ * was already there when the step started and has not changed since is not
+ * shown while it runs: it is not this run's work. The final collect still
+ * shows it.
+ *
+ * Steps without show globs never look at the disk; the timer only sends the
+ * output when it changed.
+ */
+function watchScript(show, ctx, node) {
+  const stored = new Map();   // file:size:mtime → blob ref
+  let recent = '';
+  let sent = '';
+  let timer = null;
+  const onData = (d) => { recent = (recent + d).slice(-4000); };
+  const tail = () => recent.split('\n')
+    // A progress bar redraws its line with \r; keep what it says last.
+    .map((l) => l.split('\r').pop().trimEnd().slice(0, 200))
+    .filter(Boolean).slice(-6).join('\n');
+  let before = null;          // file → mtime when the step started
+  const last = new Map();     // file → size:mtime at the previous look
+  if (show) {
+    try {
+      before = new Map(matchShown(show, ctx, node).map((f) => [f.file, statKey(f.file)]));
+    } catch { show = null; }
+    // A step run again starts with an empty view, not last time's pictures.
+    ctx.onProgress({ partialOutput: { images: [], out: '' } });
+  }
+  sent = JSON.stringify(show ? { out: '', images: [] } : { out: '' });
+  const look = () => {
+    try {
+      const update = { out: tail() };
+      if (show) {
+        const images = [];
+        for (const f of matchShown(show, ctx, node)) {
+          const now = statKey(f.file);
+          if (!now || before.get(f.file) === now) continue;
+          const key = `${f.file}:${now}`;
+          if (!stored.has(key) && last.get(f.file) === now) stored.set(key, putFile(f.file));
+          last.set(f.file, now);
+          if (stored.has(key)) images.push({ ref: stored.get(key), name: f.name, kind: f.kind });
+        }
+        update.images = images;
+      }
+      const sig = JSON.stringify(update);
+      if (sig === sent) return;
+      sent = sig;
+      ctx.onProgress({ partialOutput: update });
+    } catch { /* a file went away between looks; try again next time */ }
+  };
+  timer = setInterval(look, LIVE_TICK_MS);
+  return { onData, stored, stop: () => clearInterval(timer) };
+}
+
+function statKey(file) {
+  try { const st = fs.statSync(file); return `${st.size}:${st.mtimeMs}`; } catch { return null; }
 }
 
 /* --------------------------- Claude CLI driver --------------------------- */
@@ -1337,15 +1426,18 @@ function killTree(child) {
   setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, 2000).unref();
 }
 
-function exec(argv, { cwd, signal, timeoutMs = 30_000 }) {
+function exec(argv, { cwd, signal, timeoutMs = 30_000, onData }) {
   return new Promise((resolve) => {
     let out = '', err = '', timer = null;
-    const child = spawn(argv[0], argv.slice(1), { cwd, env: process.env, detached: true });
+    // Python holds its output back when it is not printing to a screen; ask
+    // it not to, so a step watched live shows what it says as it says it.
+    const env = onData ? { ...process.env, PYTHONUNBUFFERED: '1' } : process.env;
+    const child = spawn(argv[0], argv.slice(1), { cwd, env, detached: true });
     const kill = (reason) => { killTree(child); out += reason ? `\n[${reason}]` : ''; };
     timer = setTimeout(() => kill('timeout'), timeoutMs);
     signal?.addEventListener('abort', () => kill('aborted'), { once: true });
-    child.stdout.on('data', (d) => { out += d.toString(); });
-    child.stderr.on('data', (d) => { err += d.toString(); });
+    child.stdout.on('data', (d) => { out += d.toString(); onData?.(d.toString()); });
+    child.stderr.on('data', (d) => { err += d.toString(); onData?.(d.toString()); });
     child.on('close', (code) => { clearTimeout(timer); resolve({ out, err, code: code ?? -1 }); });
     child.on('error', (e)   => { clearTimeout(timer); resolve({ out, err: e.message, code: -1 }); });
   });

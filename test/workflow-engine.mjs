@@ -323,6 +323,39 @@ export async function runWorkflowEngineChecks({ check, session }) {
     const img = sha ? await fetch(`${base}/api/blob?sha=${sha}`) : null;
     check('a shown picture is kept, and served as an image', img?.status === 200 && img.headers.get('content-type') === 'image/png');
 
+    // Pictures show while the step still runs, each once it is finished. One
+    // was there before the step and is left alone; one is written in two
+    // parts, a second apart, and must only ever show whole.
+    fs.mkdirSync(path.join(repo, 'live'), { recursive: true });
+    fs.writeFileSync(path.join(repo, 'live-src.png'), Buffer.from(png, 'base64'));
+    fs.copyFileSync(path.join(repo, 'live-src.png'), path.join(repo, 'live', 'old.png'));
+    await save({ id: 'live', title: 'Live', graph: { nodes: [
+      script('draw', 'for i in 1 2 3; do sleep 1.5; cp live-src.png live/p$i.png; echo "  page $i: live/p$i.png"; done; '
+        + 'head -c 30 live-src.png > live/half.png; sleep 1; tail -c +31 live-src.png >> live/half.png; sleep 4.5',
+        { show: 'live/*.png' }),
+    ], edges: [] } });
+    const liveId = (await start('live')).run.runId;
+    const seen = [];
+    r = await until(liveId, (x) => {
+      const d = node(x, 'draw');
+      if (d?.status === 'running') seen.push({ images: d.output?.images || [], out: d.output?.out || '' });
+      return settled(x);
+    }, 20_000);
+    const named = (list, re) => list.filter((m) => re.test(m.name));
+    const counts = seen.map((x) => named(x.images, /\/p\d\.png$/).length);
+    check('a running step shows some of its pictures before it ends', counts.some((c) => c >= 1 && c < 3), JSON.stringify(counts));
+    const finalImgs = node(r, 'draw')?.output?.images || [];
+    check('…and all of them when it is done', node(r, 'draw')?.status === 'done' && named(finalImgs, /\/p\d\.png$/).length === 3,
+      JSON.stringify(finalImgs.map((m) => m.name)));
+    check('a picture there before the step, untouched, is not shown as new while it runs',
+      seen.length > 0 && !seen.some((x) => named(x.images, /old\.png$/).length) && named(finalImgs, /old\.png$/).length === 1);
+    const wholeRef = named(finalImgs, /half\.png$/)[0]?.ref;
+    const halfRefs = [...new Set(seen.flatMap((x) => named(x.images, /half\.png$/).map((m) => m.ref)))];
+    check('a picture still being written is not shown until it is whole',
+      !!wholeRef && halfRefs.length === 1 && halfRefs[0] === wholeRef, JSON.stringify({ halfRefs, wholeRef }));
+    check('a running step shows the last lines it printed', seen.some((x) => /page \d: live\/p\d\.png/.test(x.out)),
+      JSON.stringify(seen.map((x) => x.out).filter(Boolean).slice(-1)));
+
     /* ------------------------------ verify retries ---------------------------- */
     console.log('\nWorkflows: verify retries\n');
 

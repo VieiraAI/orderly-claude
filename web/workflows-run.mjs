@@ -622,8 +622,10 @@ function cardBody(n) {
     return `<div class="ask-q">${esc(n.output?.question || 'Waiting for you.')}</div><div class="ask-cta">◆ Answer on the left</div>`;
   }
   if (n.status === 'pending') return `<div class="wait-note">Not started</div>`;
+  // A command step that is drawing pictures shows each one as it lands.
+  if (n.status === 'running' && hasPreview(n)) return previewHtml(n);
   if (n.status === 'running' && !selfProgress) {
-    return `<div class="running-note"><span class="dot-pulse"></span>${esc(n.progress || 'Making…')}</div>`;
+    return `<div class="running-note"><span class="dot-pulse"></span>${esc(n.progress || 'Making…')}</div>${lastLine(n)}`;
   }
   if (n.status === 'failed') {
     const msg = n.output?.error || 'Handler threw. Open the run.json for the full trace.';
@@ -805,8 +807,15 @@ function pagesOf(n) {
   return list.map((x, i) => ({ n: x.page ?? x.number ?? i + 1, text: x[key], note: x.scene || '' }));
 }
 function hasPreview(n) {
+  if (n.status === 'running') return !!n.output?.images?.length;
   if (n.status !== 'done' && n.status !== 'failed') return false;
   return !!(pagesOf(n) || n.output?.images?.length);
+}
+
+/** The last line a running command printed, if it printed anything yet. */
+function lastLine(n) {
+  const line = String(n.output?.out || '').trim().split('\n').pop();
+  return line ? `<div class="live-line" title="${esc(line)}">${esc(line)}</div>` : '';
 }
 
 // Pictures shown on a card at once, and which one each card starts at. The
@@ -814,6 +823,9 @@ function hasPreview(n) {
 // here, by step id.
 const PICS_PER_PAGE = 6;
 const picsFrom = {};
+// How many pictures each card had when last drawn, so a card left on its
+// last page while pictures arrive moves on to show the new ones.
+const picsSeen = {};
 
 function previewHtml(n) {
   const pages = pagesOf(n);
@@ -827,14 +839,23 @@ function previewHtml(n) {
     html += `${head}<div class="pv-pages">${tiles}</div>`;
   }
   if (imgs.length) {
-    const from = Math.min(picsFrom[n.id] || 0, Math.floor((imgs.length - 1) / PICS_PER_PAGE) * PICS_PER_PAGE);
+    const lastPage = (count) => Math.floor(Math.max(0, count - 1) / PICS_PER_PAGE) * PICS_PER_PAGE;
+    const live = n.status === 'running';
+    // While pictures arrive, follow them onto a new page unless the person
+    // turned back to an earlier one.
+    if (live && (picsFrom[n.id] === undefined || picsFrom[n.id] >= lastPage(picsSeen[n.id] || 0))) picsFrom[n.id] = lastPage(imgs.length);
+    picsSeen[n.id] = imgs.length;
+    const from = Math.min(picsFrom[n.id] || 0, lastPage(imgs.length));
     const shown = imgs.slice(from, from + PICS_PER_PAGE);
     const count = imgs.length > PICS_PER_PAGE
       ? `<span class="pv-pager"><button type="button" data-pv="-1" title="Earlier pictures"${from === 0 ? ' disabled' : ''}>‹</button>`
         + `<span class="pv-count">${from + 1}–${from + shown.length} of ${imgs.length}</span>`
         + `<button type="button" data-pv="1" title="Later pictures"${from + PICS_PER_PAGE >= imgs.length ? ' disabled' : ''}>›</button></span>`
       : '';
-    html += `<div class="pv-head${pages ? ' pv-gap' : ''}"><span class="pv-title">${imgs.length} ${imgs.length === 1 ? 'picture' : 'pictures'}</span>${count}</div>`;
+    const head = live
+      ? `<span class="running-note"><span class="dot-pulse"></span>drawing… ${imgs.length} so far</span>`
+      : `<span class="pv-title">${imgs.length} ${imgs.length === 1 ? 'picture' : 'pictures'}</span>`;
+    html += `<div class="pv-head${pages ? ' pv-gap' : ''}">${head}${count}</div>${live ? lastLine(n) : ''}`;
     html += `<div class="pv-imgs">${shown.map((m) => `<a class="pv-img" href="${blobUrl(m.ref)}" target="_blank" title="Open full size">${m.kind === 'video'
       ? `<video src="${blobUrl(m.ref)}" muted loop autoplay playsinline></video>`
       : `<img src="${blobUrl(m.ref)}" alt="${label(m)}" loading="lazy">`}<span class="pv-cap">${label(m)}</span></a>`).join('')}</div>`;

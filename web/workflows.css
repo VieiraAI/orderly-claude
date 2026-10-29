@@ -860,6 +860,10 @@ button.stat:hover { background: var(--raised); }
 .pv-img img, .pv-img video { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #fff; }
 .pv-cap { display: block; padding: 4px 7px; font-family: var(--f-mono); font-size: 10px; color: var(--mute); border-top: 1px solid var(--edge-tint);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A running step's last printed line, under its "drawing…" note. */
+.live-line { margin: -2px 0 8px; font-family: var(--f-mono); font-size: 10px; color: var(--mute);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.running-note + .live-line { margin-top: 6px; }
 .pv-pager { display: inline-flex; align-items: center; gap: 4px; }
 .pv-pager button { width: 20px; height: 20px; padding: 0; border: 1px solid var(--edge-tint); border-radius: 4px;
   background: none; color: var(--mute); font-size: 13px; line-height: 1; }
