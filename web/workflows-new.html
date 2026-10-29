@@ -30,6 +30,16 @@
   .svg-edges { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
   .svg-edges .edge-hit { pointer-events: stroke; cursor: pointer; }
   .svg-edges .edge-hit:hover + .edge { stroke-width: 2.4; opacity: 1; stroke: var(--ship); }
+  .svg-edges .edge-label { pointer-events: auto; }
+  .svg-edges .edge-label:hover rect { fill: #1b1b22; }
+
+  /* Per-kind spec form on the sidebar. */
+  .spec-form { margin: 10px 0 4px; display: flex; flex-direction: column; gap: 2px; }
+  .spec-form label { margin-top: 4px; }
+  .opt-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 4px; margin-bottom: 4px; }
+  .opt-row .opt-type { grid-column: 2 / 3; }
+  .opt-row input, .opt-row select { margin: 0; padding: 5px 8px; font: 11px var(--f-mono); }
+  .opt-row button { padding: 4px 8px; font-size: 11px; }
   .n-card {
     position: absolute; width: 200px; min-height: 92px;
     background: var(--surface); border: 1px solid var(--edge-tint); border-radius: 10px;
@@ -112,15 +122,29 @@
       <h3>Add node</h3>
       <div class="btn-row">
         <select id="newKind" style="flex:1;">
-          <option value="document">document</option>
-          <option value="report">report</option>
-          <option value="mockup">mockup</option>
-          <option value="diff">diff</option>
-          <option value="shots">shots</option>
-          <option value="shots-set">shots-set</option>
-          <option value="terminal">terminal</option>
-          <option value="ask">ask</option>
-          <option value="pr">pr</option>
+          <optgroup label="v2">
+            <option value="agent">agent</option>
+            <option value="script">script</option>
+            <option value="decision">decision</option>
+            <option value="check">check</option>
+            <option value="publish">publish</option>
+            <option value="display">display</option>
+            <option value="inputs">inputs</option>
+            <option value="loop">loop</option>
+            <option value="delay">delay</option>
+            <option value="approve">approve</option>
+          </optgroup>
+          <optgroup label="legacy">
+            <option value="document">document</option>
+            <option value="report">report</option>
+            <option value="mockup">mockup</option>
+            <option value="diff">diff</option>
+            <option value="shots">shots</option>
+            <option value="shots-set">shots-set</option>
+            <option value="terminal">terminal</option>
+            <option value="ask">ask</option>
+            <option value="pr">pr</option>
+          </optgroup>
         </select>
         <button class="run-btn" id="btnAddNode">+ add</button>
       </div>
@@ -132,11 +156,21 @@
       <label>title</label><input id="selTitle">
       <label>kind</label>
       <select id="selKind">
-        <option>document</option><option>report</option><option>mockup</option>
-        <option>diff</option><option>shots</option><option>shots-set</option>
-        <option>terminal</option><option>ask</option><option>pr</option>
+        <optgroup label="v2">
+          <option>agent</option><option>script</option><option>decision</option>
+          <option>check</option><option>publish</option><option>display</option>
+          <option>inputs</option><option>loop</option><option>delay</option>
+          <option>approve</option>
+        </optgroup>
+        <optgroup label="legacy">
+          <option>document</option><option>report</option><option>mockup</option>
+          <option>diff</option><option>shots</option><option>shots-set</option>
+          <option>terminal</option><option>ask</option><option>pr</option>
+        </optgroup>
       </select>
       <label>cost</label><input id="selCost" type="number" min="0" step="1" value="1">
+      <!-- Per-kind spec editor; populated by the editor script. -->
+      <div id="selSpec" class="spec-form"></div>
       <div class="btn-row" style="margin-top:6px;">
         <button class="run-btn" id="btnConnect" title="Click a target node after this to draw an edge">↝ connect to…</button>
         <button class="run-btn danger" id="btnDelete">✕ delete</button>
