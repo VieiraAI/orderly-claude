@@ -45,7 +45,11 @@ const state = {
 /* ---------------------------------- init --------------------------------- */
 
 async function boot() {
-  await loadScaffold();
+  // /workflow-editor.html?from=<id> loads an existing def into the editor so
+  // "Edit" on a workflow's preview page lands you in a prefilled editor.
+  const from = new URLSearchParams(location.search).get('from');
+  if (from) await loadExisting(from);
+  else await loadScaffold();
   bindUi();
   render();
 }
@@ -57,6 +61,22 @@ async function loadScaffold() {
   state.def = r.def;
 }
 
+async function loadExisting(id) {
+  const r = await fetch(`/api/workflows/${encodeURIComponent(id)}`).then((x) => x.json());
+  if (!r.workflow) { await loadScaffold(); return; }
+  // Drop server-side fields that aren't part of the on-disk def (scope,
+  // source). The editor's save path writes to the chosen scope dropdown
+  // so this isn't lost — just not carried as inline state.
+  const { scope, source, ...clean } = r.workflow;
+  state.def = clean;
+  // Reflect the loaded id/title into the sidebar inputs on first render.
+  requestAnimationFrame(() => {
+    if ($('wfId'))    $('wfId').value    = state.def.id    || '';
+    if ($('wfTitle')) $('wfTitle').value = state.def.title || '';
+    if ($('wfScope') && scope) $('wfScope').value = scope;
+  });
+}
+
 function bindUi() {
   $('wfId').addEventListener('change', async () => {
     state.def.id = $('wfId').value.trim();
@@ -66,7 +86,23 @@ function bindUi() {
     state.def.title = $('wfTitle').value.trim() || state.def.id;
     render();
   });
-  $('btnAddNode').addEventListener('click', addNode);
+  // Add-node floater: button opens the popover; the Add inside it drops a node.
+  $('btnAddNodeOpen')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('addPop').classList.toggle('on');
+  });
+  $('btnAddNode').addEventListener('click', (e) => {
+    e.stopPropagation();
+    addNode();
+    $('addPop').classList.remove('on');
+  });
+  // Click anywhere else closes the popover.
+  document.addEventListener('click', (e) => {
+    const pop = $('addPop');
+    if (!pop || !pop.classList.contains('on')) return;
+    if (e.target.closest('.add-floater')) return;
+    pop.classList.remove('on');
+  });
   $('btnDelete').addEventListener('click', deleteSelected);
   $('btnConnect').addEventListener('click', () => {
     state.connectFromId = state.selectedId;
@@ -89,6 +125,7 @@ function bindUi() {
   $('selCost').addEventListener('change', () => patchSelected({ cost: Number($('selCost').value) || 1 }));
   $('btnValidate').addEventListener('click', validate);
   $('btnSave').addEventListener('click', save);
+  $('btnRun')?.addEventListener('click', saveAndRun);
   $('modeVisual').addEventListener('click', () => setMode('visual'));
   $('modeJson').addEventListener('click', () => setMode('json'));
   $('jsonArea').addEventListener('change', () => {
@@ -107,18 +144,62 @@ function bindUi() {
 
 function addNode() {
   const kind = $('newKind').value;
+  const after  = $('newAfter')?.value || '';
+  const before = $('newBefore')?.value || '';
   const idBase = kind.replace(/[^a-z0-9]/g, '').slice(0, 6) || 'n';
   let id = idBase, i = 1;
   while (state.def.graph.nodes.some((n) => n.id === id)) { i++; id = `${idBase}${i}`; }
-  const occupiedCols = state.def.graph.nodes.map((n) => n.col || 0);
-  const col = occupiedCols.length ? Math.max(...occupiedCols) + 1 : 0;
-  const node = { id, title: id, kind, col, row: 0, cost: 1 };
-  // v2 kinds come with a sane default spec so the node validates on save.
+  // Pick a column that makes the wiring read left-to-right. If "after" is set,
+  // land one column right of it. If "before" is set, land one left of that.
+  // If both: land in between (and leave the pre-existing edge alone — the new
+  // node sits as a sibling, not an insertion-split, which is simpler and lets
+  // the user explicitly delete the old edge if they want that semantic).
+  const nodeAt = (nid) => state.def.graph.nodes.find((n) => n.id === nid);
+  const na = nodeAt(after), nb = nodeAt(before);
+  let col = state.def.graph.nodes.length
+    ? Math.max(...state.def.graph.nodes.map((n) => n.col || 0)) + 1 : 1;
+  if (na && nb) col = Math.max((na.col || 0) + 1, Math.min((nb.col || 0) - 1, (na.col || 0) + 1));
+  else if (na) col = (na.col || 0) + 1;
+  else if (nb) col = Math.max(0, (nb.col || 0) - 1);
+  const row = na?.row ?? nb?.row ?? 0;
+  const node = { id, title: id, kind, col, row, cost: 1 };
   const starter = KIND_SPEC_DEFAULT[kind];
   if (starter) node.spec = starter();
   state.def.graph.nodes.push(node);
+  // Auto-wire the chosen edges. If after is a Decision, prompt for a label.
+  if (after) {
+    const src = nodeAt(after);
+    let label = null;
+    if (src?.kind === 'decision' && (src.spec?.options || []).length) {
+      const opts = src.spec.options.map((o) => o.edgeLabel).filter(Boolean);
+      const picked = window.prompt(
+        `Decision "${src.id}" routes down a labeled edge. Which label? (${opts.join(' / ')}; empty = unlabeled default)`,
+        opts[0] || '');
+      if (picked && picked.trim()) label = picked.trim();
+    }
+    state.def.graph.edges.push(label ? [after, id, label] : [after, id]);
+  }
+  if (before) state.def.graph.edges.push([id, before]);
   state.selectedId = id;
+  // Reset the pickers so the next add starts fresh.
+  if ($('newAfter'))  $('newAfter').value  = '';
+  if ($('newBefore')) $('newBefore').value = '';
   render();
+}
+
+/** Fill the after/before pickers with current node ids. Preserves selection. */
+function refreshAddPickers() {
+  const nodes = state.def.graph.nodes;
+  const opts = ['<option value="">— none —</option>']
+    .concat(nodes.map((n) => `<option value="${escapeAttr(n.id)}">${escapeHtml(n.id)} · ${escapeHtml(n.title || '')}</option>`));
+  for (const id of ['newAfter', 'newBefore']) {
+    const sel = $(id);
+    if (!sel) continue;
+    const v = sel.value;
+    sel.innerHTML = opts.join('');
+    // Only keep the previous value if the node still exists.
+    sel.value = nodes.some((n) => n.id === v) ? v : '';
+  }
 }
 
 function deleteSelected() {
@@ -208,7 +289,7 @@ async function validate() {
 
 async function save() {
   const ok = await validate();
-  if (!ok) return;
+  if (!ok) return false;
   try {
     const r = await fetch('/api/workflows', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -217,9 +298,38 @@ async function save() {
     if (r.saved) {
       $('status').textContent = `Saved → ${r.file}`;
       $('status').className = 'status ok';
-      return;
+      $('problems').style.display = 'none';
+      $('edToast').style.display = 'block';
+      clearTimeout(showProblems._t);
+      showProblems._t = setTimeout(() => { $('edToast').style.display = 'none'; }, 2500);
+      return true;
     }
     throw new Error(r.error || 'save failed');
+  } catch (e) {
+    showProblems([e.message]);
+    return false;
+  }
+}
+
+/** Save first, then POST a run with any declared inputs, then jump to its canvas. */
+async function saveAndRun() {
+  const saved = await save();
+  if (!saved) return;
+  const fields = Array.isArray(state.def.inputs) ? state.def.inputs : [];
+  const inputs = {};
+  for (const f of fields) {
+    const label = f.label || f.key;
+    const val = window.prompt(`${label}${f.placeholder ? ` (e.g. ${f.placeholder})` : ''}`, '');
+    if (val === null) return;
+    if (val.trim()) inputs[f.key] = val.trim();
+  }
+  try {
+    const r = await fetch(`/api/workflows/${encodeURIComponent(state.def.id)}/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ inputs }),
+    }).then((x) => x.json());
+    if (!r.run?.runId) throw new Error(r.error || 'run failed to start');
+    location.href = `/workflows-run.html#${r.run.runId}`;
   } catch (e) {
     showProblems([e.message]);
   }
@@ -227,16 +337,23 @@ async function save() {
 
 function showProblems(list) {
   const panel = $('problems');
+  const toast = $('edToast');
   if (!list.length) {
     panel.style.display = 'none';
     $('status').textContent = 'Valid.';
     $('status').className = 'status ok';
+    toast.style.display = 'block';
+    // Auto-fade the success state after a short beat so it doesn't linger.
+    clearTimeout(showProblems._t);
+    showProblems._t = setTimeout(() => { toast.style.display = 'none'; }, 2000);
     return;
   }
   panel.style.display = 'block';
   panel.innerHTML = `<strong>${list.length} problem${list.length === 1 ? '' : 's'}:</strong><ul>${list.map((p) => `<li>${escapeHtml(p)}</li>`).join('')}</ul>`;
   $('status').textContent = `${list.length} problem${list.length === 1 ? '' : 's'}`;
   $('status').className = 'status err';
+  toast.style.display = 'block';
+  clearTimeout(showProblems._t);
 }
 
 /* --------------------------------- render -------------------------------- */
@@ -244,8 +361,12 @@ function showProblems(list) {
 function render() {
   $('wfId').value = state.def.id || '';
   $('wfTitle').value = state.def.title || '';
+  refreshAddPickers();
   renderCanvas();
   renderSelected();
+  // Sidebar collapses when nothing is selected — the canvas fills the width.
+  const layout = $('edLayout');
+  if (layout) layout.classList.toggle('no-sel', !state.selectedId);
   if (state.mode === 'json') $('jsonArea').value = JSON.stringify(state.def, null, 2);
 }
 
@@ -256,6 +377,15 @@ function renderCanvas() {
   for (const n of state.def.graph.nodes) {
     inner.append(nodeCard(n));
   }
+  // Grow the inner container to contain every absolutely-positioned card.
+  // Without this, cards past col 6 land outside .ed-canvas-inner's bounds,
+  // the SVG stays width:100% of the (narrower) inner, and edges to those
+  // nodes draw outside the SVG viewport and get clipped — invisible.
+  const nodes = state.def.graph.nodes;
+  const maxX = nodes.reduce((m, n) => Math.max(m, GUTTER + (n.col || 0) * COL_W + 220), 1600);
+  const maxY = nodes.reduce((m, n) => Math.max(m, GUTTER + (n.row || 0) * ROW_H + 120), 900);
+  inner.style.width  = `${maxX + GUTTER}px`;
+  inner.style.height = `${maxY + GUTTER}px`;
   renderEdges();
 }
 
@@ -270,6 +400,7 @@ function nodeCard(n) {
   card.style.left = `${x}px`;
   card.style.top = `${y}px`;
   card.dataset.id = n.id;
+  card.dataset.kind = n.kind;
   card.innerHTML = `
     <div class="n-head">
       <span class="n-kind">${KIND_GLYPH[n.kind] || '●'} ${escapeHtml(n.kind)}</span>
@@ -283,10 +414,10 @@ function nodeCard(n) {
 }
 
 function attachDrag(card, n) {
-  let dragging = false, startX, startY, startLeft, startTop;
+  let dragging = false, moved = false, startX, startY, startLeft, startTop;
   card.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
-    dragging = true;
+    dragging = true; moved = false;
     startX = e.clientX; startY = e.clientY;
     startLeft = parseFloat(card.style.left); startTop = parseFloat(card.style.top);
     card.classList.add('dragging');
@@ -294,10 +425,14 @@ function attachDrag(card, n) {
   });
   window.addEventListener('mousemove', (e) => {
     if (!dragging) return;
-    const nx = startLeft + (e.clientX - startX);
-    const ny = startTop  + (e.clientY - startY);
-    card.style.left = `${Math.max(0, Math.round(nx / 20) * 20)}px`;
-    card.style.top  = `${Math.max(0, Math.round(ny / 20) * 20)}px`;
+    const dx = e.clientX - startX, dy = e.clientY - startY;
+    // Treat tiny pointer wobble as a click, not a drag. Without this the
+    // mouseup always re-renders and tears the card out of the DOM before
+    // the click handler can run, so selection appears broken.
+    if (!moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+    moved = true;
+    card.style.left = `${Math.max(0, Math.round((startLeft + dx) / 20) * 20)}px`;
+    card.style.top  = `${Math.max(0, Math.round((startTop  + dy) / 20) * 20)}px`;
     renderEdges();
   });
   window.addEventListener('mouseup', () => {
@@ -305,7 +440,8 @@ function attachDrag(card, n) {
     dragging = false;
     card.classList.remove('dragging');
     document.body.style.userSelect = '';
-    // Snap pixels back to col/row.
+    if (!moved) return; // plain click — let the click handler fire selectNode.
+    // Snap pixels back to col/row and re-render.
     n.col = Math.max(0, Math.round((parseFloat(card.style.left) - GUTTER) / COL_W));
     n.row = Math.max(0, Math.round((parseFloat(card.style.top)  - GUTTER) / ROW_H));
     render();
@@ -314,26 +450,54 @@ function attachDrag(card, n) {
 
 function renderEdges() {
   const svg = $('edEdges');
+  const inner = $('edInner');
+  if (!inner) return;
+  // Size the SVG to the actual canvas-inner area so paths don't get clipped.
+  // Without explicit width/height attributes, Firefox and some Chrome paths
+  // can lose geometry outside the natural SVG viewport.
+  const innerBox = inner.getBoundingClientRect();
+  // Size the SVG to the inner container's full extent (which renderCanvas
+  // just stretched to contain every card). Both attribute and inline style
+  // so paths outside the natural viewport are not clipped by the renderer.
+  const w = Math.max(inner.scrollWidth, Math.floor(innerBox.width));
+  const h = Math.max(inner.scrollHeight, Math.floor(innerBox.height));
+  svg.setAttribute('width',  w);
+  svg.setAttribute('height', h);
+  svg.style.width  = `${w}px`;
+  svg.style.height = `${h}px`;
   svg.setAttribute('pointer-events', 'all');
-  const nodes = state.def.graph.nodes;
-  const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
-  // Two paths per edge: the visible one and a fat invisible one that catches
-  // clicks. A labeled edge gets a small pill badge at the midpoint; clicking
-  // the badge opens the label prompt instead of removing the edge.
+  // Read each card's real position via its data-id attribute. Falling back
+  // to the col/row math breaks the instant the user drags a node, so we
+  // measure the DOM instead — same approach as the runtime canvas.
+  const cards = {};
+  for (const el of inner.querySelectorAll('.n-card')) cards[el.dataset.id] = el;
+  const parentBox = { left: innerBox.left, top: innerBox.top };
+  // Two paths per edge: visible curve + a fat invisible one for clicks.
+  // Labeled edges carry a periwinkle pill at the midpoint; shift-click any
+  // edge to rename, plain click to remove.
   const parts = [];
   (state.def.graph.edges || []).forEach((edge, i) => {
     const [a, b, label] = edge;
-    const na = byId[a], nb = byId[b];
-    if (!na || !nb) return;
-    const ax = GUTTER + (na.col || 0) * COL_W + 200;         // right edge of source
-    const ay = GUTTER + (na.row || 0) * ROW_H + 46;          // mid-height
-    const bx = GUTTER + (nb.col || 0) * COL_W;               // left edge of target
-    const by = GUTTER + (nb.row || 0) * ROW_H + 46;
-    const dx = Math.max(40, (bx - ax) / 2);
-    const d = `M${ax},${ay} C${ax + dx},${ay} ${bx - dx},${by} ${bx},${by}`;
+    const srcEl = cards[a], dstEl = cards[b];
+    if (!srcEl || !dstEl) return;
+    const sr = srcEl.getBoundingClientRect();
+    const dr = dstEl.getBoundingClientRect();
+    const ax = sr.right - parentBox.left;
+    const ay = sr.top   - parentBox.top + sr.height / 2;
+    const bx = dr.left  - parentBox.left;
+    const by = dr.top   - parentBox.top + dr.height / 2;
+    // Tangent length — bigger for larger horizontal/vertical spans so the
+    // curve has room to open up and doesn't fold back on itself.
+    const spanX = Math.max(40, Math.abs(bx - ax));
+    const spanY = Math.max(0,  Math.abs(by - ay));
+    const dx = Math.max(60, spanX * 0.5, spanY * 0.4);
+    const d  = `M${ax},${ay} C${ax + dx},${ay} ${bx - dx},${by} ${bx},${by}`;
     parts.push(`<path class="edge-hit" data-i="${i}" d="${d}" fill="none" stroke="transparent" stroke-width="14"/>`);
     const stroke = label ? '#a3abff' : '#efb36c';
-    parts.push(`<path class="edge ${label ? 'labeled' : ''}" data-i="${i}" d="${d}" fill="none" stroke="${stroke}" stroke-width="1.4" opacity="0.7"/>`);
+    parts.push(`<path class="edge ${label ? 'labeled' : ''}" data-i="${i}" d="${d}" fill="none" stroke="${stroke}" stroke-width="1.4" opacity="0.75"/>`);
+    // Pinch dots at each end so the curve clearly lands on its node.
+    parts.push(`<circle cx="${ax}" cy="${ay}" r="2.5" fill="${stroke}" opacity="0.9"/>`);
+    parts.push(`<circle cx="${bx}" cy="${by}" r="2.5" fill="${stroke}" opacity="0.9"/>`);
     if (label) {
       const mx = (ax + bx) / 2;
       const my = (ay + by) / 2;
@@ -354,7 +518,6 @@ function renderEdges() {
       const i = Number(hit.dataset.i);
       const edge = state.def.graph.edges[i];
       if (!edge) return;
-      // Shift-click to edit the label; plain click still removes.
       if (e.shiftKey) { editEdgeLabel(i); return; }
       if (!confirm(`Remove edge ${edge[0]} → ${edge[1]}${edge[2] ? ` (${edge[2]})` : ''}?`)) return;
       state.def.graph.edges.splice(i, 1);
@@ -382,6 +545,97 @@ function renderSelected() {
     ? '↝ click a target card…'
     : '↝ connect to…';
   renderSpecForm(n);
+  renderEdgesForm(n);
+}
+
+/**
+ * Edges editor for the selected node. Lists incoming edges (parents / "comes
+ * after") and outgoing edges (children / "goes before"), with remove buttons
+ * on each row and dropdowns to add new ones from the pool of other nodes.
+ * If the selected node is a Decision, outgoing adds prompt for an edgeLabel.
+ */
+function renderEdgesForm(n) {
+  const mount = $('selEdges');
+  if (!mount) return;
+  const nodes  = state.def.graph.nodes;
+  const edges  = state.def.graph.edges || [];
+  const incoming = edges.map((e, i) => ({ e, i })).filter(({ e }) => e[1] === n.id);
+  const outgoing = edges.map((e, i) => ({ e, i })).filter(({ e }) => e[0] === n.id);
+  const incomingSet = new Set(incoming.map(({ e }) => e[0]));
+  const outgoingSet = new Set(outgoing.map(({ e }) => e[1]));
+  const candIn  = nodes.filter((x) => x.id !== n.id && !incomingSet.has(x.id));
+  const candOut = nodes.filter((x) => x.id !== n.id && !outgoingSet.has(x.id));
+  const row = ({ e, i }, dir) => {
+    const other = dir === 'in' ? e[0] : e[1];
+    const label = e[2];
+    const title = nodes.find((x) => x.id === other)?.title || other;
+    return `
+      <div class="edge-row" data-i="${i}">
+        <span class="arrow">${dir === 'in' ? '↳' : '↦'}</span>
+        <span><b>${escapeHtml(other)}</b> · ${escapeHtml(title)}${label ? ` <span class="lbl">${escapeHtml(label)}</span>` : ''}</span>
+        <button class="run-btn danger" data-act="rm-edge" data-i="${i}" title="Remove this edge">✕</button>
+      </div>`;
+  };
+  const options = (list) => list.map((x) =>
+    `<option value="${escapeAttr(x.id)}">${escapeHtml(x.id)} · ${escapeHtml(x.title || '')}</option>`).join('');
+  mount.innerHTML = `
+    <h4>Comes after (${incoming.length})</h4>
+    ${incoming.map((r) => row(r, 'in')).join('') || '<div class="status" style="margin:0;">No upstream nodes.</div>'}
+    ${candIn.length ? `
+      <div class="edge-add">
+        <select id="addInSel"><option value="">— pick a parent —</option>${options(candIn)}</select>
+        <button class="run-btn" id="btnAddIn">+ add</button>
+      </div>` : ''}
+    <h4>Goes before (${outgoing.length})</h4>
+    ${outgoing.map((r) => row(r, 'out')).join('') || '<div class="status" style="margin:0;">No downstream nodes.</div>'}
+    ${candOut.length ? `
+      <div class="edge-add">
+        <select id="addOutSel"><option value="">— pick a child —</option>${options(candOut)}</select>
+        <button class="run-btn" id="btnAddOut">+ add</button>
+      </div>` : ''}
+  `;
+  for (const btn of mount.querySelectorAll('[data-act="rm-edge"]')) {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      state.def.graph.edges.splice(Number(btn.dataset.i), 1);
+      render();
+    });
+  }
+  const addIn = mount.querySelector('#btnAddIn');
+  if (addIn) addIn.addEventListener('click', () => {
+    const sel = mount.querySelector('#addInSel');
+    const other = sel?.value;
+    if (!other) return;
+    const src = nodes.find((x) => x.id === other);
+    const edge = [other, n.id];
+    // If the parent is a Decision, ask which labeled branch this edge takes.
+    if (src?.kind === 'decision' && (src.spec?.options || []).length) {
+      const opts = src.spec.options.map((o) => o.edgeLabel).filter(Boolean);
+      const picked = window.prompt(
+        `Parent decision "${other}" routes down a labeled edge. Which label? (${opts.join(' / ')}; empty = unlabeled default)`,
+        opts[0] || '');
+      if (picked && picked.trim()) edge.push(picked.trim());
+    }
+    state.def.graph.edges.push(edge);
+    render();
+  });
+  const addOut = mount.querySelector('#btnAddOut');
+  if (addOut) addOut.addEventListener('click', () => {
+    const sel = mount.querySelector('#addOutSel');
+    const other = sel?.value;
+    if (!other) return;
+    const edge = [n.id, other];
+    // If this node is a Decision, ask which labeled branch the new edge takes.
+    if (n.kind === 'decision' && (n.spec?.options || []).length) {
+      const opts = n.spec.options.map((o) => o.edgeLabel).filter(Boolean);
+      const picked = window.prompt(
+        `Decision "${n.id}" routes down a labeled edge. Which label? (${opts.join(' / ')}; empty = unlabeled default)`,
+        opts[0] || '');
+      if (picked && picked.trim()) edge.push(picked.trim());
+    }
+    state.def.graph.edges.push(edge);
+    render();
+  });
 }
 
 /**

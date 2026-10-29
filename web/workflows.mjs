@@ -54,7 +54,16 @@ function renderTiles() {
     mount.innerHTML = list.map(tile).join('');
   }
   for (const el of document.querySelectorAll('.tile')) {
-    el.onclick = () => openSheet(el.dataset.id);
+    // Click on a tile opens the workflow in the visual editor — the primary
+    // thing people want to do with a workflow is see and modify its graph.
+    // The small Run pill on the tile is the fast-path for just running it.
+    el.onclick = (e) => {
+      if (e.target.closest('.tile-run')) {
+        openSheet(el.dataset.id);
+        return;
+      }
+      location.href = `/workflow-editor.html?from=${encodeURIComponent(el.dataset.id)}`;
+    };
   }
 }
 
@@ -91,7 +100,10 @@ function tile(w) {
       <p>${escapeHtml(w.desc || '')}</p>
       <div class="foot">
         <span>${w.graph?.nodes?.length ?? 0} nodes · ${w.estimate || '—'}</span>
-        <span class="scope-tag">${w.scope}</span>
+        <span class="tile-right">
+          <button class="tile-run" title="Open the inputs sheet and run">◆ Run</button>
+          <span class="scope-tag">${w.scope}</span>
+        </span>
       </div>
     </div>`;
 }
@@ -650,7 +662,7 @@ const TAB_COPY = {
     eyebrow: 'Workflows · a job you run the same way every time',
     title:   'Pick a workflow.',
     desc:    'A workflow is a set of steps you would otherwise type out one prompt at a time. Press one button and watch each step finish on the canvas, instead of scrolling a terminal to work out what happened.',
-    newHref: '/workflows-new.html',
+    newHref: '/workflow-editor.html',
     newLabel: '+ New workflow',
   },
   runs: {
