@@ -1,5 +1,12 @@
 <!doctype html>
 <html lang="en"><head>
+<script>
+  // Same setting as the session view; applied before paint so there is no flash.
+  try {
+    const forced = new URLSearchParams(location.search).get('theme');
+    document.documentElement.dataset.theme = forced || localStorage.getItem('cz-theme') || 'light';
+  } catch { document.documentElement.dataset.theme = 'light'; }
+</script>
 <meta charset="utf-8">
 <title>Workflows — Orderly Claude</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -22,17 +29,18 @@
 <script type="module">
   import { mountAppMenu } from '/app-menu.mjs';
   const key = (location.hash || '').replace('#', '') || 'workflows';
-  mountAppMenu(document.getElementById('appMenu'), { here: key });
+  mountAppMenu(document.getElementById('appMenu'), { here: key, theme: true });
   window.addEventListener('hashchange', () => {
     const k = (location.hash || '').replace('#', '') || 'workflows';
-    mountAppMenu(document.getElementById('appMenu'), { here: k });
+    mountAppMenu(document.getElementById('appMenu'), { here: k, theme: true });
   });
 </script>
 
 <section class="hero">
-  <div class="eyebrow" id="heroEyebrow">Workflows · available in this project</div>
-  <h1 class="display" id="heroTitle">Pick a workflow.</h1>
-  <p id="heroDesc">Every tile is a graph of typed-output cards. Click one for the brief sheet, fill the inputs, and open it on the canvas.</p>
+  <div class="hero-text">
+    <h1 id="heroTitle">Workflows</h1>
+    <p id="heroDesc"></p>
+  </div>
   <div class="hero-actions">
     <a id="heroNewBtn" href="/workflow-editor.html" class="hero-btn">+ New workflow</a>
     <label class="hero-btn ghost" id="heroImport" title="Add a workflow file someone shared with you">↑ Import<input type="file" id="importFile" accept=".json,application/json" hidden></label>
@@ -42,6 +50,11 @@
 
 <main>
   <section id="viewCatalog">
+    <div class="finder">
+      <label for="finderIn" class="finder-label">What do you want to do?</label>
+      <input id="finderIn" class="finder-in" autocomplete="off" placeholder="Redesign the pricing page, check the site for broken pages, ship this branch…">
+      <div id="finderOut" class="finder-out" role="status" aria-live="polite"></div>
+    </div>
     <section class="scope" data-scope="project">
       <header class="cat-head">
         <h2>This project</h2>

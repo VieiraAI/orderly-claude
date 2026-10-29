@@ -198,6 +198,8 @@ function summariseRun(r, versions = null) {
     interruption: r.interruption || null,
     resumable: RESUMABLE.has(r.status),
     budgetUsd: r.budgetUsd ?? null,
+    rating: r.rating || null,
+    retro: r.retro || null,
     inputs: r.inputs || {},
     definitionVersion: r.definitionVersion || null,
     currentVersion: current ?? null,

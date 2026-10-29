@@ -4,29 +4,124 @@
   "title": "Hunt a visual regression",
   "category": "review",
   "estimate": "about 6 min",
-  "desc": "Boot the dev server, walk the routes, screenshot each one against a baseline, surface the diffs.",
+  "desc": "Find your running dev server, screenshot each route, check the pages really loaded, and describe what changed.",
+  "whenToUse": "You changed something and want to see which pages look different, or broke.",
+  "tags": [
+    "screenshot",
+    "visual",
+    "regression",
+    "broken",
+    "compare",
+    "before",
+    "after",
+    "pages",
+    "check"
+  ],
   "inputs": [
-    { "key": "baseline", "label": "Baseline (git ref)", "placeholder": "main" },
-    { "key": "routes",   "label": "Routes (comma or newline)", "placeholder": "/, /blog, /about, /pricing, /contact", "textarea": true }
+    {
+      "key": "devUrl",
+      "label": "Dev server URL (optional)",
+      "placeholder": "found automatically, e.g. http://localhost:5173"
+    },
+    {
+      "key": "baselineUrl",
+      "label": "Baseline URL to compare against (optional)",
+      "placeholder": "http://localhost:5174 running main"
+    },
+    {
+      "key": "routes",
+      "label": "Routes (comma or newline)",
+      "placeholder": "/, /blog, /about, /pricing, /contact",
+      "textarea": true
+    }
   ],
   "graph": {
     "nodes": [
-      { "id": "server", "title": "Dev server",   "kind": "script",   "col": 1, "row": 0, "cost": 1,
-        "spec": { "cmd": "node -e \"console.log('placeholder dev server ready on :5173')\"" } },
-      { "id": "routes", "title": "Routes",       "kind": "inputs",   "col": 2, "row": 0, "cost": 1,
-        "spec": { "fields": [{ "key": "routes", "label": "Routes to capture", "type": "textarea" }] } },
-      { "id": "shots",  "title": "Screenshots",  "kind": "script",   "col": 3, "row": 0, "cost": 2,
-        "spec": { "op": "capture-shots" } },
-      { "id": "ok",     "title": "Captures ok?", "kind": "check",    "col": 4, "row": 0, "cost": 0,
-        "spec": { "assert": { "type": "has-pairs", "from": "shots", "min": 1 } } },
-      { "id": "moved",  "title": "What moved",   "kind": "agent",    "col": 5, "row": 0, "cost": 1,
-        "spec": { "model": "sonnet", "output": "markdown", "prompt": "Describe what moved between before and after shots." } }
+      {
+        "id": "server",
+        "title": "Find dev server",
+        "kind": "script",
+        "col": 1,
+        "row": 0,
+        "cost": 1,
+        "spec": {
+          "op": "find-dev-server"
+        }
+      },
+      {
+        "id": "routes",
+        "title": "Routes",
+        "kind": "inputs",
+        "col": 2,
+        "row": 0,
+        "cost": 1,
+        "spec": {
+          "fields": [
+            {
+              "key": "routes",
+              "label": "Routes to capture",
+              "type": "textarea"
+            }
+          ]
+        }
+      },
+      {
+        "id": "shots",
+        "title": "Screenshots",
+        "kind": "script",
+        "col": 3,
+        "row": 0,
+        "cost": 2,
+        "spec": {
+          "op": "capture-shots"
+        }
+      },
+      {
+        "id": "ok",
+        "title": "Captures ok?",
+        "kind": "check",
+        "col": 4,
+        "row": 0,
+        "cost": 0,
+        "spec": {
+          "assert": {
+            "type": "has-pairs",
+            "from": "shots",
+            "min": 1
+          }
+        }
+      },
+      {
+        "id": "moved",
+        "title": "What moved",
+        "kind": "agent",
+        "col": 5,
+        "row": 0,
+        "cost": 1,
+        "spec": {
+          "model": "sonnet",
+          "output": "markdown",
+          "prompt": "Describe what moved between before and after shots."
+        }
+      }
     ],
     "edges": [
-      ["server", "routes"],
-      ["routes", "shots"],
-      ["shots",  "ok"],
-      ["ok",     "moved"]
+      [
+        "server",
+        "routes"
+      ],
+      [
+        "routes",
+        "shots"
+      ],
+      [
+        "shots",
+        "ok"
+      ],
+      [
+        "ok",
+        "moved"
+      ]
     ]
   }
 }

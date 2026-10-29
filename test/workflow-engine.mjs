@@ -592,8 +592,10 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     check('Tidy raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
     // ship-pr was copied into this project above, and that copy rightly
-    // shadows the built-in; visual-regression is still only a built-in.
-    p = await open('/workflow-editor.html?from=visual-regression');
+    // shadows the built-in. Pick one that is still only a built-in here —
+    // the person's own library may hold a copy of any of them.
+    const stillBuiltin = (await api('/api/workflows')).workflows.find((w) => w.scope === 'builtin')?.id;
+    p = await open(`/workflow-editor.html?from=${stillBuiltin}`);
     r = await p.ev(`return !document.getElementById('builtinBanner').classList.contains('hidden');`);
     check('opening a built-in says saving makes your own copy', r === true);
     await p.close();

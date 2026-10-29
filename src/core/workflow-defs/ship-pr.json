@@ -4,29 +4,114 @@
   "title": "Ship a PR",
   "category": "ship",
   "estimate": "about 8 min",
-  "desc": "Run the project's tests and stop if they fail, self-review the diff, then draft the pull request's title and description. Uses npm test — make it yours to change the command.",
+  "desc": "Run the project's tests and stop if they fail, self-review the diff, then draft the pull request's title and description. Uses npm test \u2014 make it yours to change the command.",
+  "whenToUse": "A branch is ready: run the tests, review the change and draft the pull request.",
+  "tags": [
+    "ship",
+    "pull",
+    "request",
+    "pr",
+    "review",
+    "tests",
+    "merge",
+    "branch"
+  ],
   "inputs": [
-    { "key": "base",  "label": "Base branch",  "placeholder": "main" },
-    { "key": "title", "label": "PR title",     "placeholder": "" }
+    {
+      "key": "base",
+      "label": "Base branch",
+      "placeholder": "main"
+    },
+    {
+      "key": "title",
+      "label": "PR title",
+      "placeholder": ""
+    }
   ],
   "graph": {
     "nodes": [
-      { "id": "tests",  "title": "Tests",       "kind": "script",   "col": 1, "row": 0, "cost": 1,
-        "spec": { "cmd": "npm test", "allowFailure": true, "timeoutMs": 1800000 } },
-      { "id": "green",  "title": "Tests green?", "kind": "check",   "col": 2, "row": 0, "cost": 0,
-        "spec": { "assert": { "type": "exit-zero", "from": "tests" } } },
-      { "id": "review", "title": "Self-review", "kind": "agent",    "col": 3, "row": 0, "cost": 2,
-        "spec": { "model": "sonnet", "output": "json-findings", "prompt": "Review the diff for correctness, readability, architecture, security, performance." } },
-      { "id": "body",   "title": "PR body",     "kind": "agent",    "col": 4, "row": 0, "cost": 1,
-        "spec": { "model": "haiku", "output": "markdown",       "prompt": "Draft a short GitHub PR body." } },
-      { "id": "pr",     "title": "Pull request", "kind": "publish", "col": 5, "row": 0, "cost": 1,
-        "spec": { "target": "pr" } }
+      {
+        "id": "tests",
+        "title": "Tests",
+        "kind": "script",
+        "col": 1,
+        "row": 0,
+        "cost": 1,
+        "spec": {
+          "cmd": "npm test",
+          "allowFailure": true,
+          "timeoutMs": 1800000
+        }
+      },
+      {
+        "id": "green",
+        "title": "Tests green?",
+        "kind": "check",
+        "col": 2,
+        "row": 0,
+        "cost": 0,
+        "spec": {
+          "assert": {
+            "type": "exit-zero",
+            "from": "tests"
+          }
+        }
+      },
+      {
+        "id": "review",
+        "title": "Self-review",
+        "kind": "agent",
+        "col": 3,
+        "row": 0,
+        "cost": 2,
+        "spec": {
+          "model": "sonnet",
+          "output": "json-findings",
+          "prompt": "Review the diff for correctness, readability, architecture, security, performance."
+        }
+      },
+      {
+        "id": "body",
+        "title": "PR body",
+        "kind": "agent",
+        "col": 4,
+        "row": 0,
+        "cost": 1,
+        "spec": {
+          "model": "haiku",
+          "output": "markdown",
+          "prompt": "Draft a short GitHub PR body."
+        }
+      },
+      {
+        "id": "pr",
+        "title": "Pull request",
+        "kind": "publish",
+        "col": 5,
+        "row": 0,
+        "cost": 1,
+        "spec": {
+          "target": "pr"
+        }
+      }
     ],
     "edges": [
-      ["tests",  "green"],
-      ["green",  "review"],
-      ["review", "body"],
-      ["body",   "pr"]
+      [
+        "tests",
+        "green"
+      ],
+      [
+        "green",
+        "review"
+      ],
+      [
+        "review",
+        "body"
+      ],
+      [
+        "body",
+        "pr"
+      ]
     ]
   }
 }

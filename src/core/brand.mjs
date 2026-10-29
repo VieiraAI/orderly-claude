@@ -17,17 +17,40 @@ const CACHE = new Map();
 
 /** Load brand.json for a repo. Returns the loaded object or a safe default. */
 export function loadBrand(repoRoot) {
-  const file = path.join(repoRoot, '.claude', 'brand.json');
-  if (CACHE.has(file)) return CACHE.get(file);
+  const file = path.join(repoRoot || '', '.claude', 'brand.json');
+  const stamp = mtime(file);
+  const hit = CACHE.get(file);
+  if (hit && hit.stamp === stamp) return hit.brand;
   let brand = defaultBrand();
   try {
-    if (fs.existsSync(file)) {
-      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-      brand = { ...brand, ...raw };
-    }
+    if (stamp) brand = { ...brand, ...JSON.parse(fs.readFileSync(file, 'utf8')) };
   } catch { /* fall through to default */ }
-  CACHE.set(file, brand);
+  // The stylesheet's own colour variables are the palette, so the list in
+  // brand.json cannot fall out of date with the design.
+  const sheets = [].concat(brand.tokensCss || []);
+  if (sheets.length) {
+    const fromCss = sheets.flatMap((rel) => cssTokenColors(path.join(repoRoot || '', rel)));
+    const whitelist = new Set([...(brand.palette?.whitelist || []), ...fromCss].map((h) => h.toUpperCase()));
+    brand = { ...brand, palette: { ...brand.palette, whitelist: [...whitelist] } };
+  }
+  CACHE.set(file, { stamp, brand });
   return brand;
+}
+
+function mtime(file) {
+  try { return fs.statSync(file).mtimeMs; } catch { return 0; }
+}
+
+/** Every `--name: #hex` declared in a stylesheet. */
+export function cssTokenColors(file) {
+  let css = '';
+  try { css = fs.readFileSync(file, 'utf8'); } catch { return []; }
+  const out = [];
+  for (const m of css.matchAll(/--[\w-]+\s*:\s*(#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3})\b/g)) {
+    const c = parseColor(m[1]);
+    if (c) out.push(toHex(c));
+  }
+  return out;
 }
 
 /** Clear the cache. For tests. */
