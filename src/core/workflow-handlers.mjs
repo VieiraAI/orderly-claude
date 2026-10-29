@@ -637,7 +637,7 @@ const HANDLERS = {
 /* ---------------------------- files to show ------------------------------ */
 
 const SHOWABLE = /\.(png|jpe?g|gif|webp|svg|mp4|webm)$/i;
-const SHOW_MAX = 12;
+const SHOW_MAX = 48;
 
 /**
  * Files a step asked to show, copied into the blob store so the run page can
@@ -798,6 +798,11 @@ function mockReply(prompt, model) {
   }
   if (/Return a JSON object .*title.*body/i.test(prompt)) {
     return { text: JSON.stringify({ title: '[mock] PR title', body: '## Summary\n\nMock body.' }), meta };
+  }
+  // A short story, page by page, so the run page's book pages can be tested.
+  if (/MOCK_PAGES/.test(prompt)) {
+    const pages = [1, 2, 3, 4, 5].map((page) => ({ page, text: `Mock page ${page}. The hare ran on.` }));
+    return { text: JSON.stringify({ title: 'Mock story', pages }), meta };
   }
   if (/single self-contained HTML mockup/i.test(prompt)) {
     return { text: '<!doctype html><html><body><h1>Mock</h1></body></html>', meta };
