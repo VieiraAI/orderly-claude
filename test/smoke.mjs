@@ -1017,6 +1017,113 @@ async function main() {
       `${needNode?.status} / pass=${needNode?.output?.pass}`);
     try { fs.unlinkSync(gateSaved.file); } catch {}
 
+    // Control-flow kinds: Loop (map over an inputs array), Delay (short),
+    // Approve (user clicks approve → run finishes done).
+    const loopDef = {
+      schemaVersion: 2, id: 'smoke-loop', title: 'Loop smoke',
+      graph: {
+        nodes: [
+          { id: 'map', title: 'Map', kind: 'loop', col: 1, row: 0,
+            spec: { over: 'inputs.items', action: 'script', cmd: 'echo item={{item}}' } },
+        ],
+        edges: [],
+      },
+    };
+    const loopSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: loopDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    check('loop def saved', loopSaved.saved === true, loopSaved.error);
+    const loopStart = await fetch(`${base}/api/workflows/smoke-loop/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ inputs: { items: 'a,b,c' } }),
+    }).then((r) => r.json());
+    let looped = null;
+    const loopBudget = Date.now() + 8000;
+    while (Date.now() < loopBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${loopStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { looped = r; break; }
+    }
+    check('loop run finishes done', looped?.status === 'done', looped?.status);
+    const mapOut = looped?.graph.nodes.find((n) => n.id === 'map')?.output;
+    check('loop ran once per item', mapOut?.count === 3 && mapOut?.results?.length === 3,
+      `count=${mapOut?.count} len=${mapOut?.results?.length}`);
+    check('loop results carry per-item output',
+      /item=a/.test(mapOut?.results?.[0]?.out || ''),
+      mapOut?.results?.[0]?.out);
+    try { fs.unlinkSync(loopSaved.file); } catch {}
+
+    // Delay: 100ms wait finishes done without blocking the test too long.
+    const delayDef = {
+      schemaVersion: 2, id: 'smoke-delay', title: 'Delay smoke',
+      graph: {
+        nodes: [{ id: 'wait', title: 'Wait', kind: 'delay', col: 1, row: 0,
+                 spec: { wait: '100ms' } }],
+        edges: [],
+      },
+    };
+    const delaySaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: delayDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const delayStart = await fetch(`${base}/api/workflows/smoke-delay/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    let delayed = null;
+    const delayBudget = Date.now() + 3000;
+    while (Date.now() < delayBudget) {
+      await sleep(50);
+      const r = (await get(`/api/runs/${delayStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { delayed = r; break; }
+    }
+    check('delay run finishes done', delayed?.status === 'done', delayed?.status);
+    const waitOut = delayed?.graph.nodes.find((n) => n.id === 'wait')?.output;
+    check('delay recorded its wait', waitOut?.ms >= 90 && typeof waitOut?.waited === 'string',
+      `ms=${waitOut?.ms} waited=${waitOut?.waited}`);
+    try { fs.unlinkSync(delaySaved.file); } catch {}
+
+    // Approve: open-ended wait → user clicks approve → done.
+    const approveDef = {
+      schemaVersion: 2, id: 'smoke-approve', title: 'Approve smoke',
+      graph: {
+        nodes: [{ id: 'ok', title: 'OK?', kind: 'approve', col: 1, row: 0,
+                 spec: { question: 'Approve smoke?' } }],
+        edges: [],
+      },
+    };
+    const approveSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: approveDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const approveStart = await fetch(`${base}/api/workflows/smoke-approve/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    // Wait for the approve to open.
+    let approveReady = null;
+    const approveBudget = Date.now() + 3000;
+    while (Date.now() < approveBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${approveStart.run.runId}`)).run;
+      if (r?.status === 'awaiting-answer') { approveReady = r; break; }
+    }
+    check('approve opens awaiting-answer', !!approveReady, approveReady?.status);
+    await fetch(`${base}/api/runs/${approveStart.run.runId}/answer`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ nodeId: 'ok', answer: 'approve' }),
+    });
+    let approved = null;
+    const settledBudget = Date.now() + 3000;
+    while (Date.now() < settledBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${approveStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { approved = r; break; }
+    }
+    check('approve finishes done when the user approves',
+      approved?.status === 'done' && approved?.graph.nodes[0]?.output?.approved === true,
+      `${approved?.status} / approved=${approved?.graph.nodes[0]?.output?.approved}`);
+    try { fs.unlinkSync(approveSaved.file); } catch {}
+
     // Rerun & delete.
     const rerunResp = await fetch(`${base}/api/runs/${started.run.runId}/rerun`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
