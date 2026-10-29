@@ -193,7 +193,7 @@ function renderRunActions() {
   }
   if (isPreview) {
     bar.innerHTML = `
-      <a class="run-btn" href="/workflows-new.html?from=${encodeURIComponent(run.workflowId)}"
+      <a class="run-btn" href="/workflow-editor.html?from=${encodeURIComponent(run.workflowId)}"
          title="Open this workflow in the visual editor">✎ Edit</a>
       <button class="run-btn" data-act="run-preview"
               title="Open the inputs sheet and run this workflow">◆ Run</button>`;

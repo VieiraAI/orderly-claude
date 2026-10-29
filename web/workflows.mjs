@@ -62,7 +62,7 @@ function renderTiles() {
         openSheet(el.dataset.id);
         return;
       }
-      location.href = `/workflows-new.html?from=${encodeURIComponent(el.dataset.id)}`;
+      location.href = `/workflow-editor.html?from=${encodeURIComponent(el.dataset.id)}`;
     };
   }
 }
@@ -662,7 +662,7 @@ const TAB_COPY = {
     eyebrow: 'Workflows · available in this project',
     title:   'Pick a workflow.',
     desc:    'Every tile is a graph of typed-output cards. Click one to open it in the editor; hit ◆ Run on the tile to send it with its inputs.',
-    newHref: '/workflows-new.html',
+    newHref: '/workflow-editor.html',
     newLabel: '+ New workflow',
   },
   runs: {
