@@ -75,12 +75,32 @@
     color: var(--text); background: var(--bg); border: 1px solid var(--edge-tint); border-radius: 10px; outline: none; resize: none; }
   body.json-mode .ed-canvas { display: none; }
   body.json-mode .ed-json { display: flex; }
+
+  /* Workflow identity moved into the top nav — id, title, scope as inline
+     inputs so the "page name" slot carries what you're actually editing. */
+  .wf-nav .nav-sep { color: var(--faint); margin: 0 10px 0 6px; }
+  .wf-nav .nav-input {
+    font: 12px var(--f-mono); color: var(--text); background: var(--surface);
+    border: 1px solid var(--edge-tint); border-radius: 6px;
+    padding: 4px 10px; margin-right: 6px; outline: none; min-height: 28px;
+  }
+  .wf-nav .nav-input:focus { border-color: var(--accent); }
+  .wf-nav .nav-id    { width: 180px; color: var(--accent); }
+  .wf-nav .nav-title { width: 260px; font-family: var(--f-ui); font-size: 13px; }
+  .wf-nav .nav-scope { width: 110px; }
 </style>
 </head><body>
 
-<nav class="nav">
+<nav class="nav wf-nav">
   <span class="app-menu" id="appMenu"></span>
-  <span class="here">new workflow</span>
+  <span class="here">Workflow editor</span>
+  <span class="nav-sep">·</span>
+  <input id="wfId"    class="nav-input nav-id"    spellcheck="false" placeholder="hyphenated-id">
+  <input id="wfTitle" class="nav-input nav-title" placeholder="Human-readable title">
+  <select id="wfScope" class="nav-input nav-scope" title="Where this workflow is saved">
+    <option value="project">project</option>
+    <option value="user">user</option>
+  </select>
   <span class="spacer"></span>
   <a class="link" href="/workflows.html#workflows">← back to Workflows</a>
 </nav>
@@ -168,19 +188,6 @@
         <button class="run-btn" id="btnConnect" title="Click a target node after this to draw an edge">↝ connect to…</button>
         <button class="run-btn danger" id="btnDelete">✕ delete</button>
       </div>
-    </div>
-
-    <div class="block">
-      <h3>Workflow</h3>
-      <label>id</label>
-      <input id="wfId" placeholder="hyphenated-id" spellcheck="false" value="untitled">
-      <label>title</label>
-      <input id="wfTitle" placeholder="Human-readable title">
-      <label>scope</label>
-      <select id="wfScope">
-        <option value="project">project</option>
-        <option value="user">user</option>
-      </select>
     </div>
 
     <div class="block">
