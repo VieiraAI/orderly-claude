@@ -581,6 +581,16 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     r = await p.ev(`return { path: location.pathname, cards: document.querySelectorAll('.n-card').length, edges: document.querySelectorAll('#edEdges .edge-hit').length, inputs: document.querySelectorAll('#inputsList .list-row').length };`);
     check('a saved workflow reopens as it was left, old links included', r.path === '/workflow-editor.html' && r.cards === 2 && r.edges === 1 && r.inputs === 1, JSON.stringify(r));
     await p.close();
+    // "refs" was saved with both steps in the same spot; Tidy lines them up.
+    p = await open('/workflow-editor.html?from=refs');
+    r = await p.ev(`
+      const left = (id) => parseFloat(document.querySelector('.n-card[data-id="' + id + '"]').style.left);
+      const before = [left('src'), left('use')];
+      document.getElementById('btnTidy').click(); ${tick}
+      return { before, after: [left('src'), left('use')] };`);
+    check('Tidy lines steps up left to right in the order they run', r.before[0] === r.before[1] && r.after[0] < r.after[1], JSON.stringify(r));
+    check('Tidy raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
     // ship-pr was copied into this project above, and that copy rightly
     // shadows the built-in; visual-regression is still only a built-in.
     p = await open('/workflow-editor.html?from=visual-regression');

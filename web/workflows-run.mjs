@@ -406,8 +406,10 @@ function makeCard(n, pos, parent) {
   // The model label on the head uses the real model that ran if we have it,
   // otherwise a kind-level default. Same with the credit on the foot.
   const meta = n.output?.meta || {};
+  // The model that actually ran, once known; it already says "claude".
   const modelLabel = meta.model
-    ? `claude · ${esc(meta.model)}`
+    ? esc(String(meta.model).replace(/^claude-/, 'claude · '))
+    : n.kind === 'publish' ? (n.spec?.target === 'pr' ? 'draft PR' : 'file')
     : (KIND_MODEL[n.kind] || '');
   const footMeta = cardFootMeta(n, meta);
   card.innerHTML = `

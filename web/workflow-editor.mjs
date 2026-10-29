@@ -161,6 +161,7 @@ function bindUi() {
     state.def.inputs.push({ key: `input${state.def.inputs.length + 1}`, label: '', placeholder: '' });
     changed();
   });
+  $('btnTidy').addEventListener('click', tidy);
   $('btnSettings').addEventListener('click', () => {
     state.side = state.side === 'settings' ? null : 'settings';
     if (state.side) state.selectedId = null;
@@ -290,6 +291,57 @@ function addNode() {
   if ($('newBefore')) $('newBefore').value = '';
   changed();
   setTimeout(() => $('selSpec').querySelector('textarea, input')?.focus(), 0);
+}
+
+/**
+ * Line the steps up in the order they run: each step one column right of the
+ * latest step it waits on, and within a column, near the steps that feed it,
+ * so connections run left to right and cross as little as they can. Steps
+ * added without an "After" otherwise pile up on the far right, and their
+ * connections loop backwards across the canvas.
+ */
+function tidy() {
+  const nodes = state.def.graph.nodes;
+  if (!nodes.length) return;
+  const parents = Object.fromEntries(nodes.map((n) => [n.id, []]));
+  for (const [a, b] of state.def.graph.edges) parents[b]?.push(a);
+  const depth = {};
+  const visit = (id, trail = new Set()) => {
+    if (depth[id] != null) return depth[id];
+    if (trail.has(id)) return 0; // a loop; check() reports it
+    trail.add(id);
+    const ps = parents[id] || [];
+    depth[id] = ps.length ? 1 + Math.max(...ps.map((p) => visit(p, trail))) : 0;
+    return depth[id];
+  };
+  for (const n of nodes) visit(n.id);
+  // A step that waits on nothing sits just before the first step it feeds,
+  // not back in the first column with its line running behind other cards.
+  const children = Object.fromEntries(nodes.map((n) => [n.id, []]));
+  for (const [a, b] of state.def.graph.edges) children[a]?.push(b);
+  for (const n of nodes) {
+    if (!parents[n.id].length && children[n.id].length) {
+      depth[n.id] = Math.max(0, Math.min(...children[n.id].map((c) => depth[c])) - 1);
+    }
+  }
+  const byCol = new Map();
+  for (const n of nodes) {
+    if (!byCol.has(depth[n.id])) byCol.set(depth[n.id], []);
+    byCol.get(depth[n.id]).push(n);
+  }
+  const row = {};
+  for (const col of [...byCol.keys()].sort((a, b) => a - b)) {
+    const list = byCol.get(col);
+    // Sit each step beside the steps that feed it: order by their mean row.
+    const pull = (n) => {
+      const ps = (parents[n.id] || []).filter((p) => row[p] != null);
+      return ps.length ? ps.reduce((t, p) => t + row[p], 0) / ps.length : nodes.indexOf(n);
+    };
+    list.sort((a, b) => pull(a) - pull(b) || nodes.indexOf(a) - nodes.indexOf(b));
+    list.forEach((n, i) => { n.col = col + 1; n.row = i; row[n.id] = i; });
+  }
+  changed();
+  toast('Lined up in the order they run.', 'ok', 1800);
 }
 
 /** A connection out of a Decision takes the first of its options not yet used. */
@@ -602,6 +654,7 @@ function fieldsOf(n) {
   if (k === 'script') f.push(['output.out', 'what the command printed'], ['output.code', 'its exit code']);
   if (k === 'agent' && o === 'json') f.push(['output.data', 'the data it returned']);
   if (k === 'agent' && o === 'json-findings') f.push(['output.findings', 'the findings']);
+  if (k === 'agent' && (o === 'html' || o === 'mockup')) f.push(['output.html', 'the web page it made']);
   if (k === 'decision') f.push(['output.answer', 'the choice you made']);
   if (k === 'approve') f.push(['output.approved', 'whether you approved']);
   if (k === 'check') f.push(['output.pass', 'whether it passed'], ['output.reason', 'why']);
