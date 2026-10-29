@@ -6,3 +6,7 @@ experiments/
 # Workflow run artifacts are per-machine by default. Delete this line to
 # share your runs with teammates on clone.
 .claude/workflows/runs/
+# Worktree sandboxes a workflow run creates so its filesystem edits don't
+# stomp on the main checkout. Removed on run cleanup; the gitignore is a
+# belt-and-braces so a crashed run never leaks into git status.
+.claude/worktrees/

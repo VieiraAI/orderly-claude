@@ -25,6 +25,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { screenshot, detectDevServer } from './capture.mjs';
 import { putFile } from './blobs.mjs';
+import {
+  loadBrand,
+  colorsInPalette,
+  fontIsBrand,
+  contrastPassesAll,
+  spacingOnScale,
+  scanRawHex,
+} from './brand.mjs';
+import { loadMcpConfig, resolveTool, interpolate, PUBLISH_TO_MCP } from './mcp.mjs';
+
+/** Working directory for handler-side filesystem calls. Prefers a sandbox
+ *  path when one is set on the run; falls back to the repo root. */
+function cwdOf(run) { return run?.cwd || run?.repoRoot; }
 
 /** Pick the handler for a kind. Unknown kinds get the generic placeholder. */
 export function getHandler(kind) {
@@ -36,7 +49,7 @@ const HANDLERS = {
     const cmd = pickTerminalCommand(node, run);
     const started = Date.now();
     onProgress({ progress: `$ ${cmd.display}` });
-    const { out, err, code } = await exec(cmd.argv, { cwd: run.repoRoot, signal, timeoutMs: 60_000 });
+    const { out, err, code } = await exec(cmd.argv, { cwd: cwdOf(run), signal, timeoutMs: 60_000 });
     const elapsed = ((Date.now() - started) / 1000).toFixed(2);
     return {
       prompt: `$ ${cmd.display}`,
@@ -65,7 +78,7 @@ const HANDLERS = {
       `Keep it concise: no more than ~400 words. Start with a single H1.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'haiku'),
+      cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'haiku'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
       // Stream the growing body into the card so the running state feels alive.
       onStream: ({ text: running }) => ctx.onProgress({
@@ -89,7 +102,7 @@ const HANDLERS = {
       `List at most five findings, most important first. If there is nothing to flag, return an empty array.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'sonnet'),
+      cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'sonnet'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const parsed = extractJson(text) || { findings: [] };
@@ -112,7 +125,7 @@ const HANDLERS = {
       `Return only the HTML (no code fences, no commentary). Use inline CSS. Keep it under 200 lines.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'sonnet'),
+      cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'sonnet'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const html = stripFences(text);
@@ -132,7 +145,7 @@ const HANDLERS = {
       `Keep the change tiny — ten hunks or fewer.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'sonnet'),
+      cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'sonnet'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const parsed = extractJson(text) || { file: 'unknown', hunks: [] };
@@ -151,7 +164,7 @@ const HANDLERS = {
       `{"title":"<pr title, under 70 chars>","body":"<short markdown body>"}`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(node, 'haiku'),
+      cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'haiku'),
       onProgress: (msg) => ctx.onProgress({ progress: msg }),
     });
     const parsed = extractJson(text) || {};
@@ -233,25 +246,26 @@ const HANDLERS = {
 
   agent: async (node, ctx) => {
     const spec = node.spec || {};
-    // Shim the spec onto the node so legacy handlers see their fields.
-    const shim = { ...node, prompt: spec.prompt || node.prompt, model: spec.model || node.model };
-    const out = (spec.output || 'markdown').toLowerCase();
-    if (out === 'markdown' || out === 'text')  return HANDLERS.document(shim, ctx);
-    if (out === 'json-findings' || out === 'findings') return HANDLERS.report(shim, ctx);
-    if (out === 'html' || out === 'mockup')    return HANDLERS.mockup(shim, ctx);
-    if (out === 'json-hunks' || out === 'diff') return HANDLERS.diff(shim, ctx);
-    // Generic JSON — reuse the report-shape parser but return .data instead.
-    const prompt = [
-      spec.prompt || `Produce JSON for node "${node.title}".`,
-      inputBlock(ctx.run.inputs),
-      '',
-      'Return a JSON object and nothing else.',
-    ].filter(Boolean).join('\n\n');
-    const { text, meta } = await callClaude(prompt, {
-      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(shim, 'haiku'),
-      onProgress: (msg) => ctx.onProgress({ progress: msg }),
-    });
-    return { title: `${slug(node.title)}.json`, data: extractJson(text) ?? text, meta };
+    const verify = spec.verify;
+    const maxRetries = Number(verify?.maxRetries ?? 0);
+    const attempts = [];
+    let output;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const prevFailures = attempts.map((a) => a.failures).flat();
+      output = await runAgentOnce(node, ctx, prevFailures);
+      if (!verify) return output;
+      const result = await runVerify(node, output, ctx);
+      attempts.push({ attempt, pass: result.pass, failures: result.failures, verify: result });
+      if (result.pass || attempt === maxRetries) {
+        output.verify = { pass: result.pass, attempts, results: result.results };
+        if (!result.pass && (verify.onFail || 'stop') === 'stop') {
+          throw new Error(`verify failed: ${result.failures.map((f) => f.reason).join('; ')}`);
+        }
+        return output;
+      }
+      ctx.onProgress({ progress: `verify failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying…` });
+    }
+    return output;
   },
 
   script: async (node, ctx) => {
@@ -310,6 +324,45 @@ const HANDLERS = {
       });
       pass = answer === 'yes';
       reason = answer;
+    } else if (a.type === 'color-in-palette') {
+      const brand = loadBrand(cwdOf(ctx.run));
+      const colors = resolveColors(a, from);
+      const res = colorsInPalette(colors, brand, { ignoreGrays: a.ignoreGrays !== false, tolerance: a.tolerance ?? 8 });
+      pass = res.ok;
+      reason = pass
+        ? `${colors.length} on palette`
+        : `${res.offenders.length} off palette: ${res.offenders.slice(0, 3).map((o) => `${o.color}→${o.nearest}`).join(', ')}`;
+      return { pass, reason, assertType: a.type, from: a.from || null, title: node.title, offenders: res.offenders };
+    } else if (a.type === 'font-is-brand') {
+      const brand = loadBrand(cwdOf(ctx.run));
+      const family = a.fontFamily ?? from?.output?.fontFamily ?? '';
+      const res = fontIsBrand(family, brand, { role: a.role || 'sans' });
+      pass = res.ok;
+      reason = pass ? `brand ${a.role || 'sans'}` : `uses ${res.used?.join(', ') || '(none)'}, want ${res.want?.join(', ')}`;
+      return { pass, reason, assertType: a.type, from: a.from || null, title: node.title };
+    } else if (a.type === 'contrast-min') {
+      const brand = loadBrand(cwdOf(ctx.run));
+      const pairs = a.pairs ?? from?.output?.pairs ?? [];
+      const res = contrastPassesAll(pairs, brand, { ratio: a.ratio });
+      pass = res.ok;
+      reason = pass
+        ? `all ≥ ${res.min}`
+        : `${res.failures.length} fail: ${res.failures.slice(0, 2).map((f) => `${f.label || f.fg + '/' + f.bg}=${f.ratio}`).join(', ')}`;
+      return { pass, reason, assertType: a.type, from: a.from || null, title: node.title, results: res.results };
+    } else if (a.type === 'spacing-on-scale') {
+      const brand = loadBrand(cwdOf(ctx.run));
+      const values = a.values ?? from?.output?.spacing ?? [];
+      const res = spacingOnScale(values, brand);
+      pass = res.ok;
+      reason = pass ? `${values.length} on scale` : `${res.offenders.length} off: ${res.offenders.slice(0, 3).map((o) => `${o.value}→${o.nearest}`).join(', ')}`;
+      return { pass, reason, assertType: a.type, from: a.from || null, title: node.title, offenders: res.offenders };
+    } else if (a.type === 'no-raw-hex') {
+      const brand = loadBrand(cwdOf(ctx.run));
+      const source = a.text ?? pickDiffText(from) ?? '';
+      const res = scanRawHex(source, brand, { ignoreGrays: a.ignoreGrays !== false });
+      pass = res.ok;
+      reason = pass ? 'no raw hex' : `${res.offenders.length} raw: ${res.offenders.slice(0, 3).map((o) => o.hex).join(', ')}`;
+      return { pass, reason, assertType: a.type, from: a.from || null, title: node.title, offenders: res.offenders };
     } else {
       pass = true; reason = 'no assert specified';
     }
@@ -324,13 +377,63 @@ const HANDLERS = {
       // Write upstream text to a file inside the repo; return a receipt.
       const upstream = upstreamContext(node, ctx.run);
       const relPath = spec.path || `.orderly-claude/outputs/${node.id}.md`;
-      if (!ctx.run.repoRoot) return { target, path: relPath, note: 'no repoRoot — skipped' };
-      const full = path.join(ctx.run.repoRoot, relPath);
+      if (!cwdOf(ctx.run)) return { target, path: relPath, note: 'no repoRoot — skipped' };
+      const full = path.join(cwdOf(ctx.run), relPath);
       fs.mkdirSync(path.dirname(full), { recursive: true });
       fs.writeFileSync(full, upstream || '', 'utf8');
       return { target, path: relPath, bytes: Buffer.byteLength(upstream || '') };
     }
+    // External shorthand targets map to an MCP call: {server, tool} looked up
+    // from .claude/mcp.json. Args come from the publish spec itself.
+    const mcpMap = PUBLISH_TO_MCP[target];
+    if (mcpMap) {
+      const mcpNode = {
+        ...node,
+        kind: 'mcp',
+        spec: { server: mcpMap.server, tool: mcpMap.tool, args: { ...spec } },
+      };
+      const out = await HANDLERS.mcp(mcpNode, ctx);
+      return { target, ...out };
+    }
     throw new Error(`unknown publish target: ${target}`);
+  },
+
+  // Call out to an MCP-configured server+tool. Resolution is file-based
+  // (.claude/mcp.json) so an un-configured target is a clear error, not a
+  // silent no-op.
+  mcp: async (node, ctx) => {
+    const spec = node.spec || {};
+    const { server, tool, args = {} } = spec;
+    if (!server || !tool) throw new Error('mcp: spec.server and spec.tool are required');
+    const config = loadMcpConfig(cwdOf(ctx.run));
+    const template = resolveTool(config, server, tool);
+    if (!template) {
+      return { server, tool, ok: false,
+        reason: `${server}.${tool} is not configured in ${cwdOf(ctx.run) || ''}/.claude/mcp.json` };
+    }
+    const resolved = {};
+    for (const [k, v] of Object.entries(args)) {
+      resolved[k] = typeof v === 'string'
+        ? v.replace(/\{\{\s*node\.([^.}]+)\.output\.([^}]+)\s*\}\}/g, (_, id, field) => {
+            const n = ctx.run.graph.nodes.find((x) => x.id === id);
+            const parts = field.split('.');
+            let cur = n?.output;
+            for (const p of parts) cur = cur?.[p];
+            return cur == null ? '' : String(cur);
+          })
+        : v;
+    }
+    const cmd = interpolate(template, resolved);
+    ctx.onProgress({ progress: `mcp · ${server}.${tool}` });
+    const { out, err, code } = await exec(['sh', '-c', cmd], {
+      cwd: cwdOf(ctx.run), signal: ctx.signal, timeoutMs: 60_000,
+    });
+    const text = (out || err || '').trim();
+    return {
+      server, tool, ok: code === 0,
+      code, out: text.slice(0, 2000),
+      cmd: cmd.slice(0, 300),
+    };
   },
 
   display: async (node, ctx) => {
@@ -372,13 +475,13 @@ const HANDLERS = {
         if (spec.action === 'script' && spec.cmd) {
           const cmd = String(spec.cmd).replaceAll('{{item}}', String(items[i]));
           const { out, err, code } = await exec(['sh', '-c', cmd], {
-            cwd: ctx.run.repoRoot, signal: ctx.signal, timeoutMs: 30_000,
+            cwd: cwdOf(ctx.run), signal: ctx.signal, timeoutMs: 30_000,
           });
           results.push({ item: items[i], out: (out || err || '').slice(0, 500), code });
         } else if (spec.action === 'agent' && spec.prompt) {
           const prompt = String(spec.prompt).replaceAll('{{item}}', String(items[i]));
           const { text, meta } = await callClaude(prompt, {
-            cwd: ctx.run.repoRoot, signal: ctx.signal,
+            cwd: cwdOf(ctx.run), signal: ctx.signal,
             model: pickModel(node, 'haiku'),
             onProgress: () => {}, onStream: () => {},
           });
@@ -391,6 +494,78 @@ const HANDLERS = {
       }
     }
     return { items, results, count: items.length };
+  },
+
+  // fanOut runs an action concurrently over an iterable, with bounded
+  // concurrency and a configurable join mode. The scalar sibling to `loop`.
+  fanOut: async (node, ctx) => {
+    const spec = node.spec || {};
+    const body = spec.body || {};
+    const items = resolveOver(spec.over, ctx.run);
+    const limit = Math.max(1, Math.min(16, Number(spec.concurrency) || 4));
+    const join = spec.join || 'concat';
+    const action = spec.action || (body.cmd ? 'script' : (body.prompt ? 'agent' : null));
+    const total = items.length;
+    const results = new Array(total);
+    let completed = 0;
+    let cursor = 0;
+
+    const runOne = async (i) => {
+      const item = items[i];
+      try {
+        if (action === 'script') {
+          const rawCmd = body.cmd || spec.cmd;
+          if (!rawCmd) return { item, error: 'missing body.cmd' };
+          const cmd = String(rawCmd).replaceAll('{{item}}', String(item));
+          const { out, err, code } = await exec(['sh', '-c', cmd], {
+            cwd: cwdOf(ctx.run), signal: ctx.signal, timeoutMs: 30_000,
+          });
+          return { item, out: (out || err || '').slice(0, 500), code };
+        }
+        if (action === 'agent') {
+          const rawPrompt = body.prompt || spec.prompt;
+          if (!rawPrompt) return { item, error: 'missing body.prompt' };
+          const prompt = String(rawPrompt).replaceAll('{{item}}', String(item));
+          const { text, meta } = await callClaude(prompt, {
+            cwd: cwdOf(ctx.run), signal: ctx.signal,
+            model: body.model || pickModel(node, 'haiku'),
+            onProgress: () => {}, onStream: () => {},
+          });
+          return { item, text, meta };
+        }
+        return { item };
+      } catch (e) {
+        return { item, error: e.message };
+      }
+    };
+
+    const worker = async () => {
+      while (!ctx.signal?.aborted) {
+        const i = cursor++;
+        if (i >= total) return;
+        results[i] = await runOne(i);
+        completed++;
+        ctx.onProgress({
+          progress: `${completed}/${total} done`,
+          partialOutput: { items, results: results.slice(), count: total, done: completed },
+        });
+      }
+    };
+
+    const workers = Array.from({ length: Math.min(limit, total) }, () => worker());
+    await Promise.all(workers);
+
+    let joined;
+    if (join === 'first-match') {
+      const hit = results.find((r) => !r?.error && (r?.code === 0 || r?.text || r?.item !== undefined));
+      joined = hit || null;
+    } else if (join === 'vote') {
+      const trues = results.filter((r) => r && !r.error && (r.pass === true || /^(yes|true)$/i.test(String(r.text || '').trim()))).length;
+      joined = { pass: trues > total / 2, trues, total };
+    } else {
+      joined = results;
+    }
+    return { items, results, count: total, join, joined };
   },
 
   // Delay parks the scheduler for a wall-clock duration (or until a given
@@ -623,7 +798,7 @@ function tryParse(s) { try { return JSON.parse(s); } catch { return null; } }
 async function pickOrigin(ctx) {
   const given = (ctx.run.inputs?.devUrl || '').trim();
   if (given) return given.replace(/\/+$/, '');
-  return await detectDevServer(ctx.run.repoRoot);
+  return await detectDevServer(cwdOf(ctx.run));
 }
 
 /** Capture one URL and move the PNG into the content-addressed blob store. */
@@ -696,6 +871,140 @@ function resolveOver(over, run) {
   }
   // Last resort: treat as a literal comma-separated list.
   return raw.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * One Agent pass. Called per attempt; `extraFailures` from prior rounds get
+ * appended to the prompt as "fix these on this pass" lines.
+ */
+async function runAgentOnce(node, ctx, extraFailures = []) {
+  const spec = node.spec || {};
+  const promptTail = extraFailures.length
+    ? `\n\n## Fix these on this pass\n${extraFailures.map((f) => `- ${f.type}: ${f.reason}`).join('\n')}`
+    : '';
+  const shim = {
+    ...node,
+    prompt: (spec.prompt || node.prompt || '') + promptTail,
+    model: spec.model || node.model,
+  };
+  const out = (spec.output || 'markdown').toLowerCase();
+  if (out === 'markdown' || out === 'text')         return HANDLERS.document(shim, ctx);
+  if (out === 'json-findings' || out === 'findings') return HANDLERS.report(shim, ctx);
+  if (out === 'html' || out === 'mockup')           return HANDLERS.mockup(shim, ctx);
+  if (out === 'json-hunks' || out === 'diff')       return HANDLERS.diff(shim, ctx);
+  const prompt = [
+    (spec.prompt || `Produce JSON for node "${node.title}".`) + promptTail,
+    inputBlock(ctx.run.inputs),
+    '',
+    'Return a JSON object and nothing else.',
+  ].filter(Boolean).join('\n\n');
+  const { text, meta } = await callClaude(prompt, {
+    cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(shim, 'haiku'),
+    onProgress: (msg) => ctx.onProgress({ progress: msg }),
+  });
+  return { title: `${slug(node.title)}.json`, data: extractJson(text) ?? text, meta };
+}
+
+/**
+ * Run the asserts in spec.verify against the agent's output. Returns
+ * { pass, results, failures }. Each result is { type, pass, reason }. Asserts
+ * that need a render pull from `output.render` when present; otherwise they
+ * fall back to inline fields on the assert spec.
+ */
+async function runVerify(node, output, ctx) {
+  const verify = node.spec?.verify || {};
+  const asserts = Array.isArray(verify.asserts) ? verify.asserts : [];
+  const brand = loadBrand(cwdOf(ctx.run));
+  const results = [];
+  for (const a of asserts) {
+    const res = await runOneAssert(a, output, brand);
+    results.push(res);
+  }
+  const failures = results.filter((r) => !r.pass);
+  return { pass: failures.length === 0, results, failures };
+}
+
+async function runOneAssert(a, output, brand) {
+  const t = a.type;
+  if (t === 'no-raw-hex') {
+    const text = typeof a.text === 'string' ? a.text : pickOutputText(output);
+    const r = scanRawHex(text, brand, { ignoreGrays: a.ignoreGrays !== false });
+    return { type: t, pass: r.ok,
+      reason: r.ok ? 'no raw hex' : `${r.offenders.length} raw: ${r.offenders.slice(0, 3).map((o) => o.hex).join(', ')}`,
+      offenders: r.offenders };
+  }
+  if (t === 'color-in-palette') {
+    const colors = Array.isArray(a.colors) ? a.colors : (output.render?.colors || []);
+    const r = colorsInPalette(colors, brand, { ignoreGrays: a.ignoreGrays !== false, tolerance: a.tolerance ?? 8 });
+    return { type: t, pass: r.ok,
+      reason: r.ok ? `${colors.length} on palette` : `${r.offenders.length} off: ${r.offenders.slice(0, 3).map((o) => `${o.color}→${o.nearest}`).join(', ')}`,
+      offenders: r.offenders };
+  }
+  if (t === 'font-is-brand') {
+    const family = a.fontFamily ?? output.render?.fontFamily ?? '';
+    const r = fontIsBrand(family, brand, { role: a.role || 'sans' });
+    return { type: t, pass: r.ok,
+      reason: r.ok ? `brand ${a.role || 'sans'}` : `uses ${(r.used || []).join(', ') || '(none)'}` };
+  }
+  if (t === 'contrast-min') {
+    const pairs = Array.isArray(a.pairs) ? a.pairs : (output.render?.contrastPairs || []);
+    const r = contrastPassesAll(pairs, brand, { ratio: a.ratio });
+    return { type: t, pass: r.ok,
+      reason: r.ok ? `all ≥ ${r.min}` : `${r.failures.length} fail: ${r.failures.slice(0, 2).map((f) => `${f.label || f.fg + '/' + f.bg}=${f.ratio}`).join(', ')}`,
+      results: r.results };
+  }
+  if (t === 'spacing-on-scale') {
+    const values = Array.isArray(a.values) ? a.values : (output.render?.spacing || []);
+    const r = spacingOnScale(values, brand);
+    return { type: t, pass: r.ok,
+      reason: r.ok ? `${values.length} on scale` : `${r.offenders.length} off: ${r.offenders.slice(0, 3).map((o) => `${o.value}→${o.nearest}`).join(', ')}`,
+      offenders: r.offenders };
+  }
+  if (t === 'llm-judge') {
+    // Placeholder — a real implementation would call a model with the rubric.
+    return { type: t, pass: true, reason: 'llm-judge not wired' };
+  }
+  return { type: t || 'none', pass: true, reason: 'unknown assert type, skipped' };
+}
+
+function pickOutputText(output) {
+  if (!output) return '';
+  if (typeof output === 'string') return output;
+  if (typeof output.body === 'string') return output.body;
+  if (typeof output.html === 'string') return output.html;
+  if (typeof output.text === 'string') return output.text;
+  if (Array.isArray(output.hunks)) {
+    return output.hunks.map((h) => `${h.op === 'add' ? '+' : '-'}${h.line}`).join('\n');
+  }
+  return JSON.stringify(output);
+}
+
+/**
+ * Resolve a `colors` input for the color-in-palette assert. Accepts an inline
+ * array in the spec, or pulls from the upstream node's output under common
+ * field names (colors, palette, swatches).
+ */
+function resolveColors(assertSpec, from) {
+  if (Array.isArray(assertSpec.colors)) return assertSpec.colors;
+  const o = from?.output || {};
+  if (Array.isArray(o.colors)) return o.colors;
+  if (Array.isArray(o.palette)) return o.palette;
+  if (Array.isArray(o.swatches)) return o.swatches;
+  return [];
+}
+
+/**
+ * Pull diff/source text out of an upstream node's output. Common shapes:
+ * output.diff (string), output.text, output.body, or the whole output as JSON.
+ */
+function pickDiffText(from) {
+  const o = from?.output;
+  if (!o) return '';
+  if (typeof o === 'string') return o;
+  if (typeof o.diff === 'string') return o.diff;
+  if (typeof o.text === 'string') return o.text;
+  if (typeof o.body === 'string') return o.body;
+  return JSON.stringify(o);
 }
 
 /**

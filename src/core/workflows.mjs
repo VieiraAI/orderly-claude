@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { USER_WORKFLOWS_DIR, repoWorkflowsDir, repoRunsDir, SCRATCH_RUNS_DIR } from './paths.mjs';
 import { listSessions } from './sessions.mjs';
+import { createWorktree } from './worktree.mjs';
 
 const BUILTIN_DIR = fileURLToPath(new URL('./workflow-defs/', import.meta.url));
 
@@ -86,13 +87,44 @@ function readDir(dir) {
  */
 export const V2_KINDS = new Set([
   'agent', 'script', 'decision', 'check', 'publish', 'display',
-  'inputs', 'loop', 'delay', 'approve',
+  'inputs', 'loop', 'delay', 'approve', 'fanOut', 'mcp',
 ]);
 
 export function validateDefinition(d) {
   const problems = [];
   if (!d || typeof d !== 'object') return ['not an object'];
   if (typeof d.id !== 'string' || !d.id.trim()) problems.push('missing id');
+  if (d.lessons != null) {
+    if (!Array.isArray(d.lessons)) problems.push('lessons must be an array');
+    else for (const [i, l] of d.lessons.entries()) {
+      if (!l || typeof l !== 'object') { problems.push(`lessons[${i}] not an object`); continue; }
+      if (typeof l.note !== 'string' || !l.note.trim()) problems.push(`lessons[${i}].note is required`);
+      if (l.rating && l.rating !== 'up' && l.rating !== 'down') problems.push(`lessons[${i}].rating must be up|down`);
+    }
+  }
+  if (d.tags != null) {
+    if (!Array.isArray(d.tags) || !d.tags.every((t) => typeof t === 'string')) {
+      problems.push('tags must be an array of strings');
+    }
+  }
+  if (d.whenToUse != null && typeof d.whenToUse !== 'string') {
+    problems.push('whenToUse must be a string');
+  }
+  if (d.runtime != null) {
+    if (typeof d.runtime !== 'object') problems.push('runtime must be an object');
+    else {
+      const sandboxes = new Set(['inplace', 'worktree']);
+      if (d.runtime.sandbox && !sandboxes.has(d.runtime.sandbox)) {
+        problems.push(`runtime.sandbox must be one of: ${[...sandboxes].join(', ')}`);
+      }
+      if (d.runtime.keepOnFail != null && typeof d.runtime.keepOnFail !== 'boolean') {
+        problems.push('runtime.keepOnFail must be a boolean');
+      }
+      if (d.runtime.baseBranch != null && typeof d.runtime.baseBranch !== 'string') {
+        problems.push('runtime.baseBranch must be a string');
+      }
+    }
+  }
   const v2 = d.schemaVersion === 2;
   const nodes = d.graph?.nodes;
   if (!Array.isArray(nodes) || nodes.length === 0) {
@@ -149,9 +181,28 @@ function validateV2Node(n) {
   const problems = [];
   const spec = n.spec || {};
   switch (n.kind) {
-    case 'agent':
+    case 'agent': {
       if (!spec.prompt && !spec.promptTemplate) problems.push('spec.prompt is required');
+      if (spec.verify) {
+        const v = spec.verify;
+        if (!Array.isArray(v.asserts) || v.asserts.length === 0) {
+          problems.push('spec.verify.asserts must be a non-empty array');
+        } else {
+          const knownAssert = new Set([
+            'exit-zero', 'has-pairs', 'contains', 'manual',
+            'color-in-palette', 'font-is-brand', 'contrast-min', 'spacing-on-scale', 'no-raw-hex', 'llm-judge',
+          ]);
+          for (const a of v.asserts) {
+            if (!a || !a.type) { problems.push('spec.verify.asserts[].type is required'); continue; }
+            if (!knownAssert.has(a.type)) problems.push(`unknown verify assert type: ${a.type}`);
+          }
+        }
+        if (v.maxRetries != null && (!Number.isInteger(v.maxRetries) || v.maxRetries < 0)) {
+          problems.push('spec.verify.maxRetries must be a non-negative integer');
+        }
+      }
       break;
+    }
     case 'script':
       if (!spec.cmd && !spec.op) problems.push('spec.cmd or spec.op is required');
       break;
@@ -161,11 +212,31 @@ function validateV2Node(n) {
         problems.push('spec.options must be a non-empty array');
       }
       break;
-    case 'check':
-      if (!spec.assert || !spec.assert.type) problems.push('spec.assert.type is required');
+    case 'check': {
+      if (!spec.assert || !spec.assert.type) { problems.push('spec.assert.type is required'); break; }
+      const t = spec.assert.type;
+      const known = new Set([
+        'exit-zero', 'has-pairs', 'contains', 'manual',
+        'color-in-palette', 'font-is-brand', 'contrast-min', 'spacing-on-scale', 'no-raw-hex',
+      ]);
+      if (!known.has(t)) problems.push(`unknown assert type: ${t}`);
+      if (t === 'contains' && !spec.assert.needle) problems.push('spec.assert.needle is required for contains');
+      if (t === 'contrast-min' && spec.assert.ratio != null && !(spec.assert.ratio > 0)) {
+        problems.push('spec.assert.ratio must be positive');
+      }
       break;
-    case 'publish':
+    }
+    case 'publish': {
       if (!spec.target) problems.push('spec.target is required');
+      const known = new Set(['pr', 'file', 'linear-issue', 'notion-page', 'figma-comment', 'github-issue']);
+      if (spec.target && !known.has(spec.target)) {
+        problems.push(`unknown publish target: ${spec.target}`);
+      }
+      break;
+    }
+    case 'mcp':
+      if (!spec.server) problems.push('spec.server is required');
+      if (!spec.tool) problems.push('spec.tool is required');
       break;
     case 'display':
       if (!spec.render) problems.push('spec.render is required');
@@ -179,6 +250,19 @@ function validateV2Node(n) {
     case 'loop':
       if (!spec.over) problems.push('spec.over (upstream iterable) is required');
       break;
+    case 'fanOut': {
+      if (!spec.over) problems.push('spec.over (upstream iterable) is required');
+      const action = spec.action || (spec.body?.cmd ? 'script' : (spec.body?.prompt ? 'agent' : null));
+      if (!action) problems.push('spec.action (script|agent) or spec.body.{cmd|prompt} is required');
+      if (action === 'script' && !spec.body?.cmd && !spec.cmd) problems.push('fanOut script needs spec.body.cmd');
+      if (action === 'agent'  && !spec.body?.prompt && !spec.prompt) problems.push('fanOut agent needs spec.body.prompt');
+      const joins = new Set(['concat', 'first-match', 'vote']);
+      if (spec.join && !joins.has(spec.join)) problems.push(`spec.join must be one of: ${[...joins].join(', ')}`);
+      if (spec.concurrency != null && (!Number.isInteger(spec.concurrency) || spec.concurrency < 1)) {
+        problems.push('spec.concurrency must be a positive integer');
+      }
+      break;
+    }
     case 'delay':
       if (!spec.wait) problems.push('spec.wait is required');
       break;
@@ -218,28 +302,51 @@ export function startRun({ workflowId, inputs = {}, repoRoot, sessionId = null, 
   if (!def) throw new Error(`workflow not found: ${workflowId}`);
   const runId = randomUUID();
   const now = new Date().toISOString();
-  const nodes = (def.graph?.nodes || []).map((n) => ({
-    id: n.id, title: n.title, kind: n.kind,
-    col: n.col, row: n.row, cost: n.cost,
-    // Carry per-kind config through to the run copy so handlers can read it.
-    spec: n.spec,
-    model: n.model, prompt: n.prompt, command: n.command,
-    question: n.question, choices: n.choices, route: n.route,
-    status: 'pending', waitsFor: null, output: null,
-    startedAt: null, endedAt: null,
-  }));
+  // Sandbox: a worktree isolates filesystem edits from the main checkout.
+  let sandboxPath = null;
+  if (def.runtime?.sandbox === 'worktree') {
+    if (!repoRoot) throw new Error('worktree sandbox requires a repoRoot');
+    const { path: p } = createWorktree({
+      repoRoot,
+      name: `run-${runId.slice(0, 8)}`,
+      baseBranch: def.runtime.baseBranch || null,
+    });
+    sandboxPath = p;
+  }
+  // Live lessons are those pinned or down-rated. Pre-group them by target
+  // node id so each node's prompt only grows by its own history.
+  const liveLessonsByNode = groupLiveLessons(def.lessons || []);
+  const nodes = (def.graph?.nodes || []).map((n) => {
+    const lessons = liveLessonsByNode[n.id] || [];
+    const prompt = lessons.length ? applyLessons(n.prompt, lessons) : n.prompt;
+    const spec = lessons.length && n.spec && n.spec.prompt
+      ? { ...n.spec, prompt: applyLessons(n.spec.prompt, lessons) }
+      : n.spec;
+    return {
+      id: n.id, title: n.title, kind: n.kind,
+      col: n.col, row: n.row, cost: n.cost,
+      spec,
+      model: n.model, prompt, command: n.command,
+      question: n.question, choices: n.choices, route: n.route,
+      status: 'pending', waitsFor: null, output: null,
+      startedAt: null, endedAt: null,
+      lessonsApplied: lessons.length ? lessons.map((l) => l.id) : undefined,
+    };
+  });
   const run = {
     runId,
     workflowId,
     workflowTitle: def.title,
     category: def.category,
     scope: def.scope,
-    // Record which schema the def used so the renderer can mark legacy runs.
     schemaVersion: def.schemaVersion || 1,
     status: 'running',
     trigger,
     sessionId,
     repoRoot: repoRoot || null,
+    cwd: sandboxPath || repoRoot || null,
+    sandboxPath,
+    runtime: def.runtime || null,
     startedAt: now,
     endedAt: null,
     inputs,
@@ -351,6 +458,53 @@ export function writeWorkflow({ def, scope = 'project', repoRoot = null, overwri
   }
   fs.writeFileSync(file, JSON.stringify(def, null, 2) + '\n');
   return file;
+}
+
+/**
+ * Append a lesson to a definition. Creates a stable id if the caller did not
+ * provide one. Returns { file, lesson }. Rejects for builtin defs — those are
+ * read-only; copy them into project or user scope first.
+ */
+export function addLesson(workflowId, lesson, { repoRoot = null } = {}) {
+  const def = getDefinition(workflowId, { repoRoot });
+  if (!def) throw new Error(`workflow not found: ${workflowId}`);
+  if (def.scope === 'builtin') throw new Error('cannot add lesson to a builtin workflow; save it to project scope first');
+  const l = {
+    id: lesson.id || `ls_${randomUUID().slice(0, 8)}`,
+    node: lesson.node || null,
+    note: String(lesson.note || '').trim(),
+    rating: lesson.rating === 'up' || lesson.rating === 'down' ? lesson.rating : null,
+    pin: !!lesson.pin,
+    fromRun: lesson.fromRun || null,
+    at: new Date().toISOString(),
+  };
+  if (!l.note) throw new Error('lesson.note is required');
+  const lessons = Array.isArray(def.lessons) ? [...def.lessons] : [];
+  lessons.push(l);
+  const next = { ...def, lessons };
+  delete next.scope; delete next.source; // these are runtime annotations, not fields on disk
+  const file = writeWorkflow({ def: next, scope: def.scope, repoRoot, overwrite: true });
+  return { file, lesson: l };
+}
+
+/** Lessons that influence the next run: pinned, or rated down. */
+function groupLiveLessons(lessons) {
+  const by = {};
+  for (const l of lessons || []) {
+    if (!l || !l.note) continue;
+    if (!l.pin && l.rating !== 'down') continue;
+    const key = l.node || '*';
+    (by[key] = by[key] || []).push(l);
+  }
+  return by;
+}
+
+/** Prepend a Prior lessons block to a prompt. Idempotent per lesson id. */
+function applyLessons(prompt, lessons) {
+  if (!lessons?.length) return prompt;
+  const header = '# Prior lessons';
+  const body = lessons.map((l) => `- (${l.rating || 'note'}) ${l.note}`).join('\n');
+  return `${header}\n${body}\n\n${prompt || ''}`.trim();
 }
 
 /** Delete a run folder. Returns true if the folder existed. */
