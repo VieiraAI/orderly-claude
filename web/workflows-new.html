@@ -120,33 +120,38 @@
 
     <div class="block">
       <h3>Add node</h3>
-      <div class="btn-row">
-        <select id="newKind" style="flex:1;">
-          <optgroup label="v2">
-            <option value="agent">agent</option>
-            <option value="script">script</option>
-            <option value="decision">decision</option>
-            <option value="check">check</option>
-            <option value="publish">publish</option>
-            <option value="display">display</option>
-            <option value="inputs">inputs</option>
-            <option value="loop">loop</option>
-            <option value="delay">delay</option>
-            <option value="approve">approve</option>
-          </optgroup>
-          <optgroup label="legacy">
-            <option value="document">document</option>
-            <option value="report">report</option>
-            <option value="mockup">mockup</option>
-            <option value="diff">diff</option>
-            <option value="shots">shots</option>
-            <option value="shots-set">shots-set</option>
-            <option value="terminal">terminal</option>
-            <option value="ask">ask</option>
-            <option value="pr">pr</option>
-          </optgroup>
-        </select>
-        <button class="run-btn" id="btnAddNode">+ add</button>
+      <label>kind</label>
+      <select id="newKind">
+        <optgroup label="v2">
+          <option value="agent">agent</option>
+          <option value="script">script</option>
+          <option value="decision">decision</option>
+          <option value="check">check</option>
+          <option value="publish">publish</option>
+          <option value="display">display</option>
+          <option value="inputs">inputs</option>
+          <option value="loop">loop</option>
+          <option value="delay">delay</option>
+          <option value="approve">approve</option>
+        </optgroup>
+        <optgroup label="legacy">
+          <option value="document">document</option>
+          <option value="report">report</option>
+          <option value="mockup">mockup</option>
+          <option value="diff">diff</option>
+          <option value="shots">shots</option>
+          <option value="shots-set">shots-set</option>
+          <option value="terminal">terminal</option>
+          <option value="ask">ask</option>
+          <option value="pr">pr</option>
+        </optgroup>
+      </select>
+      <label>after (input from)</label>
+      <select id="newAfter"><option value="">— none —</option></select>
+      <label>before (next, optional)</label>
+      <select id="newBefore"><option value="">— none —</option></select>
+      <div class="btn-row" style="margin-top:6px;">
+        <button class="run-btn" id="btnAddNode" style="flex:1;">+ add node</button>
       </div>
     </div>
 

@@ -45,7 +45,11 @@ const state = {
 /* ---------------------------------- init --------------------------------- */
 
 async function boot() {
-  await loadScaffold();
+  // /workflows-new.html?from=<id> loads an existing def into the editor so
+  // "Edit" on a workflow's preview page lands you in a prefilled editor.
+  const from = new URLSearchParams(location.search).get('from');
+  if (from) await loadExisting(from);
+  else await loadScaffold();
   bindUi();
   render();
 }
@@ -55,6 +59,22 @@ async function loadScaffold() {
   const title = $('wfTitle').value || '';
   const r = await fetch(`/api/workflows/scaffold?id=${encodeURIComponent(slug)}&title=${encodeURIComponent(title)}`).then((x) => x.json());
   state.def = r.def;
+}
+
+async function loadExisting(id) {
+  const r = await fetch(`/api/workflows/${encodeURIComponent(id)}`).then((x) => x.json());
+  if (!r.workflow) { await loadScaffold(); return; }
+  // Drop server-side fields that aren't part of the on-disk def (scope,
+  // source). The editor's save path writes to the chosen scope dropdown
+  // so this isn't lost — just not carried as inline state.
+  const { scope, source, ...clean } = r.workflow;
+  state.def = clean;
+  // Reflect the loaded id/title into the sidebar inputs on first render.
+  requestAnimationFrame(() => {
+    if ($('wfId'))    $('wfId').value    = state.def.id    || '';
+    if ($('wfTitle')) $('wfTitle').value = state.def.title || '';
+    if ($('wfScope') && scope) $('wfScope').value = scope;
+  });
 }
 
 function bindUi() {
@@ -107,18 +127,58 @@ function bindUi() {
 
 function addNode() {
   const kind = $('newKind').value;
+  const after  = $('newAfter')?.value || '';
+  const before = $('newBefore')?.value || '';
   const idBase = kind.replace(/[^a-z0-9]/g, '').slice(0, 6) || 'n';
   let id = idBase, i = 1;
   while (state.def.graph.nodes.some((n) => n.id === id)) { i++; id = `${idBase}${i}`; }
-  const occupiedCols = state.def.graph.nodes.map((n) => n.col || 0);
-  const col = occupiedCols.length ? Math.max(...occupiedCols) + 1 : 0;
-  const node = { id, title: id, kind, col, row: 0, cost: 1 };
-  // v2 kinds come with a sane default spec so the node validates on save.
+  // Pick a column that makes the wiring read left-to-right. If "after" is set,
+  // land one column right of it. If "before" is set, land one left of that.
+  // If both: land in between (and leave the pre-existing edge alone — the new
+  // node sits as a sibling, not an insertion-split, which is simpler and lets
+  // the user explicitly delete the old edge if they want that semantic).
+  const nodeAt = (nid) => state.def.graph.nodes.find((n) => n.id === nid);
+  const na = nodeAt(after), nb = nodeAt(before);
+  let col = state.def.graph.nodes.length
+    ? Math.max(...state.def.graph.nodes.map((n) => n.col || 0)) + 1 : 1;
+  if (na && nb) col = Math.max((na.col || 0) + 1, Math.min((nb.col || 0) - 1, (na.col || 0) + 1));
+  else if (na) col = (na.col || 0) + 1;
+  else if (nb) col = Math.max(0, (nb.col || 0) - 1);
+  const row = na?.row ?? nb?.row ?? 0;
+  const node = { id, title: id, kind, col, row, cost: 1 };
   const starter = KIND_SPEC_DEFAULT[kind];
   if (starter) node.spec = starter();
   state.def.graph.nodes.push(node);
+  // Auto-wire the chosen edges. If after is a Decision, prompt for a label.
+  if (after) {
+    const src = nodeAt(after);
+    let label = null;
+    if (src?.kind === 'decision' && (src.spec?.options || []).length) {
+      const opts = src.spec.options.map((o) => o.edgeLabel).filter(Boolean);
+      const picked = window.prompt(
+        `Decision "${src.id}" routes down a labeled edge. Which label? (${opts.join(' / ')}; empty = unlabeled default)`,
+        opts[0] || '');
+      if (picked && picked.trim()) label = picked.trim();
+    }
+    state.def.graph.edges.push(label ? [after, id, label] : [after, id]);
+  }
+  if (before) state.def.graph.edges.push([id, before]);
   state.selectedId = id;
+  // Reset the pickers so the next add starts fresh.
+  if ($('newAfter'))  $('newAfter').value  = '';
+  if ($('newBefore')) $('newBefore').value = '';
   render();
+}
+
+/** Fill the after/before pickers with current node ids. */
+function refreshAddPickers() {
+  const nodes = state.def.graph.nodes;
+  const opts = ['<option value="">— none —</option>']
+    .concat(nodes.map((n) => `<option value="${escapeAttr(n.id)}">${escapeHtml(n.id)} · ${escapeHtml(n.title || '')}</option>`));
+  const afterSel  = $('newAfter');
+  const beforeSel = $('newBefore');
+  if (afterSel)  { const v = afterSel.value;  afterSel.innerHTML  = opts.join(''); afterSel.value  = v; }
+  if (beforeSel) { const v = beforeSel.value; beforeSel.innerHTML = opts.join(''); beforeSel.value = v; }
 }
 
 function deleteSelected() {
@@ -244,6 +304,11 @@ function showProblems(list) {
 function render() {
   $('wfId').value = state.def.id || '';
   $('wfTitle').value = state.def.title || '';
+  refreshAddPickers();
+  // Preselect "after" to the currently selected node so clicking + add node
+  // feels like "add a step after this one". The user can clear it to drop
+  // a disconnected node.
+  if (state.selectedId && $('newAfter')) $('newAfter').value = state.selectedId;
   renderCanvas();
   renderSelected();
   if (state.mode === 'json') $('jsonArea').value = JSON.stringify(state.def, null, 2);
