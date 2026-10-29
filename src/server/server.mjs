@@ -21,7 +21,7 @@ import { loadShots, attachShots } from '../core/shots.mjs';
 import {
   listDefinitions, listAllDefinitions, knownRepoRoots, getDefinition, startRun, readRun, listRuns, runsForSession, deleteRun, rerunRun,
   scaffoldWorkflow, writeWorkflow, validateDefinition, lintDefinition, deleteWorkflow, duplicateWorkflow,
-  stripRuntime, freeId, reconcileRuns, prepareResume, openQuestion, recordAnswer, writeRun, RESUMABLE,
+  stripRuntime, freeId, claimId, markClashes, whereWord, reconcileRuns, prepareResume, openQuestion, recordAnswer, writeRun, RESUMABLE,
   registerRoot, addLesson, updateRun,
 } from '../core/workflows.mjs';
 import { suggestWorkflows } from '../core/workflow-suggest.mjs';
@@ -368,6 +368,8 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
     return { scope, repoRoot: repoFrom(src.repo || src.repoRoot) };
   }
   const bootedRepo = () => (liveCwd ? path.resolve(liveCwd) : null);
+  // One folder can be named two ways (/tmp and /private/tmp); compare the real one.
+  const realDir = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
   const queryRef = (url) => refFrom({ scope: url.searchParams.get('scope'), repo: url.searchParams.get('repo') });
   /* Current version of the workflow a run came from, one catalog per repo. */
   function versionLookup() {
@@ -704,7 +706,9 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       // Create a workflow — three starter kinds plus a validator for the
       // in-browser editor's "check" button.
       if (url.pathname === '/api/workflows/scaffold' && req.method === 'GET') {
-        const id = url.searchParams.get('id') || 'untitled';
+        const scope = url.searchParams.get('scope') === 'user' ? 'user' : 'project';
+        // An id no other workflow uses, so the starter can be saved as is.
+        const id = freeId(url.searchParams.get('id') || 'untitled', { scope, repoRoot: scope === 'project' ? liveCwd : null });
         const title = url.searchParams.get('title') || null;
         return send(200, { def: scaffoldWorkflow(id, { title }) });
       }
@@ -719,11 +723,14 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         try {
           const scope = body.scope || 'project';
           const repoRoot = scope === 'project' ? repoFrom(body.repoRoot) : null;
+          // A new id, or a renamed one, must not be used by any other
+          // workflow anywhere. Refused with a free id the editor can offer.
+          if (typeof body.def?.id === 'string') claimId(body.def.id, { scope, repoRoot, overwrite: !!body.overwrite });
           const file = writeWorkflow({ def: body.def, scope, repoRoot, overwrite: !!body.overwrite });
           const written = JSON.parse(fs.readFileSync(file, 'utf8'));
           return send(200, { saved: true, file, id: written.id, scope, repoRoot, bootedRepo: bootedRepo(), version: written.version });
         } catch (e) {
-          return send(e.status || (/already exists/.test(e.message) ? 409 : 400), { error: e.message });
+          return send(e.status || (/already exists/.test(e.message) ? 409 : 400), { error: e.message, suggestedId: e.suggestedId, takenBy: e.takenBy });
         }
       }
 
@@ -866,20 +873,25 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       }
 
 
-      // Import a definition file someone shared. A clashing id is refused
-      // with a free one suggested, never silently overwritten.
+      // Import a definition file someone shared. An id used by any other
+      // workflow, here or in another repo, is refused with a free one
+      // suggested, never silently overwritten or shadowed.
       if (url.pathname === '/api/workflows/import' && req.method === 'POST') {
         const body = await readBody(req, 5_000_000);
         const def = stripRuntime(body.def || {});
         const scope = body.scope || 'user';
         const problems = validateDefinition(def);
         if (problems.length) return send(400, { error: 'This file is not a workflow Orderly can run', problems });
+        const repoRoot = scope === 'project' ? liveCwd : null;
         try {
-          const file = writeWorkflow({ def, scope, repoRoot: scope === 'project' ? liveCwd : null, overwrite: !!body.overwrite });
+          claimId(def.id, { scope, repoRoot, overwrite: !!body.overwrite });
+          const file = writeWorkflow({ def, scope, repoRoot, overwrite: !!body.overwrite });
           return send(200, { saved: true, file, id: def.id });
         } catch (e) {
-          if (/already exists/.test(e.message)) {
-            return send(409, { error: `You already have a workflow called "${def.id}"`, suggestedId: freeId(def.id, { scope, repoRoot: liveCwd }) });
+          if (e.status === 409 || /already exists/.test(e.message)) {
+            const error = e.own || !e.takenBy ? `You already have a workflow called "${def.id}"`
+              : `"${def.id}" is already used by ${e.takenBy.map(whereWord).join(' and ')}`;
+            return send(409, { error, suggestedId: e.suggestedId || freeId(def.id, { scope, repoRoot }), takenBy: e.takenBy });
           }
           return send(400, { error: e.message });
         }
@@ -942,7 +954,8 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         let def;
         try { def = getDefinition(decodeURIComponent(wfMatch[1]), queryRef(url)); }
         catch (e) { return send(400, { error: e.message }); }
-        return def ? send(200, { workflow: def, bootedRepo: bootedRepo() }) : send(404, { error: 'workflow not found' });
+        // Marked like the listing, so the editor can warn about an old clash.
+        return def ? send(200, { workflow: markClashes([def], liveCwd)[0], bootedRepo: bootedRepo() }) : send(404, { error: 'workflow not found' });
       }
       const wfRunMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/run$/);
       if (wfRunMatch && req.method === 'POST') {
@@ -1130,6 +1143,14 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         }
         let shown = all;
         if (q.get('workflow')) shown = shown.filter((r) => r.workflowId === q.get('workflow'));
+        // A project workflow runs in its own repo, so its runs are the ones
+        // made there; a same-id run from another repo is another workflow.
+        // Runs from before scope was recorded are kept rather than guessed at.
+        if (q.get('scope')) shown = shown.filter((r) => !r.scope || r.scope === q.get('scope'));
+        if (q.get('repo')) {
+          const want = realDir(q.get('repo'));
+          shown = shown.filter((r) => r.repoRoot && realDir(r.repoRoot) === want);
+        }
         if (q.get('status')) {
           const want = q.get('status');
           shown = shown.filter((r) => want === 'needs-you' ? !!r.needsYou : r.status === want);
