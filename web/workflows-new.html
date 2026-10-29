@@ -76,42 +76,146 @@
   body.json-mode .ed-canvas { display: none; }
   body.json-mode .ed-json { display: flex; }
 
-  /* Workflow identity moved into the top nav — id, title, scope as inline
-     inputs so the "page name" slot carries what you're actually editing. */
-  .wf-nav .nav-sep { color: var(--faint); margin: 0 10px 0 6px; }
-  .wf-nav .nav-input {
-    font: 12px var(--f-mono); color: var(--text); background: var(--surface);
-    border: 1px solid var(--edge-tint); border-radius: 6px;
-    padding: 4px 10px; margin-right: 6px; outline: none; min-height: 28px;
+  /* Workflow header row — sits below the main nav. Each field has a tiny
+     uppercase mono label so what it represents is unambiguous; the inputs
+     match the dark surface + hairline edge language of the rest of the app. */
+  .wf-header {
+    display: grid; grid-template-columns: 220px 1fr 140px auto; gap: 20px;
+    align-items: end;
+    padding: 14px 24px 16px; background: var(--surface);
+    border-bottom: 1px solid var(--edge-tint);
   }
-  .wf-nav .nav-input:focus { border-color: var(--accent); }
-  .wf-nav .nav-id    { width: 180px; color: var(--accent); }
-  .wf-nav .nav-title { width: 260px; font-family: var(--f-ui); font-size: 13px; }
-  .wf-nav .nav-scope { width: 110px; }
+  .wf-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .wf-field label {
+    font: 10px var(--f-mono); color: var(--faint); letter-spacing: 0.1em; text-transform: uppercase;
+  }
+  .wf-field input, .wf-field select {
+    font: 13px var(--f-ui); color: var(--text); background: var(--bg);
+    border: 1px solid var(--edge-tint); border-radius: 6px; padding: 7px 10px; outline: none;
+    width: 100%; min-width: 0;
+  }
+  .wf-field input:focus, .wf-field select:focus { border-color: var(--accent); }
+  .wf-field.wf-id input    { font-family: var(--f-mono); color: var(--accent); font-size: 12px; }
+  .wf-field.wf-title input { font-weight: 500; }
+  .wf-actions { display: flex; align-items: center; gap: 6px; }
+
+  /* Layout accounts for the extra header row. */
+  .ed-layout { height: calc(100vh - 56px - 65px); }
+  /* Sidebar hides itself when nothing is selected — the canvas fills. */
+  .ed-layout.no-sel { grid-template-columns: 1fr 0; }
+  .ed-layout.no-sel .ed-side { display: none; }
+
+  /* Floating Add Node control on the canvas. */
+  .add-floater {
+    position: absolute; z-index: 20; top: 14px; left: 14px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .add-floater .add-btn {
+    font: 500 12px var(--f-ui); color: var(--accent-ink); background: var(--accent);
+    border: none; border-radius: 999px; padding: 7px 14px; cursor: pointer;
+    box-shadow: 0 2px 8px color-mix(in oklab, var(--accent) 24%, transparent);
+    letter-spacing: -0.005em;
+  }
+  .add-floater .add-btn:hover { filter: brightness(1.08); }
+  .add-pop {
+    display: none;
+    background: var(--surface); border: 1px solid var(--edge-tint); border-radius: 10px;
+    padding: 14px; width: 260px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  }
+  .add-pop.on { display: flex; flex-direction: column; gap: 2px; }
+  .add-pop label { font: 10px var(--f-mono); color: var(--faint); letter-spacing: 0.1em; text-transform: uppercase; margin-top: 6px; }
+  .add-pop select { font: 12px var(--f-mono); color: var(--text); background: var(--bg); border: 1px solid var(--edge-tint); border-radius: 6px; padding: 6px 8px; outline: none; }
+  .add-pop select:focus { border-color: var(--accent); }
+  .add-pop .add-pop-cta { margin-top: 10px; }
+
+  /* Floating toast for validation feedback. Appears at the bottom of the viewport. */
+  .ed-toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    max-width: 560px; min-width: 320px; z-index: 25;
+    padding: 10px 14px;
+    background: var(--surface); border: 1px solid var(--edge-tint); border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  }
+  .ed-toast .status { margin: 0; }
+  .ed-toast .problems { margin-top: 8px; }
 </style>
 </head><body>
 
-<nav class="nav wf-nav">
+<nav class="nav">
   <span class="app-menu" id="appMenu"></span>
   <span class="here">Workflow editor</span>
-  <span class="nav-sep">·</span>
-  <input id="wfId"    class="nav-input nav-id"    spellcheck="false" placeholder="hyphenated-id">
-  <input id="wfTitle" class="nav-input nav-title" placeholder="Human-readable title">
-  <select id="wfScope" class="nav-input nav-scope" title="Where this workflow is saved">
-    <option value="project">project</option>
-    <option value="user">user</option>
-  </select>
   <span class="spacer"></span>
   <a class="link" href="/workflows.html#workflows">← back to Workflows</a>
 </nav>
+
+<header class="wf-header">
+  <div class="wf-field wf-id">
+    <label for="wfId">Workflow id</label>
+    <input id="wfId" spellcheck="false" placeholder="hyphenated-id">
+  </div>
+  <div class="wf-field wf-title">
+    <label for="wfTitle">Title</label>
+    <input id="wfTitle" placeholder="Human-readable title">
+  </div>
+  <div class="wf-field">
+    <label for="wfScope">Save to</label>
+    <select id="wfScope">
+      <option value="project">this project</option>
+      <option value="user">global library</option>
+    </select>
+  </div>
+  <div class="wf-actions">
+    <button class="run-btn" id="btnValidate">✓ validate</button>
+    <button class="run-btn" id="btnSave" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent);">◆ save</button>
+    <button class="run-btn" id="btnRun" title="Save, then start a run of this workflow">▶ run</button>
+  </div>
+</header>
 <script type="module">
   import { mountAppMenu } from '/app-menu.mjs';
   mountAppMenu(document.getElementById('appMenu'), { here: 'workflows' });
 </script>
 
-<div class="ed-layout">
+<div class="ed-layout no-sel" id="edLayout">
   <div class="ed-canvas" id="edCanvas">
     <div class="ed-canvas-inner" id="edInner">
+      <!-- Floating Add Node control. Opens a popover with kind + after + before. -->
+      <div class="add-floater">
+        <button class="add-btn" id="btnAddNodeOpen">+ Add node</button>
+        <div class="add-pop" id="addPop">
+          <label for="newKind">Kind</label>
+          <select id="newKind">
+            <optgroup label="v2">
+              <option value="agent">agent</option>
+              <option value="script">script</option>
+              <option value="decision">decision</option>
+              <option value="check">check</option>
+              <option value="publish">publish</option>
+              <option value="display">display</option>
+              <option value="inputs">inputs</option>
+              <option value="loop">loop</option>
+              <option value="delay">delay</option>
+              <option value="approve">approve</option>
+            </optgroup>
+            <optgroup label="legacy">
+              <option value="document">document</option>
+              <option value="report">report</option>
+              <option value="mockup">mockup</option>
+              <option value="diff">diff</option>
+              <option value="shots">shots</option>
+              <option value="shots-set">shots-set</option>
+              <option value="terminal">terminal</option>
+              <option value="ask">ask</option>
+              <option value="pr">pr</option>
+            </optgroup>
+          </select>
+          <label for="newAfter">After (input from)</label>
+          <select id="newAfter"><option value="">— none —</option></select>
+          <label for="newBefore">Before (next, optional)</label>
+          <select id="newBefore"><option value="">— none —</option></select>
+          <button class="add-btn add-pop-cta" id="btnAddNode">+ Add to canvas</button>
+        </div>
+      </div>
       <svg class="svg-edges" id="edEdges"></svg>
     </div>
   </div>
@@ -126,44 +230,7 @@
       <button id="modeJson">{ } JSON</button>
     </div>
 
-    <div class="block">
-      <h3>Add node</h3>
-      <label>kind</label>
-      <select id="newKind">
-        <optgroup label="v2">
-          <option value="agent">agent</option>
-          <option value="script">script</option>
-          <option value="decision">decision</option>
-          <option value="check">check</option>
-          <option value="publish">publish</option>
-          <option value="display">display</option>
-          <option value="inputs">inputs</option>
-          <option value="loop">loop</option>
-          <option value="delay">delay</option>
-          <option value="approve">approve</option>
-        </optgroup>
-        <optgroup label="legacy">
-          <option value="document">document</option>
-          <option value="report">report</option>
-          <option value="mockup">mockup</option>
-          <option value="diff">diff</option>
-          <option value="shots">shots</option>
-          <option value="shots-set">shots-set</option>
-          <option value="terminal">terminal</option>
-          <option value="ask">ask</option>
-          <option value="pr">pr</option>
-        </optgroup>
-      </select>
-      <label>after (input from)</label>
-      <select id="newAfter"><option value="">— none —</option></select>
-      <label>before (next, optional)</label>
-      <select id="newBefore"><option value="">— none —</option></select>
-      <div class="btn-row" style="margin-top:6px;">
-        <button class="run-btn" id="btnAddNode" style="flex:1;">+ add node</button>
-      </div>
-    </div>
-
-    <div class="block" id="selBlock" style="display:none;">
+    <div class="block" id="selBlock">
       <h3>Selected node</h3>
       <label>id</label><input id="selId" spellcheck="false">
       <label>title</label><input id="selTitle">
@@ -189,18 +256,12 @@
         <button class="run-btn danger" id="btnDelete">✕ delete</button>
       </div>
     </div>
-
-    <div class="block">
-      <h3>Save</h3>
-      <div class="btn-row">
-        <button class="run-btn" id="btnValidate">✓ validate</button>
-        <button class="run-btn" id="btnSave" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent);">◆ save</button>
-        <button class="run-btn" id="btnRun" title="Save, then start a run of this workflow">▶ run</button>
-      </div>
-      <div id="status" class="status">Edit something.</div>
-      <div id="problems" class="problems" style="display:none;"></div>
-    </div>
   </aside>
+</div>
+<!-- Validation feedback as a floating toast at the bottom of the canvas. -->
+<div class="ed-toast" id="edToast" style="display:none;">
+  <div id="status" class="status"></div>
+  <div id="problems" class="problems" style="display:none;"></div>
 </div>
 
 <script type="module" src="/workflows-new.mjs"></script>

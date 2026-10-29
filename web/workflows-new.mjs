@@ -86,7 +86,23 @@ function bindUi() {
     state.def.title = $('wfTitle').value.trim() || state.def.id;
     render();
   });
-  $('btnAddNode').addEventListener('click', addNode);
+  // Add-node floater: button opens the popover; the Add inside it drops a node.
+  $('btnAddNodeOpen')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('addPop').classList.toggle('on');
+  });
+  $('btnAddNode').addEventListener('click', (e) => {
+    e.stopPropagation();
+    addNode();
+    $('addPop').classList.remove('on');
+  });
+  // Click anywhere else closes the popover.
+  document.addEventListener('click', (e) => {
+    const pop = $('addPop');
+    if (!pop || !pop.classList.contains('on')) return;
+    if (e.target.closest('.add-floater')) return;
+    pop.classList.remove('on');
+  });
   $('btnDelete').addEventListener('click', deleteSelected);
   $('btnConnect').addEventListener('click', () => {
     state.connectFromId = state.selectedId;
@@ -282,6 +298,10 @@ async function save() {
     if (r.saved) {
       $('status').textContent = `Saved → ${r.file}`;
       $('status').className = 'status ok';
+      $('problems').style.display = 'none';
+      $('edToast').style.display = 'block';
+      clearTimeout(showProblems._t);
+      showProblems._t = setTimeout(() => { $('edToast').style.display = 'none'; }, 2500);
       return true;
     }
     throw new Error(r.error || 'save failed');
@@ -317,16 +337,23 @@ async function saveAndRun() {
 
 function showProblems(list) {
   const panel = $('problems');
+  const toast = $('edToast');
   if (!list.length) {
     panel.style.display = 'none';
     $('status').textContent = 'Valid.';
     $('status').className = 'status ok';
+    toast.style.display = 'block';
+    // Auto-fade the success state after a short beat so it doesn't linger.
+    clearTimeout(showProblems._t);
+    showProblems._t = setTimeout(() => { toast.style.display = 'none'; }, 2000);
     return;
   }
   panel.style.display = 'block';
   panel.innerHTML = `<strong>${list.length} problem${list.length === 1 ? '' : 's'}:</strong><ul>${list.map((p) => `<li>${escapeHtml(p)}</li>`).join('')}</ul>`;
   $('status').textContent = `${list.length} problem${list.length === 1 ? '' : 's'}`;
   $('status').className = 'status err';
+  toast.style.display = 'block';
+  clearTimeout(showProblems._t);
 }
 
 /* --------------------------------- render -------------------------------- */
@@ -337,6 +364,9 @@ function render() {
   refreshAddPickers();
   renderCanvas();
   renderSelected();
+  // Sidebar collapses when nothing is selected — the canvas fills the width.
+  const layout = $('edLayout');
+  if (layout) layout.classList.toggle('no-sel', !state.selectedId);
   if (state.mode === 'json') $('jsonArea').value = JSON.stringify(state.def, null, 2);
 }
 
