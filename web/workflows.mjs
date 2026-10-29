@@ -14,7 +14,7 @@ const scopeTitles = {
 const CAT_LABEL = { design: 'Design', review: 'Review', ship: 'Ship', plan: 'Plan',
   build: 'Build', content: 'Content', io: 'I/O' };
 
-const state = { workflows: [], runs: [], skills: [], prompts: [], decisions: [],
+const state = { workflows: [], bootedRepo: null, runs: [], skills: [], prompts: [], decisions: [],
   open: null, openPrompt: null, liveSessionId: null,
   decisionScope: 'all',    // 'all' or 'session'
   catalogCategory: 'all',  // filter chip for the Workflows tab
@@ -23,7 +23,34 @@ const state = { workflows: [], runs: [], skills: [], prompts: [], decisions: [],
 async function loadCatalog() {
   const r = await fetch('/api/workflows').then((x) => x.json());
   state.workflows = r.workflows || [];
+  state.bootedRepo = r.bootedRepo || null;
   renderTiles();
+}
+
+/*
+ * Orderly lists workflows from every project, and two may share an id. A
+ * workflow in the booted repo, the user library or the built-ins is found
+ * by id alone; one from another repo also needs its scope and repo.
+ */
+function refQuery(w) {
+  return w?.scope === 'project' && w.repoRoot && w.repoRoot !== state.bootedRepo
+    ? `&scope=project&repo=${encodeURIComponent(w.repoRoot)}` : '';
+}
+const refBody = (w) => ({ scope: w.scope, repo: w.repoRoot || null });
+const editorHref = (w) => `/workflow-editor.html?from=${encodeURIComponent(w.id)}${refQuery(w)}`;
+
+/** The listed workflow a run, link or match points at. Booted repo first. */
+function findWf({ id, scope = null, repoRoot = null }) {
+  if (scope === 'project' && repoRoot) {
+    return state.workflows.find((w) => w.scope === 'project' && w.repoRoot === repoRoot && w.id === id) || null;
+  }
+  return state.workflows.find((w) => w.id === id && (!scope || w.scope === scope)) || null;
+}
+
+function scopeWord(w) {
+  if (w.scope === 'builtin') return 'built-in';
+  if (w.scope === 'user') return 'your library';
+  return w.repoRoot === state.bootedRepo ? 'this project' : (w.repoName || 'project');
 }
 
 /*
@@ -32,6 +59,11 @@ async function loadCatalog() {
  * it has all cost. Filters change the list, never the counts above it.
  */
 const runsView = { status: '', workflow: '', since: 'week', armed: new Set(), choice: {}, scheduleFormFor: null, msgs: {} };
+// Arriving from a workflow's "Runs" button: that workflow's runs, all time.
+{
+  const wf = new URLSearchParams(location.search).get('workflow');
+  if (wf) { runsView.workflow = wf; runsView.since = 'all'; }
+}
 
 async function loadRuns() {
   const q = new URLSearchParams();
@@ -76,7 +108,8 @@ if (!new URLSearchParams(location.search).has('snapshot')) {
 function renderTiles() {
   renderCatalogChips();
   const cat = state.catalogCategory;
-  for (const scope of ['project', 'user', 'builtin']) {
+  renderProjectSections(cat);
+  for (const scope of ['user', 'builtin']) {
     const list = state.workflows.filter((w) =>
       w.scope === scope && (cat === 'all' || w.category === cat));
     const mount = document.getElementById('tiles' + scope[0].toUpperCase() + scope.slice(1));
@@ -99,13 +132,51 @@ function renderTiles() {
     // thing people want to do with a workflow is see and modify its graph.
     // The small Run pill on the tile is the fast-path for just running it.
     el.onclick = (e) => {
+      const w = state.workflows.find((x) => x.key === el.dataset.key);
+      if (!w) return;
       if (e.target.closest('.tile-run')) {
-        openSheet(el.dataset.id);
+        openSheet(w);
         return;
       }
-      location.href = `/workflow-editor.html?from=${encodeURIComponent(el.dataset.id)}`;
+      location.href = editorHref(w);
     };
   }
+}
+
+/*
+ * One section per project, like the Skills page: the booted repo first, as
+ * "This project", then every other repo with workflows, by name. Repos with
+ * none are left out, or every folder Claude Code ever ran in would show.
+ */
+function renderProjectSections(cat) {
+  const byRepo = new Map();
+  if (state.bootedRepo) byRepo.set(state.bootedRepo, []);
+  for (const w of state.workflows) {
+    if (w.scope !== 'project') continue;
+    if (!byRepo.has(w.repoRoot)) byRepo.set(w.repoRoot, []);
+    byRepo.get(w.repoRoot).push(w);
+  }
+  const name = (root) => (root || '').split('/').pop() || root;
+  const roots = [...byRepo.keys()].sort((a, b) =>
+    (b === state.bootedRepo) - (a === state.bootedRepo) || name(a).localeCompare(name(b)));
+  document.getElementById('projectSections').innerHTML = roots.map((root) => {
+    const list = byRepo.get(root).filter((w) => cat === 'all' || w.category === cat);
+    const where = `${root}/.claude/workflows/`;
+    const meta = list.length ? `${list.length} workflow${list.length === 1 ? '' : 's'}` : 'none here';
+    const body = list.length ? list.map(tile).join('')
+      : `<div class="empty" style="grid-column:1 / -1;background:var(--surface);">
+          ${cat === 'all' ? `Nothing in <code>${esc(where)}</code> yet.`
+            : `No <strong>${esc(cat)}</strong> workflows in <code>${esc(where)}</code>.`}
+        </div>`;
+    return `<section class="scope" data-scope="project" data-repo="${esc(root)}">
+      <header class="cat-head">
+        <h2>${root === state.bootedRepo ? `This project · ${esc(name(root))}` : esc(name(root))}</h2>
+        <code class="repo-path" style="font-family:var(--f-mono);font-size:11px;color:var(--faint);margin-left:12px;">${esc(where)}</code>
+        <span class="meta">${meta}</span>
+      </header>
+      <div class="tiles">${body}</div>
+    </section>`;
+  }).join('');
 }
 
 function renderCatalogChips() {
@@ -140,7 +211,7 @@ function tile(w) {
   const badge = w.invalid ? '<span class="tile-flag bad">needs fixing</span>'
     : w.derivedFrom ? '<span class="tile-flag">yours</span>' : '';
   return `
-    <div class="tile${w.invalid ? ' invalid' : ''}" data-id="${escapeHtml(w.id)}">
+    <div class="tile${w.invalid ? ' invalid' : ''}" data-id="${escapeHtml(w.id)}" data-key="${escapeHtml(w.key)}">
       <span class="cat-chip ${w.category || 'builtin'}">${cat}</span>${badge}
       <h3>${escapeHtml(w.title || w.id)}</h3>
       <p>${escapeHtml(w.desc || '')}</p>
@@ -148,7 +219,7 @@ function tile(w) {
         <span>${w.graph?.nodes?.length ?? 0} steps · ${escapeHtml(w.estimate || '—')}</span>
         <span class="tile-right">
           <button class="tile-run" title="Fill in its inputs and run it" ${w.invalid ? 'disabled' : ''}>◆ Run</button>
-          <span class="scope-tag">${w.scope === 'builtin' ? 'built-in' : w.scope === 'user' ? 'your library' : 'this project'}</span>
+          <span class="scope-tag">${escapeHtml(scopeWord(w))}</span>
         </span>
       </div>
     </div>`;
@@ -167,12 +238,13 @@ function runInputs(w) {
   return out;
 }
 
-function openSheet(id, prefill = {}) {
-  const w = state.workflows.find((x) => x.id === id);
+/** Open the run sheet for a listed workflow, or for a { id, scope, repoRoot } ref. */
+function openSheet(ref, prefill = {}) {
+  const w = ref?.key ? ref : findWf(ref || {});
   if (!w) return false;
   state.open = w;
   const $ = (x) => document.getElementById(x);
-  $('shEyebrow').textContent = `${CAT_LABEL[w.category] || 'Workflow'} · ${w.scope === 'builtin' ? 'built-in' : w.scope === 'user' ? 'your library' : 'this project'}${w.version ? ` · v${w.version}` : ''}`;
+  $('shEyebrow').textContent = `${CAT_LABEL[w.category] || 'Workflow'} · ${scopeWord(w)}${w.version ? ` · v${w.version}` : ''}`;
   $('shTitle').textContent = w.title || w.id;
   $('shDesc').textContent  = w.desc || '';
   $('shEst').textContent   = w.estimate || '';
@@ -194,11 +266,11 @@ function openSheet(id, prefill = {}) {
   } else {
     edit.textContent = 'Edit';
     edit.title = 'Open it in the editor';
-    edit.onclick = () => { location.href = `/workflow-editor.html?from=${encodeURIComponent(w.id)}`; };
+    edit.onclick = () => { location.href = editorHref(w); };
   }
-  $('shSchedule').onclick = () => { closeSheet(); location.hash = 'runs'; setTimeout(() => openScheduleForm(w.id), 60); };
+  $('shSchedule').onclick = () => { closeSheet(); location.hash = 'runs'; setTimeout(() => openScheduleForm(w.key), 60); };
   $('shSchedule').disabled = !!w.invalid;
-  $('shExport').href = `/api/workflows/${encodeURIComponent(w.id)}/export`;
+  $('shExport').href = `/api/workflows/${encodeURIComponent(w.id)}/export?${refQuery(w).slice(1)}`;
   $('shStatus').textContent = '';
   $('scrim').classList.add('on');
   $('sheet').setAttribute('aria-hidden', 'false');
@@ -230,7 +302,7 @@ async function makeItYours() {
   const st = document.getElementById('shStatus');
   st.textContent = 'Copying…';
   const r = await fetch(`/api/workflows/${encodeURIComponent(w.id)}/duplicate`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: 'user' }),
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: 'user', fromScope: w.scope, repo: w.repoRoot || null }),
   }).then((x) => x.json()).catch((e) => ({ error: e.message }));
   if (r.saved) { location.href = `/workflow-editor.html?from=${encodeURIComponent(r.id)}`; return; }
   st.textContent = r.error || 'Could not copy it.';
@@ -249,7 +321,7 @@ async function runNow() {
   try {
     const r = await fetch(`/api/workflows/${encodeURIComponent(w.id)}/run`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ inputs }),
+      body: JSON.stringify({ inputs, ...refBody(w) }),
     }).then((x) => x.json());
     if (r.run?.runId) {
       location.href = `/workflows-run.html#${r.run.runId}`;
@@ -484,14 +556,14 @@ function scheduleRow(s) {
   </div>`;
 }
 
-function scheduleForm(workflowId) {
+function scheduleForm(key) {
   const runnable = state.workflows.filter((w) => !w.invalid);
-  const w = runnable.find((x) => x.id === workflowId) || runnable[0];
+  const w = runnable.find((x) => x.key === key) || runnable[0];
   const fields = w ? runInputs(w) : [];
   const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   return `<div class="sched-form" id="schedForm">
     <div class="sf-grid">
-      <label>Workflow<select id="sfWorkflow">${runnable.map((x) => `<option value="${escapeHtml(x.id)}" ${x.id === w?.id ? 'selected' : ''}>${escapeHtml(x.title || x.id)}</option>`).join('')}</select></label>
+      <label>Workflow<select id="sfWorkflow">${runnable.map((x) => `<option value="${escapeHtml(x.key)}" ${x.key === w?.key ? 'selected' : ''}>${escapeHtml(x.title || x.id)}${x.scope === 'project' && x.repoRoot !== state.bootedRepo ? ` · ${escapeHtml(x.repoName || '')}` : ''}</option>`).join('')}</select></label>
       <label>Repeat<select id="sfEvery">
         <option value="day">Every day</option><option value="week">Every week</option>
         <option value="hours">Every few hours</option><option value="minutes">Every few minutes</option></select></label>
@@ -662,8 +734,8 @@ function bindRuns(mount) {
   });
 }
 
-function openScheduleForm(workflowId) {
-  runsView.scheduleFormFor = workflowId || (state.workflows.find((w) => !w.invalid)?.id ?? '');
+function openScheduleForm(key) {
+  runsView.scheduleFormFor = key || (state.workflows.find((w) => !w.invalid)?.key ?? '');
   renderRuns();
   document.getElementById('schedSec')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
@@ -690,7 +762,9 @@ function bindScheduleForm(mount) {
       : { every, n: Number($f('sfN').value) };
     const inputs = {};
     for (const el of form.querySelectorAll('[data-key]')) inputs[el.dataset.key] = el.value.trim();
-    const r = await post('/api/schedules', { workflowId: $f('sfWorkflow').value, rule, budgetUsd: $f('sfBudget').value, inputs });
+    const w = state.workflows.find((x) => x.key === $f('sfWorkflow').value);
+    if (!w) { say('sfStatus', 'Pick a workflow first.', true); return; }
+    const r = await post('/api/schedules', { workflowId: w.id, ...refBody(w), rule, budgetUsd: $f('sfBudget').value, inputs });
     if (r.schedule) { runsView.scheduleFormFor = null; loadRuns(); }
     else say('sfStatus', r.error || 'Could not schedule it.', true);
   };
@@ -700,7 +774,7 @@ function bindScheduleForm(mount) {
 function startAgain(r) {
   location.hash = 'workflows';
   setTimeout(() => {
-    if (!openSheet(r.workflowId, r.inputs || {})) {
+    if (!openSheet({ id: r.workflowId, scope: r.scope, repoRoot: r.repoRoot }, r.inputs || {})) {
       document.getElementById('importNote').textContent = `"${r.workflowTitle}" is not in the catalog any more.`;
     }
   }, 80);
@@ -1177,13 +1251,15 @@ function mountFinder() {
     const newHref = `/workflow-editor.html?title=${encodeURIComponent(q.slice(0, 60))}`;
     out.innerHTML = matches.length
       ? matches.map((m) => `<div class="finder-row" data-id="${esc(m.id)}">
-          <span class="finder-name">${esc(m.title || m.id)}</span>
+          <span class="finder-name">${esc(m.title || m.id)}${m.scope === 'project' && m.repoRoot !== state.bootedRepo ? ` <span class="finder-why">${esc(m.repoName || '')}</span>` : ''}</span>
           <span class="finder-why">${esc(m.reason)}</span>
-          <a class="hero-btn ghost" href="/workflow-editor.html?from=${encodeURIComponent(m.id)}">Open</a>
-          <button class="hero-btn" data-run="${esc(m.id)}">◆ Run</button>
+          <a class="hero-btn ghost" href="${editorHref(m)}">Open</a>
+          <button class="hero-btn" data-run="${esc(m.key || m.id)}">◆ Run</button>
         </div>`).join('') + `<a class="finder-new" href="${newHref}">None of these — start a new workflow</a>`
       : `<div class="finder-none">No workflow does that yet. <a href="${newHref}">Start one called “${esc(q.slice(0, 60))}”</a></div>`;
-    out.querySelectorAll('[data-run]').forEach((b) => { b.onclick = () => openSheet(b.dataset.run); });
+    out.querySelectorAll('[data-run]').forEach((b) => {
+      b.onclick = () => openSheet(state.workflows.find((w) => w.key === b.dataset.run) || { id: b.dataset.run });
+    });
   };
   input.addEventListener('input', () => { clearTimeout(finderTimer); finderTimer = setTimeout(run, 160); });
   input.addEventListener('keydown', (e) => {
@@ -1213,7 +1289,8 @@ loadCatalog().then(async () => {
     const r = await fetch(`/api/runs/${encodeURIComponent(q.get('again'))}`).then((x) => x.json()).catch(() => ({}));
     prefill = r.run?.inputs || {};
   }
-  if (!openSheet(open, prefill)) document.getElementById('importNote').textContent = `There is no workflow called "${open}" any more.`;
+  const ref = { id: open, scope: q.get('scope'), repoRoot: q.get('repo') };
+  if (!openSheet(ref, prefill)) document.getElementById('importNote').textContent = `There is no workflow called "${open}" any more.`;
 });
 document.getElementById('importFile')?.addEventListener('change', (e) => {
   const f = e.target.files?.[0];

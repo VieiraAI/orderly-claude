@@ -19,7 +19,7 @@ import { SHOTS_DIR, INSTANCES_FILE, ensureDirs, transcriptPathFor, uploadsFor } 
 import { randomUUID } from 'node:crypto';
 import { loadShots, attachShots } from '../core/shots.mjs';
 import {
-  listDefinitions, getDefinition, startRun, readRun, listRuns, runsForSession, deleteRun, rerunRun,
+  listDefinitions, listAllDefinitions, knownRepoRoots, getDefinition, startRun, readRun, listRuns, runsForSession, deleteRun, rerunRun,
   scaffoldWorkflow, writeWorkflow, validateDefinition, lintDefinition, deleteWorkflow, duplicateWorkflow,
   stripRuntime, freeId, reconcileRuns, prepareResume, openQuestion, recordAnswer, writeRun, RESUMABLE,
   registerRoot, addLesson, updateRun,
@@ -157,7 +157,7 @@ function readInstances() {
 }
 
 /** Trim a run down to what a list row renders — the node bodies stay on disk. */
-function summariseRun(r, versions = null) {
+function summariseRun(r, versionOf = null) {
   const nodes = r.graph?.nodes || [];
   const count = (st) => nodes.filter((n) => n.status === st).length;
   const running = nodes.find((n) => n.status === 'running' && n.waitsFor !== 'you');
@@ -172,12 +172,13 @@ function summariseRun(r, versions = null) {
   }, 0);
   const tokens = nodes.reduce((t, n) => t + (Number(n.output?.meta?.tokens) || 0), 0);
   const spend = runSpend(r);
-  const current = versions?.get(r.workflowId);
+  const current = versionOf?.(r);
   return {
     runId: r.runId,
     workflowId: r.workflowId,
     workflowTitle: r.workflowTitle,
     category: r.category,
+    scope: r.scope || null,
     status: r.status,
     trigger: r.trigger,
     scheduleId: r.scheduleId || null,
@@ -346,6 +347,36 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
     schedulers.set(run.runId, s);
     s.start();
     return s;
+  }
+
+  /*
+   * A workflow is named by scope + repo + id, since two repos may each have
+   * one called "ship". The client sends `scope` and `repo` as query fields or
+   * in the body. A repo must be one Orderly already knows, because it decides
+   * where files are written and where scripts run. Without them, nearest
+   * wins from the booted repo, which keeps old links and schedules working.
+   */
+  function repoFrom(raw) {
+    if (!raw) return liveCwd;
+    const want = path.resolve(String(raw));
+    const known = new Set([...knownRepoRoots(), liveCwd && path.resolve(liveCwd)].filter(Boolean));
+    if (!known.has(want)) throw Object.assign(new Error(`not a project Orderly knows: ${raw}`), { status: 400 });
+    return want;
+  }
+  function refFrom(src = {}) {
+    const scope = ['project', 'user', 'builtin'].includes(src.scope) ? src.scope : null;
+    return { scope, repoRoot: repoFrom(src.repo || src.repoRoot) };
+  }
+  const bootedRepo = () => (liveCwd ? path.resolve(liveCwd) : null);
+  const queryRef = (url) => refFrom({ scope: url.searchParams.get('scope'), repo: url.searchParams.get('repo') });
+  /* Current version of the workflow a run came from, one catalog per repo. */
+  function versionLookup() {
+    const byRoot = new Map();
+    return (r) => {
+      const root = r.repoRoot || liveCwd || '';
+      if (!byRoot.has(root)) byRoot.set(root, new Map(listDefinitions({ repoRoot: root || null }).map((d) => [d.id, d.version || 1])));
+      return byRoot.get(root).get(r.workflowId);
+    };
   }
 
   // Claude forks a copy under a new id when the session is already open
@@ -647,10 +678,11 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         return fs.createReadStream(f).pipe(res);
       }
 
-      // Workflow catalog, scoped to the repo this instance was started in so
-      // repo-local defs win over user-global ones.
+      // Workflow catalog across every known repo, each project workflow tagged
+      // with its repo. The booted repo's defs still win over user-global ones.
       if (url.pathname === '/api/workflows' && req.method === 'GET') {
-        return send(200, { workflows: listDefinitions({ repoRoot: liveCwd }) });
+        // bootedRepo lets the client name booted-repo workflows by id alone.
+        return send(200, { workflows: listAllDefinitions({ repoRoot: liveCwd }), bootedRepo: bootedRepo() });
       }
 
       // Suggest which workflow fits a free-text ask. Pure token overlap; no
@@ -659,8 +691,13 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         const body = await readBody(req);
         const query = String(body.q || '').trim();
         if (!query) return send(200, { matches: [] });
-        const defs = listDefinitions({ repoRoot: liveCwd });
-        const matches = suggestWorkflows({ query, defs, limit: Number(body.limit) || 5 });
+        const defs = listAllDefinitions({ repoRoot: liveCwd });
+        const byKey = new Map(defs.map((d) => [d.key, d]));
+        // Say which workflow each match is, since an id can be in two repos.
+        const matches = suggestWorkflows({ query, defs, limit: Number(body.limit) || 5 }).map((m) => {
+          const d = byKey.get(m.key);
+          return { ...m, scope: d?.scope || null, repoRoot: d?.repoRoot || null, repoName: d?.repoName || null };
+        });
         return send(200, { matches });
       }
 
@@ -681,15 +718,12 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         const body = await readBody(req);
         try {
           const scope = body.scope || 'project';
-          const file = writeWorkflow({
-            def: body.def, scope,
-            repoRoot: scope === 'project' ? (body.repoRoot || liveCwd) : null,
-            overwrite: !!body.overwrite,
-          });
+          const repoRoot = scope === 'project' ? repoFrom(body.repoRoot) : null;
+          const file = writeWorkflow({ def: body.def, scope, repoRoot, overwrite: !!body.overwrite });
           const written = JSON.parse(fs.readFileSync(file, 'utf8'));
-          return send(200, { saved: true, file, id: written.id, scope, version: written.version });
+          return send(200, { saved: true, file, id: written.id, scope, repoRoot, bootedRepo: bootedRepo(), version: written.version });
         } catch (e) {
-          return send(/already exists/.test(e.message) ? 409 : 400, { error: e.message });
+          return send(e.status || (/already exists/.test(e.message) ? 409 : 400), { error: e.message });
         }
       }
 
@@ -872,7 +906,9 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
 
       const wfExportMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/export$/);
       if (wfExportMatch && req.method === 'GET') {
-        const def = getDefinition(decodeURIComponent(wfExportMatch[1]), { repoRoot: liveCwd });
+        let def;
+        try { def = getDefinition(decodeURIComponent(wfExportMatch[1]), queryRef(url)); }
+        catch (e) { return send(400, { error: e.message }); }
         if (!def) return send(404, { error: 'workflow not found' });
         res.writeHead(200, {
           'content-type': 'application/json',
@@ -887,7 +923,9 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         const body = await readBody(req).catch(() => ({}));
         try {
           const scope = body.scope || 'user';
-          const { def, file } = duplicateWorkflow(decodeURIComponent(wfDupMatch[1]), { repoRoot: liveCwd, scope });
+          // The copy is made from the workflow named by fromScope + repo.
+          const from = refFrom({ scope: body.fromScope, repo: body.repo });
+          const { def, file } = duplicateWorkflow(decodeURIComponent(wfDupMatch[1]), { repoRoot: from.repoRoot, scope, fromScope: from.scope });
           return send(200, { saved: true, id: def.id, scope, file });
         } catch (e) { return send(400, { error: e.message }); }
       }
@@ -896,22 +934,26 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       if (wfMatch && req.method === 'DELETE') {
         const scope = url.searchParams.get('scope') || 'user';
         try {
-          const ok = deleteWorkflow({ id: decodeURIComponent(wfMatch[1]), scope, repoRoot: liveCwd });
+          const ok = deleteWorkflow({ id: decodeURIComponent(wfMatch[1]), scope, repoRoot: queryRef(url).repoRoot });
           return ok ? send(200, { deleted: true }) : send(404, { error: 'workflow not found' });
         } catch (e) { return send(400, { error: e.message }); }
       }
       if (wfMatch && req.method === 'GET') {
-        const def = getDefinition(wfMatch[1], { repoRoot: liveCwd });
-        return def ? send(200, { workflow: def }) : send(404, { error: 'workflow not found' });
+        let def;
+        try { def = getDefinition(decodeURIComponent(wfMatch[1]), queryRef(url)); }
+        catch (e) { return send(400, { error: e.message }); }
+        return def ? send(200, { workflow: def, bootedRepo: bootedRepo() }) : send(404, { error: 'workflow not found' });
       }
       const wfRunMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/run$/);
       if (wfRunMatch && req.method === 'POST') {
         const body = await readBody(req);
         try {
+          // A project workflow runs in its own repo; startRun moves it there.
+          const ref = refFrom({ scope: body.scope, repo: body.repo });
           const run = startRun({
-            workflowId: wfRunMatch[1],
+            workflowId: decodeURIComponent(wfRunMatch[1]),
             inputs: body.inputs || {},
-            repoRoot: liveCwd,
+            repoRoot: ref.repoRoot, scope: ref.scope,
             sessionId: liveId,
             trigger: body.trigger || 'you',
           });
@@ -1015,14 +1057,15 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       }
 
       if (url.pathname === '/api/schedules' && req.method === 'GET') {
-        const defs = new Map(listDefinitions({ repoRoot: liveCwd }).map((d) => [d.id, d]));
+        // Each schedule is looked up in the repo it was made for.
         const schedules = listSchedules().map((sc) => {
           const last = sc.lastRunId ? readRun(sc.lastRunId) : null;
+          const def = getDefinition(sc.workflowId, { repoRoot: sc.repoRoot || liveCwd });
           return {
             ...sc,
             describe: describeRule(sc.rule),
-            workflowTitle: defs.get(sc.workflowId)?.title || sc.workflowId,
-            workflowMissing: !defs.has(sc.workflowId),
+            workflowTitle: def?.title || sc.workflowId,
+            workflowMissing: !def,
             lastRun: last ? summariseRun(last) : null,
           };
         });
@@ -1036,10 +1079,14 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       }
       if (url.pathname === '/api/schedules' && req.method === 'POST') {
         const body = await readBody(req);
-        if (!getDefinition(body.workflowId, { repoRoot: liveCwd })) return send(404, { error: 'workflow not found' });
+        let def;
+        try { def = getDefinition(body.workflowId, refFrom({ scope: body.scope, repo: body.repo })); }
+        catch (e) { return send(400, { error: e.message }); }
+        if (!def) return send(404, { error: 'workflow not found' });
         try {
+          // A project workflow's schedule runs in that workflow's repo.
           const sc = createSchedule({
-            workflowId: body.workflowId, repoRoot: liveCwd, inputs: body.inputs || {},
+            workflowId: body.workflowId, repoRoot: def.repoRoot || liveCwd, inputs: body.inputs || {},
             rule: body.rule, budgetUsd: body.budgetUsd,
           });
           broadcast('schedules', { events: [{ id: sc.id, kind: 'created' }] });
@@ -1063,7 +1110,7 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
 
       if (url.pathname === '/api/runs') {
         const q = url.searchParams;
-        const versions = new Map(listDefinitions({ repoRoot: liveCwd }).map((d) => [d.id, d.version || 1]));
+        const versions = versionLookup();
         let runs = q.get('session') ? runsForSession(q.get('session')) : listRuns({ limit: Number(q.get('limit')) || 500 });
         const all = runs.map((r) => summariseRun(r, versions));
         // The panel's counts describe everything, whatever is filtered.
@@ -1128,7 +1175,8 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       if (lessonMatch && req.method === 'POST') {
         const body = await readBody(req);
         try {
-          const result = addLesson(lessonMatch[1], body.lesson || body, { repoRoot: liveCwd });
+          const ref = refFrom({ scope: body.scope, repo: body.repo });
+          const result = addLesson(decodeURIComponent(lessonMatch[1]), body.lesson || body, ref);
           return send(200, result);
         } catch (e) { return send(400, { error: e.message }); }
       }
