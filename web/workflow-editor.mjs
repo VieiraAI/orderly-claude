@@ -106,7 +106,8 @@ async function boot() {
   // "Edit" on a workflow's preview page lands you in a prefilled editor.
   const q = new URLSearchParams(location.search);
   const from = q.get('from') || q.get('id');
-  if (from) await loadExisting(from);
+  // scope + repo name a workflow from another project; see refQuery.
+  if (from) await loadExisting(from, { scope: q.get('scope'), repo: q.get('repo') });
   else {
     state.def = blank();
     // Arriving from "start a new workflow called …" on the Workflows page.
@@ -134,9 +135,10 @@ async function boot() {
 /** The empty canvas offers existing workflows to start from. */
 async function fillStartFrom() {
   try {
-    const { workflows = [] } = await fetch('/api/workflows').then((r) => r.json());
+    const { workflows = [], bootedRepo = null } = await fetch('/api/workflows').then((r) => r.json());
+    state.bootedRepo = bootedRepo;
     const list = workflows.filter((w) => !w.invalid).slice(0, 5);
-    $('edEmptyList').innerHTML = list.map((w) => `<a href="/workflow-editor.html?from=${encodeURIComponent(w.id)}">${escapeHtml(w.title || w.id)}<span>${w.graph?.nodes?.length || 0} steps</span></a>`).join('');
+    $('edEmptyList').innerHTML = list.map((w) => `<a href="/workflow-editor.html?from=${encodeURIComponent(w.id)}${refQuery(w)}">${escapeHtml(w.title || w.id)}<span>${w.graph?.nodes?.length || 0} steps</span></a>`).join('');
   } catch { /* the hint above still says how to begin */ }
 }
 
@@ -153,14 +155,27 @@ function normalise(def) {
   return def;
 }
 
-async function loadExisting(id) {
-  const r = await fetch(`/api/workflows/${encodeURIComponent(id)}`).then((x) => x.json()).catch(() => ({}));
+/*
+ * Orderly lists workflows from every project, and two may share an id. One
+ * in the booted repo, the user library or the built-ins is found by id
+ * alone; one from another repo also carries its scope and repo.
+ */
+function refQuery(w) {
+  return w?.scope === 'project' && w.repoRoot && w.repoRoot !== state.bootedRepo
+    ? `&scope=project&repo=${encodeURIComponent(w.repoRoot)}` : '';
+}
+
+async function loadExisting(id, { scope: wantScope, repo } = {}) {
+  const q = wantScope && repo ? `?scope=${encodeURIComponent(wantScope)}&repo=${encodeURIComponent(repo)}` : '';
+  const r = await fetch(`/api/workflows/${encodeURIComponent(id)}${q}`).then((x) => x.json()).catch(() => ({}));
   if (!r.workflow) { state.def = blank(); toast(`There is no workflow called "${id}".`, 'err'); return; }
+  state.bootedRepo = r.bootedRepo || null;
   // Drop server-side fields that aren't part of the on-disk def.
-  const { scope, source, file, invalid, problems, ...clean } = r.workflow;
+  const { scope, source, file, invalid, problems, repoRoot, repoName, key, ...clean } = r.workflow;
   state.def = normalise(clean);
   state.builtin = scope === 'builtin';
-  state.loaded = state.builtin ? null : { id: clean.id, scope };
+  // Where it lives, so saving writes back to the same repo.
+  state.loaded = state.builtin ? null : { id: clean.id, scope, repoRoot: repoRoot || null };
   // A built-in saves as the person's own copy, in their library.
   $('wfScope').value = state.builtin ? 'user' : scope;
   document.title = `${clean.title || clean.id} — workflow editor`;
@@ -240,7 +255,7 @@ function bindUi() {
     render();
   });
   $('btnCloseRuns').addEventListener('click', () => { state.side = null; render(); });
-  $('btnExport').addEventListener('click', () => { if (state.loaded) location.href = `/api/workflows/${encodeURIComponent(state.loaded.id)}/export`; });
+  $('btnExport').addEventListener('click', () => { if (state.loaded) location.href = `/api/workflows/${encodeURIComponent(state.loaded.id)}/export?${refQuery(state.loaded).slice(1)}`; });
   $('importFile').addEventListener('change', importFile);
   $('btnDeleteWf').addEventListener('click', deleteWorkflow);
 
@@ -565,12 +580,15 @@ async function save() {
   const ok = await validate();
   if (!ok) { showProblems(state.problems, state.warnings, 'Fix these, then save.'); return false; }
   const scope = $('wfScope').value;
+  // A project workflow from another repo saves back into that repo; a new
+  // one goes into the booted repo, as before.
+  const repoRoot = scope === 'project' && state.loaded?.scope === 'project' ? state.loaded.repoRoot : null;
   // Saving over itself is fine; saving a new one over another is not.
   const overwrite = !!state.loaded && state.loaded.id === def.id && state.loaded.scope === scope;
   try {
     const r = await fetch('/api/workflows', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ def, scope, overwrite }),
+      body: JSON.stringify({ def, scope, repoRoot, overwrite }),
     }).then(async (x) => ({ status: x.status, ...(await x.json()) }));
     if (r.status === 409) {
       toast(`You already have a workflow called "${def.id}". Change the short name, or open that one instead.`, 'err');
@@ -578,10 +596,11 @@ async function save() {
     }
     if (!r.saved) throw new Error(r.error || 'save failed');
     def.version = r.version;
-    state.loaded = { id: r.id, scope: r.scope };
+    state.loaded = { id: r.id, scope: r.scope, repoRoot: r.repoRoot || null };
+    state.bootedRepo = r.bootedRepo || state.bootedRepo;
     state.builtin = false;
     state.dirty = false;
-    history.replaceState(null, '', `/workflow-editor.html?from=${encodeURIComponent(r.id)}`);
+    history.replaceState(null, '', `/workflow-editor.html?from=${encodeURIComponent(r.id)}${refQuery(state.loaded)}`);
     render();
     markSaved(true, r.version);
     toast(r.version > 1 ? `Saved as version ${r.version}. Runs already made keep the version they ran.` : 'Saved.', 'ok', 2500);
@@ -598,7 +617,7 @@ async function save() {
  */
 async function saveAndRun() {
   if (state.dirty || !state.loaded) { const saved = await save(); if (!saved) return; }
-  location.href = `/workflows.html?open=${encodeURIComponent(state.loaded.id)}#workflows`;
+  location.href = `/workflows.html?open=${encodeURIComponent(state.loaded.id)}${refQuery(state.loaded)}#workflows`;
 }
 
 async function importFile() {
@@ -639,7 +658,8 @@ async function deleteWorkflow() {
     setTimeout(() => { delete btn.dataset.armed; btn.textContent = 'Delete'; }, 3000);
     return;
   }
-  const r = await fetch(`/api/workflows/${encodeURIComponent(state.loaded.id)}?scope=${state.loaded.scope}`, { method: 'DELETE' }).then((x) => x.json());
+  const repo = state.loaded.repoRoot ? `&repo=${encodeURIComponent(state.loaded.repoRoot)}` : '';
+  const r = await fetch(`/api/workflows/${encodeURIComponent(state.loaded.id)}?scope=${state.loaded.scope}${repo}`, { method: 'DELETE' }).then((x) => x.json());
   if (r.deleted) location.href = '/workflows.html#workflows';
   else toast(r.error || 'Delete failed.', 'err');
 }

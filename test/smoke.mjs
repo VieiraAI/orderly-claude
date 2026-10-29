@@ -719,6 +719,12 @@ async function main() {
       `${wfs.workflows?.length}`);
     check('every workflow has a graph',
       wfs.workflows.every((w) => w.graph?.nodes?.length > 0 && Array.isArray(w.graph.edges)));
+    // The list spans every known repo, so each entry says where it lives.
+    check('every workflow carries its scope and key; project ones their repo',
+      wfs.workflows.every((w) => w.scope && w.key
+        && (w.scope !== 'project' || (w.repoRoot && w.repoName))),
+      wfs.workflows.filter((w) => !w.key || (w.scope === 'project' && !w.repoRoot)).map((w) => w.id).join(', '));
+    check('the list names the booted repo', typeof wfs.bootedRepo === 'string' && wfs.bootedRepo.length > 0, `${wfs.bootedRepo}`);
     const one = await get('/api/workflows/redesign-page');
     check('GET /api/workflows/:id returns the def', one.workflow?.id === 'redesign-page');
 
@@ -1278,6 +1284,8 @@ async function main() {
     }).then((r) => r.json());
     check('POST /api/workflows/suggest returns matches',
       Array.isArray(sugResp.matches), JSON.stringify(sugResp).slice(0, 100));
+    check('each match says which workflow it is, by key and scope',
+      sugResp.matches?.length > 0 && sugResp.matches.every((m) => m.key && m.scope), JSON.stringify(sugResp.matches?.[0] || {}));
     const sugEmpty = await fetch(`${base}/api/workflows/suggest`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ q: '' }),

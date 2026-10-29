@@ -125,6 +125,15 @@ async function load() {
   render();
 }
 
+/*
+ * The query that names this run's workflow. A project workflow is named by
+ * its repo as well as its id, since two projects may each have one.
+ */
+function runRef() {
+  return run?.scope === 'project' && run.repoRoot
+    ? `&scope=project&repo=${encodeURIComponent(run.repoRoot)}` : '';
+}
+
 function defToPreviewRun(def) {
   return {
     runId: null,
@@ -132,6 +141,7 @@ function defToPreviewRun(def) {
     workflowTitle: def.title,
     category: def.category,
     scope: def.scope,
+    repoRoot: def.repoRoot || null,
     schemaVersion: def.schemaVersion || 1,
     status: 'preview',
     startedAt: null, endedAt: null,
@@ -282,6 +292,7 @@ function renderRetro() {
     d.lessonSaved = false;
     if (d.keep && d.note.trim()) {
       const l = await post(`/api/workflows/${encodeURIComponent(run.workflowId)}/lessons`, {
+        scope: run.scope || null, repo: run.scope === 'project' ? run.repoRoot : null,
         lesson: { node: d.node || null, note: d.note.trim(), rating: d.rating, pin: true, fromRun: run.runId },
       });
       if (l.status >= 400) {
@@ -344,7 +355,7 @@ function renderRunActions() {
   }
   if (isPreview) {
     bar.innerHTML = `
-      <a class="run-btn" href="/workflow-editor.html?from=${encodeURIComponent(run.workflowId)}"
+      <a class="run-btn" href="/workflow-editor.html?from=${encodeURIComponent(run.workflowId)}${runRef()}"
          title="Open this workflow in the visual editor">✎ Edit</a>
       <button class="run-btn" data-act="run-preview"
               title="Fill in its inputs and run it">◆ Run</button>`;
@@ -361,7 +372,7 @@ function renderRunActions() {
     ${run.halt?.type === 'budget' ? `<span class="raise">Raise the limit to $<input class="raise-in" id="raiseIn" inputmode="decimal" value="${(run.halt.limitUsd * 2).toFixed(2)}"><button class="run-btn" data-act="raise">and resume</button></span>` : ''}
     ${!live ? '<button class="run-btn" data-act="rerun" title="Repeat exactly what this run ran">⟲ Repeat</button>' : ''}
     ${!live && sel ? `<button class="run-btn" data-act="rerun-from" title="Keep everything before this step, run again from it">⟲ Repeat from “${esc(sel.title)}”</button>` : ''}
-    ${!live ? `<a class="run-btn" href="/workflows.html?open=${encodeURIComponent(run.workflowId)}&again=${encodeURIComponent(run.runId)}#workflows" title="Run the workflow again with these inputs, editable first">↻ Again with changes</a>` : ''}
+    ${!live ? `<a class="run-btn" href="/workflows.html?open=${encodeURIComponent(run.workflowId)}${runRef()}&again=${encodeURIComponent(run.runId)}#workflows" title="Run the workflow again with these inputs, editable first">↻ Again with changes</a>` : ''}
     <button class="run-btn" data-act="share" title="Signed link to a static copy of this run">◎ Share</button>
     ${!live ? `<button class="run-btn danger" data-act="delete" title="Delete this run">${del ? 'Click again to delete' : '✕ Delete'}</button>` : ''}
     <div class="choice-slot" id="resumeChoice"></div>
@@ -424,7 +435,7 @@ function renderRunActions() {
  * than a browser prompt per field.
  */
 function runFromPreview() {
-  location.href = `/workflows.html?open=${encodeURIComponent(run.workflowId)}#workflows`;
+  location.href = `/workflows.html?open=${encodeURIComponent(run.workflowId)}${runRef()}#workflows`;
 }
 
 async function rerunFromCanvas(fromNodeId) {

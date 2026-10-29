@@ -55,13 +55,8 @@
       <input id="finderIn" class="finder-in" autocomplete="off" placeholder="Redesign the pricing page, check the site for broken pages, ship this branch…">
       <div id="finderOut" class="finder-out" role="status" aria-live="polite"></div>
     </div>
-    <section class="scope" data-scope="project">
-      <header class="cat-head">
-        <h2>This project</h2>
-        <span class="meta" id="metaProject">—</span>
-      </header>
-      <div class="tiles" id="tilesProject"></div>
-    </section>
+    <!-- One section per project with workflows, filled in by workflows.mjs. -->
+    <div id="projectSections"></div>
     <section class="scope" data-scope="user">
       <header class="cat-head">
         <h2>Your global library</h2>

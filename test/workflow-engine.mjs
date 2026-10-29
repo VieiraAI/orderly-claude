@@ -97,6 +97,67 @@ export async function runWorkflowEngineChecks({ check, session }) {
     check('the command actually sent is recorded for the drill-down',
       /printf "%s\|%s\|%s" 'x; touch/.test(node(r, 'use')?.sent || ''), node(r, 'use')?.sent);
 
+    /* --------------------------- every project ---------------------------- */
+    console.log('\nWorkflows: every project\n');
+
+    // A second project with a workflow of the same id as one in the booted
+    // repo. Registered the way the server registers the booted repo.
+    const other = path.join(tmp, 'other-project');
+    fs.mkdirSync(other, { recursive: true });
+    wf.registerRoot(other);
+    const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+    const twin = (title) => ({ schemaVersion: 2, id: 'twin', title, graph: { nodes: [script('where', 'pwd')], edges: [] } });
+    await save(twin('Twin here'));
+    wf.writeWorkflow({ def: twin('Twin there'), scope: 'project', repoRoot: other, overwrite: true });
+    const inB = `scope=project&repo=${encodeURIComponent(path.resolve(other))}`;
+
+    const listed = (await api('/api/workflows')).workflows.filter((w) => w.id === 'twin');
+    const here = listed.find((w) => w.repoRoot === path.resolve(repo));
+    const there = listed.find((w) => w.repoRoot === path.resolve(other));
+    check('the list carries project workflows from every known repo, each tagged with its repo',
+      here?.title === 'Twin here' && there?.title === 'Twin there' && there?.repoName === 'other-project',
+      JSON.stringify(listed.map((w) => [w.title, w.repoRoot])));
+    check('the same id in two repos is two workflows with their own keys', here && there && here.key !== there.key,
+      JSON.stringify([here?.key, there?.key]));
+
+    let got = await api(`/api/workflows/twin?${inB}`);
+    const plain = await api('/api/workflows/twin');
+    check('a workflow is fetched by repo and id, and id alone still means the booted repo',
+      got.workflow?.title === 'Twin there' && plain.workflow?.title === 'Twin here',
+      JSON.stringify([got.workflow?.title, plain.workflow?.title]));
+    check('a repo Orderly does not know is refused', (await api(`/api/workflows/twin?scope=project&repo=${encodeURIComponent(path.join(tmp, 'nowhere'))}`)).status === 400);
+
+    const runThere = (await api('/api/workflows/twin/run', { body: { scope: 'project', repo: other } })).run;
+    const runHere = (await api('/api/workflows/twin/run', { body: {} })).run;
+    check('a run of another repo\'s workflow runs in that repo',
+      runThere?.repoRoot === path.resolve(other) && runThere?.cwd === path.resolve(other) && runThere?.workflowTitle === 'Twin there',
+      JSON.stringify([runThere?.repoRoot, runThere?.cwd]));
+    r = await until(runThere.runId, settled);
+    check('…and its scripts see that repo as their folder', real(node(r, 'where')?.output?.out?.trim()) === real(other),
+      node(r, 'where')?.output?.out || states(r));
+    r = await until(runHere.runId, settled);
+    check('…while the booted repo\'s workflow of the same id runs in the booted repo',
+      runHere?.cwd === repo && real(node(r, 'where')?.output?.out?.trim()) === real(repo), node(r, 'where')?.output?.out || states(r));
+
+    const savedB = await api('/api/workflows', { body: { def: twin('Twin there, edited'), scope: 'project', repoRoot: other, overwrite: true } });
+    got = await api(`/api/workflows/twin?${inB}`);
+    check('saving another repo\'s workflow writes to that repo, not the booted one',
+      savedB.saved && got.workflow?.title === 'Twin there, edited' && (await api('/api/workflows/twin')).workflow?.title === 'Twin here',
+      JSON.stringify(savedB));
+    await api('/api/workflows/twin/lessons', { body: { scope: 'project', repo: other, lesson: { note: 'Check the folder first', pin: true } } });
+    const fileB = JSON.parse(fs.readFileSync(path.join(other, '.claude', 'workflows', 'twin.json'), 'utf8'));
+    const fileA = JSON.parse(fs.readFileSync(path.join(repo, '.claude', 'workflows', 'twin.json'), 'utf8'));
+    check('a lesson lands on the workflow it was written for',
+      fileB.lessons?.length === 1 && !fileA.lessons?.length, JSON.stringify([fileB.lessons, fileA.lessons]));
+    check('where a workflow was found is never written into its file',
+      !('repoRoot' in fileB) && !('key' in fileB) && !('scope' in fileB), Object.keys(fileB).join(' '));
+    const exportedB = await fetch(`${base}/api/workflows/twin/export?${inB}`, { headers: { connection: 'close' } }).then((x) => x.json());
+    check('export takes the workflow named by repo and id', exportedB.title === 'Twin there, edited' && !('repoRoot' in exportedB), exportedB.title);
+    const delB = await api(`/api/workflows/twin?${inB}`, { method: 'DELETE' });
+    check('deleting another repo\'s workflow leaves the booted repo\'s one of the same id',
+      delB.deleted && !fs.existsSync(path.join(other, '.claude', 'workflows', 'twin.json'))
+      && fs.existsSync(path.join(repo, '.claude', 'workflows', 'twin.json')), JSON.stringify(delB));
+
     let v = await api('/api/workflows/validate', { body: { def: { schemaVersion: 2, id: 'bad', graph: {
       nodes: [script('a', 'echo {{nodes.b.output}}'), script('b', 'echo hi'), script('c', 'echo {{nodes.ghost.output}}')],
       edges: [['a', 'b']],
@@ -501,7 +562,8 @@ export async function runWorkflowEngineChecks({ check, session }) {
     res = await api('/api/settings', { body: { budget: { scheduledPerDayUsd: '' } } });
     check('scheduled runs can never be left without a daily limit', res.status === 400, res.error);
 
-    await browserChecks({ check, base, api, save, start, until, settled, node });
+    // The second project and its twin workflow, for the per-project sections.
+    await browserChecks({ check, base, api, save, start, until, settled, node, repo, other, twin, wf });
   } finally {
     if (server) server.close();
     sched.releaseLock();
@@ -520,7 +582,7 @@ export async function runWorkflowEngineChecks({ check, session }) {
  * must load without a console error or a browser dialog — a dialog blocks
  * automation and is a worse experience than saying it inline.
  */
-async function browserChecks({ check, base, api, save, start, until, settled, node }) {
+async function browserChecks({ check, base, api, save, start, until, settled, node, repo, other, twin, wf }) {
   const { findChrome } = await import('../src/core/capture.mjs');
   const { CDP, httpJSON } = await import('../src/core/cdp.mjs');
   const { spawn } = await import('node:child_process');
@@ -665,6 +727,31 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     await sleep(1200);
     r = await p.ev('return location.pathname + location.search;');
     check('clicking a workflow in the catalog opens it in the editor', r === '/workflow-editor.html?from=visual-regression', r);
+    await p.close();
+
+    // One section per project, as on the Skills page, each named for its repo.
+    wf.writeWorkflow({ def: twin('Twin there'), scope: 'project', repoRoot: other, overwrite: true });
+    p = await open('/workflows.html#workflows');
+    await sleep(600);
+    r = await p.ev(`
+      const sec = (root) => document.querySelector('#projectSections section[data-repo="' + CSS.escape(root) + '"]');
+      const a = sec(${JSON.stringify(path.resolve(repo))}), b = sec(${JSON.stringify(path.resolve(other))});
+      const first = document.querySelector('#projectSections section');
+      setTimeout(() => b?.querySelector('.tile[data-id="twin"] h3')?.click(), 0);
+      return { a: a?.querySelector('h2')?.textContent, b: b?.querySelector('h2')?.textContent,
+        bootedFirst: first === a, aTwin: !!a?.querySelector('.tile[data-id="twin"]'),
+        bTile: b?.querySelector('.tile[data-id="twin"] h3')?.textContent };`);
+    check('the Workflows page groups workflows by project, booted repo first, repo name shown',
+      /^This project · project$/.test(r.a || '') && r.b === 'other-project' && r.bootedFirst && r.aTwin && r.bTile === 'Twin there', JSON.stringify(r));
+    await sleep(1200);
+    r = await p.ev('return location.pathname + location.search;');
+    check('opening another repo\'s workflow names its repo in the editor link',
+      r === `/workflow-editor.html?from=twin&scope=project&repo=${encodeURIComponent(path.resolve(other))}`, r);
+    await p.close();
+    p = await open(`/workflow-editor.html?from=twin&scope=project&repo=${encodeURIComponent(path.resolve(other))}`);
+    await sleep(600);
+    r = await p.ev(`return document.getElementById('wfTitle').value;`);
+    check('the editor loads the workflow from the repo it names', r === 'Twin there', r);
     await p.close();
 
     // The Runs panel: a question answered from the list, a failure explained.
