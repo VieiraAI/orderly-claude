@@ -124,7 +124,8 @@ async function boot() {
   // A graph wider than the screen opens fitted, so no step starts hidden.
   if (state.content && $('edInner').parentElement.clientWidth < state.content.w) fitZoom();
   markSaved(!!state.loaded, state.def.version);
-  validateSoon();
+  // An id shared with another workflow is said once on opening, not hidden.
+  if (state.clash) validate({ announce: true }); else validateSoon();
 }
 
 /**
@@ -171,8 +172,10 @@ async function loadExisting(id, { scope: wantScope, repo } = {}) {
   if (!r.workflow) { state.def = blank(); toast(`There is no workflow called "${id}".`, 'err'); return; }
   state.bootedRepo = r.bootedRepo || null;
   // Drop server-side fields that aren't part of the on-disk def.
-  const { scope, source, file, invalid, problems, repoRoot, repoName, key, ...clean } = r.workflow;
+  const { scope, source, file, invalid, problems, repoRoot, repoName, key, clash, ...clean } = r.workflow;
   state.def = normalise(clean);
+  // Another workflow on disk has this id, from before ids were unique.
+  state.clash = clash || null;
   state.builtin = scope === 'builtin';
   // Where it lives, so saving writes back to the same repo.
   state.loaded = state.builtin ? null : { id: clean.id, scope, repoRoot: repoRoot || null };
@@ -568,6 +571,8 @@ async function validate({ announce = false } = {}) {
   // An empty canvas is not a problem worth shouting about while building.
   state.problems = (r.problems || []).filter((p) => !(state.def.graph.nodes.length === 0 && /nodes is empty/.test(p)));
   state.warnings = r.warnings || [];
+  // Renaming it in the editor is how the clash is fixed; until then, say so.
+  if (state.clash && state.loaded && state.def.id === state.loaded.id) state.warnings = [state.clash.message, ...state.warnings];
   renderCanvas();
   if (announce) showProblems(state.problems, state.warnings);
   return r.ok;
@@ -591,11 +596,21 @@ async function save() {
       body: JSON.stringify({ def, scope, repoRoot, overwrite }),
     }).then(async (x) => ({ status: x.status, ...(await x.json()) }));
     if (r.status === 409) {
-      toast(`You already have a workflow called "${def.id}". Change the short name, or open that one instead.`, 'err');
+      // Ids are unique everywhere. Offer the free one the server suggests.
+      toast(`${r.error || `You already have a workflow called "${def.id}"`}. Change the short name, or open that one instead.`, 'err', 0);
+      if (r.suggestedId) {
+        const btn = document.createElement('button');
+        btn.className = 'act';
+        btn.textContent = `Save it as "${r.suggestedId}"`;
+        btn.onclick = () => { $('wfId').value = state.def.id = r.suggestedId; state.idTouched = true; save(); };
+        $('status').append(' ', btn);
+      }
       return false;
     }
     if (!r.saved) throw new Error(r.error || 'save failed');
     def.version = r.version;
+    // A new id is unique, so any old clash went with the old one.
+    if (state.loaded?.id !== r.id) state.clash = null;
     state.loaded = { id: r.id, scope: r.scope, repoRoot: r.repoRoot || null };
     state.bootedRepo = r.bootedRepo || state.bootedRepo;
     state.builtin = false;
@@ -804,7 +819,11 @@ async function loadPastRuns() {
   let runs = [];
   try {
     // No limit here: the server limits before it filters by workflow.
-    const r = await fetch(`/api/runs?workflow=${encodeURIComponent(id)}`).then((x) => x.json());
+    // A project workflow's runs are the ones in its own repo, so an old run
+    // of a same-id workflow from another repo does not mix in.
+    const where = state.loaded.scope ? `&scope=${encodeURIComponent(state.loaded.scope)}` : '';
+    const repo = state.loaded.scope === 'project' && state.loaded.repoRoot ? `&repo=${encodeURIComponent(state.loaded.repoRoot)}` : '';
+    const r = await fetch(`/api/runs?workflow=${encodeURIComponent(id)}${where}${repo}`).then((x) => x.json());
     runs = (r.runs || []).filter((x) => x.workflowId === id);
   } catch {
     $('runsList').innerHTML = '<div class="list-empty">Could not load its runs.</div>';
