@@ -54,15 +54,15 @@ function renderTiles() {
     mount.innerHTML = list.map(tile).join('');
   }
   for (const el of document.querySelectorAll('.tile')) {
-    // Click on a tile opens the workflow on the canvas (preview mode).
-    // A dedicated "Run" affordance on the tile keeps the inputs sheet
-    // reachable without burying the structure behind it.
+    // Click on a tile opens the workflow in the visual editor — the primary
+    // thing people want to do with a workflow is see and modify its graph.
+    // The small Run pill on the tile is the fast-path for just running it.
     el.onclick = (e) => {
       if (e.target.closest('.tile-run')) {
         openSheet(el.dataset.id);
         return;
       }
-      location.href = `/workflows-run.html#def:${encodeURIComponent(el.dataset.id)}`;
+      location.href = `/workflows-new.html?from=${encodeURIComponent(el.dataset.id)}`;
     };
   }
 }
@@ -661,7 +661,7 @@ const TAB_COPY = {
   workflows: {
     eyebrow: 'Workflows · available in this project',
     title:   'Pick a workflow.',
-    desc:    'Every tile is a graph of typed-output cards. Click one for the brief sheet, fill the inputs, and open it on the canvas.',
+    desc:    'Every tile is a graph of typed-output cards. Click one to open it in the editor; hit ◆ Run on the tile to send it with its inputs.',
     newHref: '/workflows-new.html',
     newLabel: '+ New workflow',
   },

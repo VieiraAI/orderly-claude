@@ -109,6 +109,7 @@ function bindUi() {
   $('selCost').addEventListener('change', () => patchSelected({ cost: Number($('selCost').value) || 1 }));
   $('btnValidate').addEventListener('click', validate);
   $('btnSave').addEventListener('click', save);
+  $('btnRun')?.addEventListener('click', saveAndRun);
   $('modeVisual').addEventListener('click', () => setMode('visual'));
   $('modeJson').addEventListener('click', () => setMode('json'));
   $('jsonArea').addEventListener('change', () => {
@@ -268,7 +269,7 @@ async function validate() {
 
 async function save() {
   const ok = await validate();
-  if (!ok) return;
+  if (!ok) return false;
   try {
     const r = await fetch('/api/workflows', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -277,9 +278,34 @@ async function save() {
     if (r.saved) {
       $('status').textContent = `Saved → ${r.file}`;
       $('status').className = 'status ok';
-      return;
+      return true;
     }
     throw new Error(r.error || 'save failed');
+  } catch (e) {
+    showProblems([e.message]);
+    return false;
+  }
+}
+
+/** Save first, then POST a run with any declared inputs, then jump to its canvas. */
+async function saveAndRun() {
+  const saved = await save();
+  if (!saved) return;
+  const fields = Array.isArray(state.def.inputs) ? state.def.inputs : [];
+  const inputs = {};
+  for (const f of fields) {
+    const label = f.label || f.key;
+    const val = window.prompt(`${label}${f.placeholder ? ` (e.g. ${f.placeholder})` : ''}`, '');
+    if (val === null) return;
+    if (val.trim()) inputs[f.key] = val.trim();
+  }
+  try {
+    const r = await fetch(`/api/workflows/${encodeURIComponent(state.def.id)}/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ inputs }),
+    }).then((x) => x.json());
+    if (!r.run?.runId) throw new Error(r.error || 'run failed to start');
+    location.href = `/workflows-run.html#${r.run.runId}`;
   } catch (e) {
     showProblems([e.message]);
   }
