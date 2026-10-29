@@ -564,4 +564,4 @@ if (!new URLSearchParams(location.search).has('snapshot')) {
 }
 window.addEventListener('resize', () => run && drawEdges(document.getElementById('canvas'), document.getElementById('edges')));
 
-if (runId) load();
+if (runId || isPreview) load();

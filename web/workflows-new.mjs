@@ -348,10 +348,10 @@ function nodeCard(n) {
 }
 
 function attachDrag(card, n) {
-  let dragging = false, startX, startY, startLeft, startTop;
+  let dragging = false, moved = false, startX, startY, startLeft, startTop;
   card.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
-    dragging = true;
+    dragging = true; moved = false;
     startX = e.clientX; startY = e.clientY;
     startLeft = parseFloat(card.style.left); startTop = parseFloat(card.style.top);
     card.classList.add('dragging');
@@ -359,10 +359,14 @@ function attachDrag(card, n) {
   });
   window.addEventListener('mousemove', (e) => {
     if (!dragging) return;
-    const nx = startLeft + (e.clientX - startX);
-    const ny = startTop  + (e.clientY - startY);
-    card.style.left = `${Math.max(0, Math.round(nx / 20) * 20)}px`;
-    card.style.top  = `${Math.max(0, Math.round(ny / 20) * 20)}px`;
+    const dx = e.clientX - startX, dy = e.clientY - startY;
+    // Treat tiny pointer wobble as a click, not a drag. Without this the
+    // mouseup always re-renders and tears the card out of the DOM before
+    // the click handler can run, so selection appears broken.
+    if (!moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+    moved = true;
+    card.style.left = `${Math.max(0, Math.round((startLeft + dx) / 20) * 20)}px`;
+    card.style.top  = `${Math.max(0, Math.round((startTop  + dy) / 20) * 20)}px`;
     renderEdges();
   });
   window.addEventListener('mouseup', () => {
@@ -370,7 +374,8 @@ function attachDrag(card, n) {
     dragging = false;
     card.classList.remove('dragging');
     document.body.style.userSelect = '';
-    // Snap pixels back to col/row.
+    if (!moved) return; // plain click — let the click handler fire selectNode.
+    // Snap pixels back to col/row and re-render.
     n.col = Math.max(0, Math.round((parseFloat(card.style.left) - GUTTER) / COL_W));
     n.row = Math.max(0, Math.round((parseFloat(card.style.top)  - GUTTER) / ROW_H));
     render();
