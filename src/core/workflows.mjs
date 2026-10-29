@@ -54,7 +54,9 @@ export function listDefinitions({ repoRoot } = {}) {
  * repo the sessions index knows about adds its own project workflows, tagged
  * with the repo they live in. The same id in two repos is two workflows.
  * The booted repo keeps its old precedence: its workflows still hide a user
- * or built-in one with the same id, as listDefinitions does.
+ * or built-in one with the same id, as listDefinitions does. New ids are
+ * unique everywhere (freeId, claimId), so only clashes made before that are
+ * left, and each is marked with where the other one is.
  */
 export function listAllDefinitions({ repoRoot } = {}) {
   const booted = repoRoot ? path.resolve(repoRoot) : null;
@@ -63,7 +65,7 @@ export function listAllDefinitions({ repoRoot } = {}) {
     if (root === booted) continue;
     out.push(...readScope({ scope: 'project', dir: repoWorkflowsDir(root), root }));
   }
-  return out;
+  return markClashes(out, booted);
 }
 
 /** Every definition in one scope's folder, tagged with where it was found. */
@@ -83,7 +85,7 @@ function readScope({ scope, dir, root }) {
 }
 
 /** Fields that describe where a definition was found, not what it is. */
-const RUNTIME_FIELDS = ['scope', 'source', 'file', 'invalid', 'problems', 'repoRoot', 'repoName', 'key'];
+const RUNTIME_FIELDS = ['scope', 'source', 'file', 'invalid', 'problems', 'repoRoot', 'repoName', 'key', 'clash'];
 export function stripRuntime(def) {
   const out = { ...def };
   for (const k of RUNTIME_FIELDS) delete out[k];
@@ -691,13 +693,126 @@ export function deleteWorkflow({ id, scope, repoRoot = null }) {
   return true;
 }
 
-/** An id not yet taken in `scope`, built from `base`. */
-export function freeId(base, { scope = 'user', repoRoot = null } = {}) {
-  const dir = scope === 'user' ? USER_WORKFLOWS_DIR : repoWorkflowsDir(repoRoot);
-  const clean = String(base || 'workflow').toLowerCase().replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '') || 'workflow';
-  let id = clean, i = 2;
-  while (fs.existsSync(path.join(dir, `${id}.json`))) id = `${clean}-${i++}`;
+/*
+ * Every place Orderly lists workflows from, each read in full: every known
+ * repo (plus `repoRoot`, which a CLI run may not have registered), the user
+ * library and the built-ins. No nearest-wins here, so a workflow hidden by
+ * another with its id still counts.
+ */
+function everyLocation(repoRoot = null) {
+  const roots = knownRepoRoots();
+  if (repoRoot && !roots.some((r) => sameDir(r, repoRoot))) roots.push(path.resolve(repoRoot));
+  return [
+    ...roots.map((root) => ({ scope: 'project', dir: repoWorkflowsDir(root), root })),
+    { scope: 'user',    dir: USER_WORKFLOWS_DIR, root: null },
+    { scope: 'builtin', dir: BUILTIN_DIR,        root: null },
+  ];
+}
+
+function sameDir(a, b) {
+  const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+  return !!a && !!b && real(a) === real(b);
+}
+
+/*
+ * Which ids are in use, and where. A file name counts as well as the id
+ * inside it, since a file whose id differs from its name still blocks that
+ * name from being written.
+ */
+function idIndex(repoRoot = null) {
+  const byId = new Map();
+  const add = (id, loc) => {
+    const list = byId.get(id) || [];
+    if (!list.some((l) => l.dir === loc.dir)) list.push(loc);
+    byId.set(id, list);
+  };
+  for (const src of everyLocation(repoRoot)) {
+    const loc = { scope: src.scope, dir: src.dir, repoRoot: src.root, repoName: src.root ? path.basename(src.root) : null };
+    for (const { def } of readDir(src.dir)) add(def.id, loc);
+    let names = [];
+    try { names = fs.readdirSync(src.dir); } catch { /* no folder, no ids */ }
+    for (const n of names) if (n.endsWith('.json')) add(n.slice(0, -5), loc);
+  }
+  return byId;
+}
+
+/** How a location reads in a message: "the shop project", "your library". */
+export function whereWord(loc) {
+  return loc.scope === 'project' ? `the ${loc.repoName || 'other'} project`
+    : loc.scope === 'user' ? 'your library' : 'the built-ins';
+}
+
+/** The tail a clashing id gets in a scope: the repo's folder name, or "mine". */
+function idSuffix(scope, repoRoot) {
+  if (scope === 'user') return 'mine';
+  return String(path.basename(repoRoot || '') || 'project').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
+}
+
+export const cleanId = (base) => String(base || 'workflow').toLowerCase().replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '') || 'workflow';
+
+/*
+ * An id no workflow anywhere uses yet, built from `base`. Ids are unique
+ * across every repo, the user library and the built-ins, so one id always
+ * names one workflow. A clash becomes <id>-<repo> in a project, <id>-mine in
+ * the user library, then -2, -3 … if that is taken too.
+ */
+export function freeId(base, { scope = 'user', repoRoot = null, index = null } = {}) {
+  const taken = index || idIndex(scope === 'project' ? repoRoot : null);
+  const clean = cleanId(base);
+  if (!taken.has(clean)) return clean;
+  const suffix = idSuffix(scope, repoRoot);
+  // A copy of "deploy-shop" made in shop is "deploy-shop-2", not "deploy-shop-shop".
+  const stem = clean.endsWith(`-${suffix}`) ? clean : `${clean}-${suffix}`;
+  let id = stem, i = 2;
+  while (taken.has(id)) id = `${stem}-${i++}`;
   return id;
+}
+
+/*
+ * Check that `id` can be written to `scope` without two workflows sharing
+ * it. Saving a workflow over its own file is always fine, even if an older
+ * clash means the id is used elsewhere too. Otherwise any other workflow
+ * with the id, anywhere, refuses the write with a free id suggested.
+ * Throws an error with status 409, `suggestedId`, `takenBy`, and `own` when
+ * the clash is a file of that name in the same folder.
+ */
+export function claimId(id, { scope = 'project', repoRoot = null, overwrite = false } = {}) {
+  const dir = scope === 'user' ? USER_WORKFLOWS_DIR : scope === 'project' && repoRoot ? repoWorkflowsDir(repoRoot) : null;
+  if (!dir) return;
+  const own = fs.existsSync(path.join(dir, `${id}.json`));
+  if (own && overwrite) return;
+  const index = idIndex(scope === 'project' ? repoRoot : null);
+  const others = (index.get(id) || []).filter((l) => own || !sameDir(l.dir, dir));
+  if (!others.length) return;
+  const suggestedId = freeId(id, { scope, repoRoot, index });
+  const msg = own ? `a workflow with id "${id}" already exists at ${path.join(dir, `${id}.json`)}`
+    : `the id "${id}" is already used by a workflow in ${others.map(whereWord).join(' and ')}`;
+  throw Object.assign(new Error(msg), { status: 409, own, suggestedId, takenBy: others.map(({ dir: _d, ...l }) => l) });
+}
+
+/*
+ * Mark workflows that share an id with another one on disk. These clashes
+ * come from before ids were unique; both keep working by scope + repo, but
+ * each says where the other is and which id it could move to. Nothing is
+ * renamed for the person: other repos are theirs to change.
+ */
+export function markClashes(entries, repoRoot = null) {
+  const index = idIndex(repoRoot);
+  for (const e of entries) {
+    const others = (index.get(e.id) || []).filter((l) => !sameDir(l.dir, e.source));
+    if (!others.length) continue;
+    // A built-in cannot be renamed; the suggestion goes on the other side.
+    const mover = e.scope === 'builtin' ? others.find((o) => o.scope !== 'builtin') : null;
+    const suggestedId = e.scope === 'builtin' ? null : freeId(e.id, { scope: e.scope, repoRoot: e.repoRoot, index });
+    const rename = suggestedId ? ` Rename this one to "${suggestedId}" so the two cannot be mixed up.`
+      : mover ? ` Rename the one in ${whereWord(mover)} to "${freeId(e.id, { scope: mover.scope, repoRoot: mover.repoRoot, index })}" so the two cannot be mixed up.` : '';
+    e.clash = {
+      with: others.map(({ dir: _d, ...l }) => l),
+      suggestedId,
+      message: `"${e.id}" is also used by a workflow in ${others.map(whereWord).join(' and ')}.${rename}`,
+    };
+  }
+  return entries;
 }
 
 /**
@@ -709,6 +824,8 @@ export function duplicateWorkflow(id, { repoRoot = null, scope = 'user', fromSco
   const src = getDefinition(id, { repoRoot, scope: fromScope });
   if (!src) throw new Error(`workflow not found: ${id}`);
   const copy = stripRuntime(structuredClone(src));
+  // A built-in keeps its id as the base, so the copy is <id>-mine or
+  // <id>-<repo> and no longer hides the built-in it came from.
   copy.id = freeId(src.scope === 'builtin' ? id : `${id}-copy`, { scope, repoRoot });
   copy.title = src.scope === 'builtin' ? `${src.title} (yours)` : `${src.title} (copy)`;
   copy.version = 1;

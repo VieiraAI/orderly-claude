@@ -76,13 +76,17 @@ if (argv[0] === 'new-workflow') {
     console.error('Usage: orderly-claude new-workflow <id> [--title "..."] [--category build|design|review|ship|plan] [--scope project|user]');
     process.exit(2);
   }
-  const { scaffoldWorkflow, writeWorkflow } = await import('../src/core/workflows.mjs');
+  const { scaffoldWorkflow, writeWorkflow, freeId, cleanId } = await import('../src/core/workflows.mjs');
   const title = flag('title', null);
   const category = flag('category', 'build');
   const scope = flag('scope', 'project');
-  const def = scaffoldWorkflow(id, { title, category });
+  // Ids are unique across every repo, the user library and the built-ins.
+  // A clash gets the repo's name (or "mine") added, and says so.
+  const free = freeId(id, { scope, repoRoot: process.cwd() });
+  const def = scaffoldWorkflow(free, { title: title || scaffoldWorkflow(id).title, category });
   try {
     const file = writeWorkflow({ def, scope, repoRoot: process.cwd() });
+    if (free !== cleanId(id)) console.log(`"${id}" is already used by another workflow, so this one is "${free}".`);
     console.log(`wrote ${file}`);
   } catch (e) {
     console.error(e.message);

@@ -208,7 +208,9 @@ function scopeHint(scope) {
 
 function tile(w) {
   const cat = CAT_LABEL[w.category] || 'Workflow';
+  // An id shared with another workflow, from before ids were unique.
   const badge = w.invalid ? '<span class="tile-flag bad">needs fixing</span>'
+    : w.clash ? `<span class="tile-flag bad" title="${escapeHtml(w.clash.message)}">same id as another</span>`
     : w.derivedFrom ? '<span class="tile-flag">yours</span>' : '';
   return `
     <div class="tile${w.invalid ? ' invalid' : ''}" data-id="${escapeHtml(w.id)}" data-key="${escapeHtml(w.key)}">
@@ -253,8 +255,10 @@ function openSheet(ref, prefill = {}) {
     || '<div style="color:var(--faint);font-size:13px;">Nothing to fill in — it works on the project it is run in.</div>';
   $('shPlan').innerHTML = (w.graph?.nodes || [])
     .map((n) => `<li style="padding:3px 0;">· <b style="color:var(--text);font-weight:500;">${escapeHtml(n.title)}</b> <span style="color:var(--faint);font-family:var(--f-mono);font-size:11px;">${escapeHtml(KIND_WORD[n.kind] || n.kind)}</span></li>`).join('');
-  $('shProblems').innerHTML = w.invalid
-    ? `<div class="sheet-problems"><b>This workflow needs fixing before it can run.</b><ul>${w.problems.map((p) => `<li>${escapeHtml(p)}</li>`).join('')}</ul></div>` : '';
+  $('shProblems').innerHTML = (w.invalid
+    ? `<div class="sheet-problems"><b>This workflow needs fixing before it can run.</b><ul>${w.problems.map((p) => `<li>${escapeHtml(p)}</li>`).join('')}</ul></div>` : '')
+    + (w.clash
+      ? `<div class="sheet-problems"><b>Another workflow has the same id.</b><ul><li>${escapeHtml(w.clash.message)}</li></ul></div>` : '');
   $('shRun').disabled = !!w.invalid;
   $('shRun').textContent = '◆ Run';
   $('shRun').onclick = runNow;

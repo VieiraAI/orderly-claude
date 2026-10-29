@@ -119,6 +119,14 @@ export async function runWorkflowEngineChecks({ check, session }) {
       JSON.stringify(listed.map((w) => [w.title, w.repoRoot])));
     check('the same id in two repos is two workflows with their own keys', here && there && here.key !== there.key,
       JSON.stringify([here?.key, there?.key]));
+    // A clash from before ids were unique: listed, both kept, each warned.
+    check('an id already shared on disk is listed with a warning naming the other repo and a new id',
+      /other-project/.test(here?.clash?.message || '') && here?.clash?.suggestedId === 'twin-project'
+      && /the project project/.test(there?.clash?.message || '') && there?.clash?.suggestedId === 'twin-other-project',
+      JSON.stringify([here?.clash, there?.clash]));
+    check('the warning is not written into either file', !('clash' in JSON.parse(fs.readFileSync(path.join(other, '.claude', 'workflows', 'twin.json'), 'utf8'))));
+    check('opening one of them by repo carries the same warning',
+      (await api(`/api/workflows/twin?${inB}`)).workflow?.clash?.suggestedId === 'twin-other-project');
 
     let got = await api(`/api/workflows/twin?${inB}`);
     const plain = await api('/api/workflows/twin');
@@ -138,6 +146,10 @@ export async function runWorkflowEngineChecks({ check, session }) {
     r = await until(runHere.runId, settled);
     check('…while the booted repo\'s workflow of the same id runs in the booted repo',
       runHere?.cwd === repo && real(node(r, 'where')?.output?.out?.trim()) === real(repo), node(r, 'where')?.output?.out || states(r));
+    const pastThere = (await api(`/api/runs?workflow=twin&scope=project&repo=${encodeURIComponent(other)}`)).runs || [];
+    check('past runs asked for by repo leave out a same-id workflow\'s runs from another repo',
+      pastThere.some((x) => x.runId === runThere.runId) && !pastThere.some((x) => x.runId === runHere.runId),
+      JSON.stringify(pastThere.map((x) => x.repoRoot)));
 
     const savedB = await api('/api/workflows', { body: { def: twin('Twin there, edited'), scope: 'project', repoRoot: other, overwrite: true } });
     got = await api(`/api/workflows/twin?${inB}`);
@@ -157,6 +169,34 @@ export async function runWorkflowEngineChecks({ check, session }) {
     check('deleting another repo\'s workflow leaves the booted repo\'s one of the same id',
       delB.deleted && !fs.existsSync(path.join(other, '.claude', 'workflows', 'twin.json'))
       && fs.existsSync(path.join(repo, '.claude', 'workflows', 'twin.json')), JSON.stringify(delB));
+
+    /* ------------------------------ unique ids ------------------------------ */
+    console.log('\nWorkflows: unique ids\n');
+
+    // An unusual id, so no workflow in a real repo on this machine has it.
+    const tide = (title) => ({ schemaVersion: 2, id: 'uniq-tide-zq', title, graph: { nodes: [script('a', 'echo hi')], edges: [] } });
+    let u = await api('/api/workflows', { body: { def: tide('Tide there'), scope: 'project', repoRoot: other, overwrite: true } });
+    check('a new id saves as given when nothing else uses it', u.saved && u.id === 'uniq-tide-zq', JSON.stringify(u));
+    u = await save(tide('Tide here'));
+    check('saving a new workflow whose id another repo uses is refused, with <id>-<repo> suggested',
+      u.status === 409 && u.suggestedId === 'uniq-tide-zq-project' && /other-project/.test(u.error || '')
+      && !fs.existsSync(path.join(repo, '.claude', 'workflows', 'uniq-tide-zq.json')), JSON.stringify(u));
+    u = await save({ ...tide('Tide here'), id: u.suggestedId });
+    check('saving under the suggested id works', u.saved && u.id === 'uniq-tide-zq-project', JSON.stringify(u));
+    u = await api('/api/workflows', { body: { def: tide('Tide there, again'), scope: 'project', repoRoot: other, overwrite: true } });
+    check('saving an existing workflow over its own file keeps its id', u.saved && u.id === 'uniq-tide-zq' && u.version === 2, JSON.stringify(u));
+    check('the same id taken by a project gets -2 after the repo name',
+      wf.freeId('uniq-tide-zq', { scope: 'project', repoRoot: repo }) === 'uniq-tide-zq-project-2');
+    check('in the user library a clash with a project becomes <id>-mine', wf.freeId('uniq-tide-zq', { scope: 'user' }) === 'uniq-tide-zq-mine');
+    check('in the user library a clash with a built-in becomes <id>-mine', wf.freeId('ship-pr', { scope: 'user' }) === 'ship-pr-mine');
+    wf.writeWorkflow({ def: { ...tide('Taken'), id: 'ship-pr-mine' }, scope: 'project', repoRoot: other, overwrite: true });
+    check('…and -2 when <id>-mine is taken too', wf.freeId('ship-pr', { scope: 'user' }) === 'ship-pr-mine-2');
+    fs.rmSync(path.join(other, '.claude', 'workflows', 'ship-pr-mine.json'));
+    u = await api('/api/workflows/import', { body: { def: tide('Tide shared'), scope: 'project' } });
+    check('importing an id another repo uses is refused, naming that repo, with a free id suggested',
+      u.status === 409 && u.suggestedId === 'uniq-tide-zq-project-2' && /other-project/.test(u.error || ''), JSON.stringify(u));
+    u = await api('/api/workflows/scaffold?id=uniq-tide-zq');
+    check('a starter workflow comes with a free id', u.def?.id === 'uniq-tide-zq-project-2', u.def?.id);
 
     let v = await api('/api/workflows/validate', { body: { def: { schemaVersion: 2, id: 'bad', graph: {
       nodes: [script('a', 'echo {{nodes.b.output}}'), script('b', 'echo hi'), script('c', 'echo {{nodes.ghost.output}}')],
@@ -435,10 +475,12 @@ export async function runWorkflowEngineChecks({ check, session }) {
     console.log('\nWorkflows: owning them\n');
 
     const dup = await api('/api/workflows/ship-pr/duplicate', { body: { scope: 'project' } });
-    check('a built-in can be copied into your own library', dup.saved === true && dup.id === 'ship-pr', JSON.stringify(dup));
-    const mine = (await api('/api/workflows')).workflows.find((w) => w.id === dup.id);
-    check('the copy is yours, records where it came from, and shadows the built-in',
-      mine?.scope === 'project' && mine?.derivedFrom?.id === 'ship-pr' && /\(yours\)/.test(mine?.title), JSON.stringify(mine?.derivedFrom));
+    check('a built-in copied into a project gets <id>-<repo>', dup.saved === true && dup.id === 'ship-pr-project', JSON.stringify(dup));
+    const catalog = (await api('/api/workflows')).workflows;
+    const mine = catalog.find((w) => w.id === dup.id);
+    check('the copy is yours, records where it came from, and no longer hides the built-in',
+      mine?.scope === 'project' && mine?.derivedFrom?.id === 'ship-pr' && /\(yours\)/.test(mine?.title)
+      && catalog.some((w) => w.id === 'ship-pr' && w.scope === 'builtin'), JSON.stringify(mine?.derivedFrom));
     const dup2 = await api('/api/workflows/ship-pr/duplicate', { body: { scope: 'project' } });
     check('copying again picks a free name instead of overwriting', dup2.id !== dup.id, dup2.id);
 
@@ -448,9 +490,9 @@ export async function runWorkflowEngineChecks({ check, session }) {
       && exported.id === 'refs' && !('scope' in exported) && !('file' in exported));
     res = await api('/api/workflows/import', { body: { def: exported, scope: 'project' } });
     check('importing a name you already have is refused, with a free one suggested',
-      res.status === 409 && res.suggestedId === 'refs-2', JSON.stringify(res));
+      res.status === 409 && res.suggestedId === 'refs-project' && /You already have/.test(res.error || ''), JSON.stringify(res));
     res = await api('/api/workflows/import', { body: { def: { ...exported, id: res.suggestedId }, scope: 'project' } });
-    check('importing under the suggested name works', res.saved === true && res.id === 'refs-2', JSON.stringify(res));
+    check('importing under the suggested name works', res.saved === true && res.id === 'refs-project', JSON.stringify(res));
     res = await api('/api/workflows/import', { body: { def: { id: 'junk', graph: { nodes: [] } }, scope: 'project' } });
     check('importing something that is not a workflow is refused, with why', res.status === 400 && res.problems?.length > 0);
 
