@@ -6,6 +6,10 @@
  *   2. ~/.claude/workflows/*.{json,yaml,yml}                — user-global
  *   3. built-ins shipped under src/core/workflow-defs/      — baseline catalog
  *
+ * The Workflows page lists project workflows from every known repo, not just
+ * the booted one (listAllDefinitions), so a project workflow is addressed by
+ * scope + repo + id, never by id alone.
+ *
  * Runs are the artifacts of invoking a workflow. One run.json per run, stored
  * at <repo>/.claude/workflows/runs/<run-id>/run.json so the repo carries its
  * own history and the local Claude Code sees it. If no repo is around, a
@@ -32,32 +36,74 @@ const BUILTIN_DIR = fileURLToPath(new URL('./workflow-defs/', import.meta.url));
 export function listDefinitions({ repoRoot } = {}) {
   const seen = new Map();
   const sources = [
-    repoRoot ? { scope: 'project', dir: repoWorkflowsDir(repoRoot) } : null,
-    { scope: 'user',    dir: USER_WORKFLOWS_DIR },
-    { scope: 'builtin', dir: BUILTIN_DIR },
+    repoRoot ? { scope: 'project', dir: repoWorkflowsDir(repoRoot), root: path.resolve(repoRoot) } : null,
+    { scope: 'user',    dir: USER_WORKFLOWS_DIR, root: null },
+    { scope: 'builtin', dir: BUILTIN_DIR,        root: null },
   ].filter(Boolean);
   for (const src of sources) {
-    for (const { def, problems, file } of readDir(src.dir)) {
-      if (seen.has(def.id)) continue;
-      const entry = { ...def, scope: src.scope, source: src.dir, file };
-      // A definition that stopped validating stays listed, marked, so its
-      // owner can open and fix it. Hiding it would look like it was deleted.
-      if (problems.length) { entry.invalid = true; entry.problems = problems; }
-      seen.set(def.id, entry);
+    for (const entry of readScope(src)) {
+      if (seen.has(entry.id)) continue;
+      seen.set(entry.id, entry);
     }
   }
   return [...seen.values()];
 }
 
+/*
+ * The catalog the Workflows page shows. Orderly spans every project, so each
+ * repo the sessions index knows about adds its own project workflows, tagged
+ * with the repo they live in. The same id in two repos is two workflows.
+ * The booted repo keeps its old precedence: its workflows still hide a user
+ * or built-in one with the same id, as listDefinitions does.
+ */
+export function listAllDefinitions({ repoRoot } = {}) {
+  const booted = repoRoot ? path.resolve(repoRoot) : null;
+  const out = listDefinitions({ repoRoot: booted });
+  for (const root of knownRepoRoots()) {
+    if (root === booted) continue;
+    out.push(...readScope({ scope: 'project', dir: repoWorkflowsDir(root), root }));
+  }
+  return out;
+}
+
+/** Every definition in one scope's folder, tagged with where it was found. */
+function readScope({ scope, dir, root }) {
+  return readDir(dir).map(({ def, problems, file }) => {
+    const entry = {
+      ...def, scope, source: dir, file,
+      repoRoot: root, repoName: root ? path.basename(root) : null,
+      // One string that names this workflow and no other, for the client.
+      key: `${scope}:${root || ''}:${def.id}`,
+    };
+    // A definition that stopped validating stays listed, marked, so its
+    // owner can open and fix it. Hiding it would look like it was deleted.
+    if (problems.length) { entry.invalid = true; entry.problems = problems; }
+    return entry;
+  });
+}
+
 /** Fields that describe where a definition was found, not what it is. */
-const RUNTIME_FIELDS = ['scope', 'source', 'file', 'invalid', 'problems'];
+const RUNTIME_FIELDS = ['scope', 'source', 'file', 'invalid', 'problems', 'repoRoot', 'repoName', 'key'];
 export function stripRuntime(def) {
   const out = { ...def };
   for (const k of RUNTIME_FIELDS) delete out[k];
   return out;
 }
 
-export function getDefinition(id, { repoRoot } = {}) {
+/*
+ * Find one definition. With a `scope`, look only in that scope's folder, so
+ * a project workflow is found in its own repo and nowhere else. Without one,
+ * nearest wins from `repoRoot`, as it always has.
+ */
+export function getDefinition(id, { repoRoot, scope } = {}) {
+  if (scope) {
+    const src = scope === 'project' ? (repoRoot ? { dir: repoWorkflowsDir(repoRoot), root: path.resolve(repoRoot) } : null)
+      : scope === 'user' ? { dir: USER_WORKFLOWS_DIR, root: null }
+      : scope === 'builtin' ? { dir: BUILTIN_DIR, root: null }
+      : null;
+    if (!src) return null;
+    return readScope({ scope, ...src }).find((d) => d.id === id) || null;
+  }
   return listDefinitions({ repoRoot }).find((d) => d.id === id) || null;
 }
 
@@ -388,11 +434,14 @@ function hasCycle(ids, edges) {
  * `running`, and returns the run.
  */
 export function startRun({
-  workflowId, inputs = {}, repoRoot, sessionId = null, trigger = 'you',
+  workflowId, inputs = {}, repoRoot, scope = null, sessionId = null, trigger = 'you',
   budgetUsd, scheduleId = null, definition = null,
 }) {
-  const found = definition || getDefinition(workflowId, { repoRoot });
+  const found = definition || getDefinition(workflowId, { repoRoot, scope });
   if (!found) throw new Error(`workflow not found: ${workflowId}`);
+  // A project workflow runs in the repo it lives in, wherever Orderly was
+  // started. Its scripts, sandbox and run history all belong to that repo.
+  if (found.scope === 'project' && found.repoRoot) repoRoot = found.repoRoot;
   if (found.invalid) throw new Error(`"${found.title || workflowId}" needs fixing before it can run: ${found.problems.join('; ')}`);
   const def = stripRuntime(found);
   const settings = readSettings();
@@ -589,8 +638,8 @@ export function writeWorkflow({ def, scope = 'project', repoRoot = null, overwri
  * provide one. Returns { file, lesson }. Rejects for builtin defs — those are
  * read-only; copy them into project or user scope first.
  */
-export function addLesson(workflowId, lesson, { repoRoot = null } = {}) {
-  const def = getDefinition(workflowId, { repoRoot });
+export function addLesson(workflowId, lesson, { repoRoot = null, scope = null } = {}) {
+  const def = getDefinition(workflowId, { repoRoot, scope });
   if (!def) throw new Error(`workflow not found: ${workflowId}`);
   if (def.scope === 'builtin') throw new Error('cannot add lesson to a builtin workflow; save it to project scope first');
   const l = {
@@ -605,9 +654,9 @@ export function addLesson(workflowId, lesson, { repoRoot = null } = {}) {
   if (!l.note) throw new Error('lesson.note is required');
   const lessons = Array.isArray(def.lessons) ? [...def.lessons] : [];
   lessons.push(l);
-  const next = { ...def, lessons };
-  delete next.scope; delete next.source; // these are runtime annotations, not fields on disk
-  const file = writeWorkflow({ def: next, scope: def.scope, repoRoot, overwrite: true });
+  const next = { ...stripRuntime(def), lessons };
+  // Back into the file it came from, not a copy in whichever repo asked.
+  const file = writeWorkflow({ def: next, scope: def.scope, repoRoot: def.repoRoot || repoRoot, overwrite: true });
   return { file, lesson: l };
 }
 
@@ -656,8 +705,8 @@ export function freeId(base, { scope = 'user', repoRoot = null } = {}) {
  * where they can change it. This is the easiest way to make one: start from
  * something that works.
  */
-export function duplicateWorkflow(id, { repoRoot = null, scope = 'user' } = {}) {
-  const src = getDefinition(id, { repoRoot });
+export function duplicateWorkflow(id, { repoRoot = null, scope = 'user', fromScope = null } = {}) {
+  const src = getDefinition(id, { repoRoot, scope: fromScope });
   if (!src) throw new Error(`workflow not found: ${id}`);
   const copy = stripRuntime(structuredClone(src));
   copy.id = freeId(src.scope === 'builtin' ? id : `${id}-copy`, { scope, repoRoot });
@@ -788,7 +837,8 @@ function parse(file) {
 export function knownRepoRoots() {
   const roots = new Set(extraRoots);
   for (const s of listSessions({ limit: 400 })) {
-    if (s.cwd) roots.add(s.cwd);
+    // Resolved, so one repo reached by two spellings is listed once.
+    if (s.cwd) roots.add(path.resolve(s.cwd));
   }
   return [...roots];
 }

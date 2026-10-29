@@ -77,6 +77,8 @@ export function suggestWorkflows({ query, defs, limit = 5, min = 0.2 }) {
     .sort((a, b) => b.score - a.score || a.def.id.length - b.def.id.length);
   return scored.slice(0, limit).map((s) => ({
     id: s.def.id,
+    // Which workflow this is, when the same id lives in two repos.
+    key: s.def.key || null,
     title: s.def.title,
     score: s.score,
     reason: s.reasons.join(', ') || 'weak match',
