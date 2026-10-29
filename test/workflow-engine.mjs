@@ -207,6 +207,21 @@ export async function runWorkflowEngineChecks({ check, session }) {
       node(r, 'w')?.status === 'failed' && /outside the project/.test(node(r, 'w')?.output?.error || '') && !fs.existsSync(path.join(tmp, 'outside.md')),
       node(r, 'w')?.output?.error);
 
+    // A 1×1 PNG, written twice inside the project and once outside it.
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    await save({ id: 'shows', title: 'Shows', graph: { nodes: [
+      script('make', `mkdir -p out && echo ${png} | base64 -d > out/a.png && cp out/a.png out/b.png && cp out/a.png ../outside.png`,
+        { show: 'out/*.png, ../outside.png' }),
+    ], edges: [] } });
+    r = await until((await start('shows')).run.runId, settled);
+    const shown = node(r, 'make')?.output?.images || [];
+    check('a command step shows the pictures it made', shown.length === 2 && shown.map((x) => x.name).join() === 'out/a.png,out/b.png',
+      JSON.stringify(shown.map((x) => x.name)));
+    check('…and never a file outside the project, even when asked', !shown.some((x) => /outside/.test(x.name)));
+    const sha = /^blob:sha256:([a-f0-9]{64})/.exec(shown[0]?.ref || '')?.[1];
+    const img = sha ? await fetch(`${base}/api/blob?sha=${sha}`) : null;
+    check('a shown picture is kept, and served as an image', img?.status === 200 && img.headers.get('content-type') === 'image/png');
+
     /* --------------------------- versions, reruns --------------------------- */
     console.log('\nWorkflows: versions\n');
 

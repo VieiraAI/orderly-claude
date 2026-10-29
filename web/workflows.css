@@ -705,3 +705,14 @@ button.stat:hover { background: var(--raised); }
 .drawer .run-btn { margin-top: 18px; }
 .nav .crumbs { display: flex; gap: 8px; align-items: baseline; color: var(--mute); font: 13px var(--f-mono); }
 .nav .crumbs .here { color: var(--accent); }
+
+/* What a step made and asked to show: pictures, and clips that play. */
+.shown-strip { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; }
+.shown-strip .shown { width: 44px; height: 62px; border-radius: 4px; background: var(--bg) center / cover no-repeat;
+  border: 1px solid var(--edge-tint); object-fit: cover; display: block; }
+.shown-strip a.shown:hover { border-color: var(--edge-hi); }
+.shown-more { font: 10.5px var(--f-mono); color: var(--faint); }
+.dr-shown { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.dr-shown figure { margin: 0; }
+.dr-shown img, .dr-shown video { width: 100%; border-radius: 8px; border: 1px solid var(--edge-tint); display: block; background: var(--bg); }
+.dr-shown figcaption { font: 10.5px var(--f-mono); color: var(--faint); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

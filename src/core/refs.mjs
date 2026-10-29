@@ -172,6 +172,7 @@ export function referenceFields(node) {
   add('question', s.question ?? node?.question);
   add('path', s.path);
   add('content', s.content);
+  add('show', s.show);
   if (typeof s.over === 'string') add('over', s.over);
   if (s.assert?.needle) add('assert.needle', s.assert.needle);
   return fields;

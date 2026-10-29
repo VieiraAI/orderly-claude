@@ -1101,7 +1101,7 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         const sha = url.searchParams.get('sha') || '';
         const b = openBlob(sha);
         if (!b) return send(404, { error: 'blob not found' });
-        const type = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+        const type = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
           svg: 'image/svg+xml', webm: 'video/webm', mp4: 'video/mp4',
           txt: 'text/plain', json: 'application/json' }[b.ext] || 'application/octet-stream';
         res.writeHead(200, { 'content-type': type, 'cache-control': 'max-age=31536000, immutable' });

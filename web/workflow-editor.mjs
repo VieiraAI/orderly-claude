@@ -1046,7 +1046,8 @@ function renderSpecForm(n) {
     case 'script':
       html = `<label for="sp-op">It does</label>${sel('op', s.op || '', [['', 'Run a command'], ['capture-shot', 'Screenshot a page'], ['capture-shots', 'Screenshot several pages']])}`
         + (s.op ? '<div class="hint block-hint">Uses the running app Orderly found for this project, or the page given as an input.</div>'
-          : refHead('Command', 'cmd', 'runs in the project folder; inserted values are quoted') + ta('cmd', s.cmd, 'npm test'));
+          : refHead('Command', 'cmd', 'runs in the project folder; inserted values are quoted') + ta('cmd', s.cmd, 'npm test')
+            + refHead('Show on the run page', 'show', 'pictures or clips it makes; * matches many') + txt('show', s.show, 'out/*.png, out/demo.mp4', true));
       break;
     case 'decision':
       html = refHead('Question', 'question') + txt('question', s.question, 'Which direction wins?', true)
