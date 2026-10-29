@@ -23,7 +23,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { screenshot, detectDevServer } from './capture.mjs';
+import { screenshot, detectDevServer, pageProblem } from './capture.mjs';
 import { putFile } from './blobs.mjs';
 import { resolveText, isExplicit } from './refs.mjs';
 import { runSpend } from './settings.mjs';
@@ -218,6 +218,7 @@ const HANDLERS = {
     const after = await captureShot(`${origin}${path}`, ctx.signal);
     const before = baselineOrigin ? await captureShot(`${baselineOrigin}${path}`, ctx.signal) : null;
     if (!after) return { note: `Capture failed for ${route}` };
+    if (after.problem) return { route, origin, after, shot: after, problem: after.problem, note: `${route}: ${after.problem}` };
     return { route, origin, baselineOrigin: baselineOrigin || null, before, after, shot: after };
   },
 
@@ -252,7 +253,9 @@ const HANDLERS = {
           const before = await captureShot(`${baselineOrigin}${path}`, ctx.signal);
           if (before) pairs[i].before = before;
         }
-        pairs[i].status = after ? 'done' : 'failed';
+        if (!after) pairs[i].status = 'failed';
+        else if (after.problem) { pairs[i].status = 'failed'; pairs[i].error = after.problem; }
+        else pairs[i].status = 'done';
       } catch (e) {
         pairs[i].status = 'failed';
         pairs[i].error = e.message;
@@ -260,7 +263,10 @@ const HANDLERS = {
       onProgressSnapshot(ctx, pairs, i);
     }
     const done = pairs.filter((p) => p.status === 'done').length;
-    const note = !baselineOrigin && baselineName
+    const broken = pairs.filter((p) => p.error).map((p) => `${p.route}: ${p.error}`);
+    const note = broken.length
+      ? `Not counted — ${broken.join('; ')}. Is ${origin} the app you meant?`
+      : !baselineOrigin && baselineName
       ? `No baselineUrl set. To compare against ${baselineName}, start a dev server on that branch and pass inputs.baselineUrl.`
       : null;
     return {
@@ -301,6 +307,13 @@ const HANDLERS = {
     const spec = node.spec || {};
     if (spec.op === 'capture-shots') return HANDLERS['shots-set'](node, ctx);
     if (spec.op === 'capture-shot')  return HANDLERS.shots(node, ctx);
+    if (spec.op === 'find-dev-server') {
+      const origin = await pickOrigin(ctx);
+      if (!origin) {
+        throw final('No dev server is running for this project. Start it (for example `npm run dev`), or give its address in "Dev server URL", then run again.');
+      }
+      return { origin, out: `found ${origin}`, code: 0 };
+    }
     // Shell command — reuse the terminal handler with the cmd shimmed on.
     // Substituted values are quoted, so an output cannot become a command.
     const raw = spec.cmd || node.command;
@@ -340,13 +353,16 @@ const HANDLERS = {
       const done = pairs.filter((p) => p.status === 'done').length;
       const skipped = pairs.filter((p) => p.status === 'skipped').length;
       const min = a.min || 1;
+      const broken = pairs.filter((p) => p.error);
       if (pairs.length > 0 && skipped === pairs.length) {
-        // No origin to capture against — treat as "nothing to check" rather
-        // than a failure so the gate doesn't trip on a missing dev server.
-        pass = true; reason = 'no captures available';
+        // Nothing was captured because there was nothing to capture against.
+        // That is not a pass: a green tick here would claim pages were checked.
+        pass = !!a.allowNone;
+        reason = 'no dev server found, so nothing was captured';
       } else {
         pass = done >= min;
-        reason = `${done} captured${pass ? '' : `, need ${min}`}`;
+        reason = `${done} of ${pairs.length} captured${pass ? '' : `, need ${min}`}`
+          + (broken.length ? ` — ${broken.length} were error or blank pages (${broken.slice(0, 2).map((p) => `${p.route}: ${p.error}`).join('; ')})` : '');
       }
     } else if (a.type === 'contains') {
       const haystack = JSON.stringify(from?.output || '');
@@ -362,7 +378,7 @@ const HANDLERS = {
       reason = answer;
     } else if (a.type === 'color-in-palette') {
       const brand = loadBrand(cwdOf(ctx.run));
-      const colors = resolveColors(a, from);
+      const colors = resolveColors(a, from).length ? resolveColors(a, from) : renderDataOf(from).colors;
       const res = colorsInPalette(colors, brand, { ignoreGrays: a.ignoreGrays !== false, tolerance: a.tolerance ?? 8 });
       pass = res.ok;
       reason = pass
@@ -371,14 +387,14 @@ const HANDLERS = {
       return { pass, reason, assertType: a.type, from: a.from || null, title: node.title, offenders: res.offenders };
     } else if (a.type === 'font-is-brand') {
       const brand = loadBrand(cwdOf(ctx.run));
-      const family = a.fontFamily ?? from?.output?.fontFamily ?? '';
+      const family = a.fontFamily ?? from?.output?.fontFamily ?? renderDataOf(from).fontFamily;
       const res = fontIsBrand(family, brand, { role: a.role || 'sans' });
       pass = res.ok;
       reason = pass ? `brand ${a.role || 'sans'}` : `uses ${res.used?.join(', ') || '(none)'}, want ${res.want?.join(', ')}`;
       return { pass, reason, assertType: a.type, from: a.from || null, title: node.title };
     } else if (a.type === 'contrast-min') {
       const brand = loadBrand(cwdOf(ctx.run));
-      const pairs = a.pairs ?? from?.output?.pairs ?? [];
+      const pairs = a.pairs ?? renderDataOf(from).contrastPairs;
       const res = contrastPassesAll(pairs, brand, { ratio: a.ratio });
       pass = res.ok;
       reason = pass
@@ -387,7 +403,7 @@ const HANDLERS = {
       return { pass, reason, assertType: a.type, from: a.from || null, title: node.title, results: res.results };
     } else if (a.type === 'spacing-on-scale') {
       const brand = loadBrand(cwdOf(ctx.run));
-      const values = a.values ?? from?.output?.spacing ?? [];
+      const values = a.values ?? from?.output?.spacing ?? renderDataOf(from).spacing;
       const res = spacingOnScale(values, brand);
       pass = res.ok;
       reason = pass ? `${values.length} on scale` : `${res.offenders.length} off: ${res.offenders.slice(0, 3).map((o) => `${o.value}→${o.nearest}`).join(', ')}`;
@@ -571,81 +587,10 @@ const HANDLERS = {
       items, results: ran, count: items.length, total: all.length,
       ...(notes.length ? { note: notes.join('; ') } : {}),
       ...(halted ? { halted } : {}),
+      ...joinResults(spec.join, ran),
       // One cost for the whole loop, so totals add up without counting twice.
       ...(spent ? { meta: { model: 'loop', cost: spent, elapsed: null } } : {}),
     };
-  },
-
-  // fanOut runs an action concurrently over an iterable, with bounded
-  // concurrency and a configurable join mode. The scalar sibling to `loop`.
-  fanOut: async (node, ctx) => {
-    const spec = node.spec || {};
-    const body = spec.body || {};
-    const items = resolveOver(spec.over, ctx.run);
-    const limit = Math.max(1, Math.min(16, Number(spec.concurrency) || 4));
-    const join = spec.join || 'concat';
-    const action = spec.action || (body.cmd ? 'script' : (body.prompt ? 'agent' : null));
-    const total = items.length;
-    const results = new Array(total);
-    let completed = 0;
-    let cursor = 0;
-
-    const runOne = async (i) => {
-      const item = items[i];
-      try {
-        if (action === 'script') {
-          const rawCmd = body.cmd || spec.cmd;
-          if (!rawCmd) return { item, error: 'missing body.cmd' };
-          const cmd = String(rawCmd).replaceAll('{{item}}', String(item));
-          const { out, err, code } = await exec(['sh', '-c', cmd], {
-            cwd: cwdOf(ctx.run), signal: ctx.signal, timeoutMs: 30_000,
-          });
-          return { item, out: (out || err || '').slice(0, 500), code };
-        }
-        if (action === 'agent') {
-          const rawPrompt = body.prompt || spec.prompt;
-          if (!rawPrompt) return { item, error: 'missing body.prompt' };
-          const prompt = String(rawPrompt).replaceAll('{{item}}', String(item));
-          const { text, meta } = await callClaude(prompt, {
-            ctx, cwd: cwdOf(ctx.run), signal: ctx.signal,
-            model: body.model || pickModel(node, 'haiku'),
-            onProgress: () => {}, onStream: () => {},
-          });
-          return { item, text, meta };
-        }
-        return { item };
-      } catch (e) {
-        return { item, error: e.message };
-      }
-    };
-
-    const worker = async () => {
-      while (!ctx.signal?.aborted) {
-        const i = cursor++;
-        if (i >= total) return;
-        results[i] = await runOne(i);
-        completed++;
-        ctx.onProgress({
-          progress: `${completed}/${total} done`,
-          partialOutput: { items, results: results.slice(), count: total, done: completed },
-        });
-      }
-    };
-
-    const workers = Array.from({ length: Math.min(limit, total) }, () => worker());
-    await Promise.all(workers);
-
-    let joined;
-    if (join === 'first-match') {
-      const hit = results.find((r) => !r?.error && (r?.code === 0 || r?.text || r?.item !== undefined));
-      joined = hit || null;
-    } else if (join === 'vote') {
-      const trues = results.filter((r) => r && !r.error && (r.pass === true || /^(yes|true)$/i.test(String(r.text || '').trim()))).length;
-      joined = { pass: trues > total / 2, trues, total };
-    } else {
-      joined = results;
-    }
-    return { items, results, count: total, join, joined };
   },
 
   // Delay parks the scheduler for a wall-clock duration (or until a given
@@ -820,6 +765,11 @@ function execStream(argv, { cwd, signal, timeoutMs = 180_000, onDelta } = {}) {
 function mockReply(prompt, model) {
   // ORDERLY_MOCK_COST lets the suite exercise spend limits without spending.
   const meta = { model: `mock-${model}`, cost: Number(process.env.ORDERLY_MOCK_COST) || 0, elapsed: '0.1 s', sessionId: 'mock', tokens: 0 };
+  if (/Return a JSON verdict object/i.test(prompt)) {
+    // Fails when the rubric says so, so tests can drive both outcomes.
+    const fail = /MOCK_FAIL/.test(prompt);
+    return { text: JSON.stringify({ pass: !fail, reason: fail ? 'mock judge failed it' : 'mock judge passed it' }), meta };
+  }
   if (/Return a JSON object .*findings/i.test(prompt)) {
     return { text: JSON.stringify({
       findings: [{ tag: 'readability', text: 'Mock finding — swap in a real review.' }],
@@ -929,11 +879,11 @@ async function pickOrigin(ctx) {
 async function captureShot(url, signal) {
   if (signal?.aborted) throw new Error('aborted');
   const tmp = path.join(os.tmpdir(), `orderly-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`);
-  const res = await screenshot(url, tmp, { width: 1400, height: 1000 });
+  const res = await screenshot(url, tmp, { width: 1400, height: 1000, probe: true });
   if (!res.ok) return null;
   const ref = putFile(tmp);
   try { fs.unlinkSync(tmp); } catch {}
-  return { url, ref, capturedAt: new Date().toISOString() };
+  return { url, ref, capturedAt: new Date().toISOString(), page: res.page || null, problem: pageProblem(res.page) };
 }
 
 function onProgressSnapshot(ctx, pairs, i) {
@@ -999,6 +949,20 @@ function resolveOver(over, run) {
 }
 
 /**
+ * What a loop hands on besides every result: the first one that worked, or
+ * whether most items said yes. `concat` (the default) adds nothing.
+ */
+function joinResults(join, ran) {
+  const ok = (r) => !r.error && (r.code == null || r.code === 0);
+  if (join === 'first-match') return { join, joined: ran.find(ok) || null };
+  if (join === 'vote') {
+    const yes = ran.filter((r) => ok(r) && (r.pass === true || /^\s*(yes|true|pass)\b/i.test(String(r.text ?? r.out ?? '')))).length;
+    return { join, joined: { pass: yes > ran.length / 2, yes, of: ran.length } };
+  }
+  return {};
+}
+
+/**
  * One Agent pass. Called per attempt; `extraFailures` from prior rounds get
  * appended to the prompt as "fix these on this pass" lines.
  */
@@ -1047,15 +1011,51 @@ async function runVerify(node, output, ctx) {
   const asserts = Array.isArray(verify.asserts) ? verify.asserts : [];
   const brand = loadBrand(cwdOf(ctx.run));
   const results = [];
+  const renders = (verify.renders || []).map((r) => (typeof r === 'string' ? { route: r } : r)).filter((r) => r.route);
+  if (renders.length) {
+    const rendered = await renderForVerify(renders, ctx);
+    output.render = rendered.render;
+    results.push(...rendered.results);
+  }
   for (const a of asserts) {
-    const res = await runOneAssert(a, output, brand);
-    results.push(res);
+    results.push(await runOneAssert(a, output, brand, ctx));
   }
   const failures = results.filter((r) => !r.pass);
   return { pass: failures.length === 0, results, failures };
 }
 
-async function runOneAssert(a, output, brand) {
+/**
+ * Look at the work: screenshot each route and read what it rendered with.
+ * A route that comes back as an error or blank page fails on its own, before
+ * any brand check runs against it.
+ */
+async function renderForVerify(renders, ctx) {
+  const origin = await pickOrigin(ctx);
+  if (!origin) {
+    return { render: null, results: [{ type: 'render', pass: false,
+      reason: 'no dev server found to look at the result — start one, or set inputs.devUrl' }] };
+  }
+  const render = { origin, shots: [], colors: [], spacing: [], contrastPairs: [], fontFamily: '' };
+  const results = [];
+  const colors = new Set(), spacing = new Set();
+  for (const r of renders) {
+    const route = r.route.startsWith('/') ? r.route : `/${r.route}`;
+    const shot = await captureShot(`${origin}${route}`, ctx.signal);
+    if (!shot) { results.push({ type: 'render', pass: false, reason: `${route}: capture failed` }); continue; }
+    render.shots.push({ route, ref: shot.ref, label: r.label || route });
+    if (shot.problem) { results.push({ type: 'render', pass: false, reason: `${route}: ${shot.problem}` }); continue; }
+    const pg = shot.page || {};
+    (pg.colors || []).forEach((c) => colors.add(c));
+    (pg.spacing || []).forEach((v) => spacing.add(v));
+    render.contrastPairs.push(...(pg.contrastPairs || []).map((p) => ({ ...p, label: `${route} ${p.label}` })));
+    if (!render.fontFamily) render.fontFamily = pg.fontFamily || '';
+  }
+  render.colors = [...colors];
+  render.spacing = [...spacing];
+  return { render, results };
+}
+
+async function runOneAssert(a, output, brand, ctx) {
   const t = a.type;
   if (t === 'no-raw-hex') {
     const text = typeof a.text === 'string' ? a.text : pickOutputText(output);
@@ -1092,10 +1092,23 @@ async function runOneAssert(a, output, brand) {
       offenders: r.offenders };
   }
   if (t === 'llm-judge') {
-    // Placeholder — a real implementation would call a model with the rubric.
-    return { type: t, pass: true, reason: 'llm-judge not wired' };
+    if (!a.rubric) return { type: t, pass: false, reason: 'no rubric given' };
+    const prompt = [
+      'You are checking a piece of work against a rubric. Be strict: pass only if the work clearly meets it.',
+      `## Rubric\n${a.rubric}`,
+      `## The work\n${pickOutputText(output).slice(0, 12000)}`,
+      'Return a JSON verdict object and nothing else: {"pass": true|false, "reason": "<one sentence>"}',
+    ].join('\n\n');
+    const { text } = await callClaude(prompt, {
+      ctx, cwd: cwdOf(ctx.run), signal: ctx.signal, model: a.model || 'haiku',
+      onProgress: (msg) => ctx.onProgress({ progress: `judging · ${msg}` }),
+    });
+    const verdict = extractJson(text);
+    if (!verdict || typeof verdict.pass !== 'boolean') return { type: t, pass: false, reason: 'the judge gave no clear verdict' };
+    return { type: t, pass: verdict.pass, reason: String(verdict.reason || (verdict.pass ? 'meets the rubric' : 'misses the rubric')) };
   }
-  return { type: t || 'none', pass: true, reason: 'unknown assert type, skipped' };
+  // An unknown check is a failure: passing it would claim something was checked.
+  return { type: t || 'none', pass: false, reason: `unknown check "${t}"` };
 }
 
 function pickOutputText(output) {
@@ -1108,6 +1121,24 @@ function pickOutputText(output) {
     return output.hunks.map((h) => `${h.op === 'add' ? '+' : '-'}${h.line}`).join('\n');
   }
   return JSON.stringify(output);
+}
+
+/**
+ * What an earlier step rendered: an Ask Claude step that looked at its work
+ * (output.render), or a screenshot step (its captured pages). Every page that
+ * loaded is merged, so one check covers all the routes.
+ */
+function renderDataOf(from) {
+  const o = from?.output || {};
+  if (o.render) return { colors: [], spacing: [], contrastPairs: [], fontFamily: '', ...o.render };
+  const pages = [o.after?.page, ...(o.pairs || []).filter((p) => p.status === 'done').map((p) => p.after?.page)].filter(Boolean);
+  const colors = new Set(), spacing = new Set(), contrastPairs = [];
+  for (const pg of pages) {
+    (pg.colors || []).forEach((c) => colors.add(c));
+    (pg.spacing || []).forEach((v) => spacing.add(v));
+    contrastPairs.push(...(pg.contrastPairs || []));
+  }
+  return { colors: [...colors], spacing: [...spacing], contrastPairs, fontFamily: pages[0]?.fontFamily || '' };
 }
 
 /**

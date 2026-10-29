@@ -15,7 +15,7 @@ const ITEMS = [
   { key: 'skills',    label: 'Skills',    href: '/workflows.html#skills',    hint: 'What Claude knows how to do' },
 ];
 
-export function mountAppMenu(container, { here = null } = {}) {
+export function mountAppMenu(container, { here = null, theme = false } = {}) {
   if (!container) return;
   container.innerHTML = `
     <button class="app-menu-btn" aria-haspopup="true" aria-expanded="false" title="Menu">
@@ -30,7 +30,17 @@ export function mountAppMenu(container, { here = null } = {}) {
           <span class="k">${i.label}</span>
           <span class="h">${i.hint}</span>
         </a>`).join('')}
+      ${theme ? `<button role="menuitem" class="app-menu-item app-menu-theme" type="button">
+          <span class="k">${themeLabel()}</span>
+          <span class="h">Same setting as the session view</span>
+        </button>` : ''}
     </div>`;
+  container.querySelector('.app-menu-theme')?.addEventListener('click', (e) => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('cz-theme', next); } catch {}
+    e.currentTarget.querySelector('.k').textContent = themeLabel();
+  });
   const btn  = container.querySelector('.app-menu-btn');
   const drop = container.querySelector('.app-menu-drop');
   const close = () => { drop.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
@@ -45,4 +55,8 @@ export function mountAppMenu(container, { here = null } = {}) {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') close();
   });
+}
+
+function themeLabel() {
+  return document.documentElement.dataset.theme === 'dark' ? 'Switch to light' : 'Switch to dark';
 }

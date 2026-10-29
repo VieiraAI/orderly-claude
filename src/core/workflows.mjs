@@ -100,7 +100,12 @@ function readDir(dir) {
  */
 export const V2_KINDS = new Set([
   'agent', 'script', 'decision', 'check', 'publish', 'display',
-  'inputs', 'loop', 'delay', 'approve', 'fanOut', 'mcp',
+  'inputs', 'loop', 'delay', 'approve', 'mcp',
+]);
+
+/** Checks an Ask Claude step can run on its own output. */
+export const VERIFY_ASSERTS = new Set([
+  'color-in-palette', 'font-is-brand', 'contrast-min', 'spacing-on-scale', 'no-raw-hex', 'llm-judge',
 ]);
 
 export function validateDefinition(d) {
@@ -281,17 +286,16 @@ function validateV2Node(n) {
       if (!spec.prompt && !spec.promptTemplate) problems.push('spec.prompt is required');
       if (spec.verify) {
         const v = spec.verify;
-        if (!Array.isArray(v.asserts) || v.asserts.length === 0) {
-          problems.push('spec.verify.asserts must be a non-empty array');
-        } else {
-          const knownAssert = new Set([
-            'exit-zero', 'has-pairs', 'contains', 'manual',
-            'color-in-palette', 'font-is-brand', 'contrast-min', 'spacing-on-scale', 'no-raw-hex', 'llm-judge',
-          ]);
-          for (const a of v.asserts) {
-            if (!a || !a.type) { problems.push('spec.verify.asserts[].type is required'); continue; }
-            if (!knownAssert.has(a.type)) problems.push(`unknown verify assert type: ${a.type}`);
-          }
+        const hasRenders = Array.isArray(v.renders) && v.renders.length > 0;
+        if (v.renders != null && !Array.isArray(v.renders)) problems.push('spec.verify.renders must be an array of routes');
+        if (v.asserts != null && !Array.isArray(v.asserts)) problems.push('spec.verify.asserts must be an array');
+        const asserts = Array.isArray(v.asserts) ? v.asserts : [];
+        // Renders alone are a valid check: each page must load and not be blank.
+        if (!asserts.length && !hasRenders) problems.push('spec.verify needs asserts or renders');
+        for (const a of asserts) {
+          if (!a || !a.type) { problems.push('spec.verify.asserts[].type is required'); continue; }
+          if (!VERIFY_ASSERTS.has(a.type)) problems.push(`unknown verify assert type: ${a.type}`);
+          if (a.type === 'llm-judge' && !a.rubric) problems.push('llm-judge needs a rubric');
         }
         if (v.maxRetries != null && (!Number.isInteger(v.maxRetries) || v.maxRetries < 0)) {
           problems.push('spec.verify.maxRetries must be a non-negative integer');
@@ -345,20 +349,10 @@ function validateV2Node(n) {
       break;
     case 'loop':
       if (!spec.over) problems.push('spec.over (upstream iterable) is required');
-      break;
-    case 'fanOut': {
-      if (!spec.over) problems.push('spec.over (upstream iterable) is required');
-      const action = spec.action || (spec.body?.cmd ? 'script' : (spec.body?.prompt ? 'agent' : null));
-      if (!action) problems.push('spec.action (script|agent) or spec.body.{cmd|prompt} is required');
-      if (action === 'script' && !spec.body?.cmd && !spec.cmd) problems.push('fanOut script needs spec.body.cmd');
-      if (action === 'agent'  && !spec.body?.prompt && !spec.prompt) problems.push('fanOut agent needs spec.body.prompt');
-      const joins = new Set(['concat', 'first-match', 'vote']);
-      if (spec.join && !joins.has(spec.join)) problems.push(`spec.join must be one of: ${[...joins].join(', ')}`);
-      if (spec.concurrency != null && (!Number.isInteger(spec.concurrency) || spec.concurrency < 1)) {
-        problems.push('spec.concurrency must be a positive integer');
+      if (spec.join && !['concat', 'first-match', 'vote'].includes(spec.join)) {
+        problems.push('spec.join must be one of: concat, first-match, vote');
       }
       break;
-    }
     case 'delay':
       if (!spec.wait) problems.push('spec.wait is required');
       break;
@@ -451,8 +445,9 @@ export function startRun({
 function withLessons(nodes, lessons) {
   const byNode = groupLiveLessons(lessons || []);
   return nodes.map((n) => {
-    const ls = byNode[n.id];
-    if (!ls?.length) return n;
+    // A lesson about the whole workflow goes to every Ask Claude step.
+    const ls = [...(byNode[n.id] || []), ...(n.kind === 'agent' ? byNode['*'] || [] : [])];
+    if (!ls.length) return n;
     const out = { ...n, lessonsApplied: ls.map((l) => l.id) };
     if (n.prompt) out.prompt = applyLessons(n.prompt, ls);
     if (n.spec?.prompt) out.spec = { ...n.spec, prompt: applyLessons(n.spec.prompt, ls) };

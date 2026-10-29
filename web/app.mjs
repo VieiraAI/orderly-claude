@@ -521,7 +521,7 @@ function renderTimeline() {
     if (turn.prompt) {
       root.append(message(
         { initials: initialsOf(me), name: me, time: clockOf(turn.promptAt) },
-        el('div', { class: 'msg-text said clamp', id: `turn-${turn.id}` }, turn.prompt),
+        el('div', { class: 'msg-text said clamp', id: `turn-${turn.id}`, 'data-fold': `p-${turn.id}` }, turn.prompt),
       ));
     }
 
@@ -555,7 +555,7 @@ function renderTimeline() {
       body.push(list);
     }
 
-    if (turn.summary) body.push(el('div', { class: 'msg-text summary md clamp', html: md(turn.summary) }));
+    if (turn.summary) body.push(el('div', { class: 'msg-text summary md clamp', 'data-fold': `s-${turn.id}`, html: md(turn.summary) }));
 
     const last = turn.steps[turn.steps.length - 1];
     root.append(message(
@@ -563,7 +563,26 @@ function renderTimeline() {
       body,
     ));
   }
+  foldLong(root);
   if (atBottom) root.scrollTop = root.scrollHeight;
+}
+
+/*
+ * A long message folds at a fixed height with a "Show all" under it. It used
+ * to scroll inside itself with no sign it went on, so it read as cut off.
+ * What was opened stays open through the re-renders a live session causes.
+ */
+const unfolded = new Set();
+function foldLong(root) {
+  for (const box of root.querySelectorAll('.msg-text.clamp[data-fold]')) {
+    const key = box.dataset.fold;
+    if (unfolded.has(key)) { box.classList.add('open'); continue; }
+    if (box.scrollHeight <= box.clientHeight + 8) continue;
+    box.classList.add('folded');
+    const btn = el('button', { class: 'fold-btn', type: 'button' }, 'Show all');
+    btn.onclick = () => { unfolded.add(key); box.classList.remove('folded'); box.classList.add('open'); btn.remove(); };
+    box.after(btn);
+  }
 }
 
 /* ---------- drawer ---------- */
@@ -1095,7 +1114,7 @@ async function loadRail() {
     }, [
       el('div', { class: 'l1' }, [
         el('span', { class: `dot live-pip${x.busy ? ' live' : ''}` }),
-        String(x.title).slice(0, 34),
+        String(x.title),
       ]),
       el('div', { class: 'l2' }, isFront ? 'showing now' : isOpen ? 'open in a tab' : short(x.cwd)),
     ]));

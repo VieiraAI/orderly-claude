@@ -166,8 +166,9 @@ kbd { font: 11px var(--mono); color: var(--faint); margin-left: 5px; }
 .item { text-align: left; background: none; border: 0; border-radius: 8px; padding: 7px 9px; color: var(--text); cursor: pointer; }
 .item:hover { background: var(--raised); }
 .item.active { background: var(--raised); }
-.item .l1 { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  display: flex; align-items: center; gap: 7px; }
+/* Block, not flex: text-overflow never shows its "…" on text inside a flex row. */
+.item .l1 { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.item .l1 > .dot { display: inline-block; vertical-align: middle; margin: -2px 7px 0 0; }
 .live-pip { flex: none; width: 6px; height: 6px; }
 .item .l2 { font-size: 11px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
 
@@ -211,7 +212,11 @@ kbd { font: 11px var(--mono); color: var(--faint); margin-left: 5px; }
 .msg-text.md h5.md-h, .msg-text.md h6.md-h { font-size: 13.5px; color: var(--muted); }
 .msg-text.said { color: var(--text); }
 .msg-text.summary { color: var(--muted); margin-top: 14px; }
-.msg-text.clamp { max-height: 300px; overflow: auto; }
+.msg-text.clamp { max-height: 300px; overflow: hidden; }
+.msg-text.clamp.open { max-height: none; }
+.msg-text.clamp.folded { -webkit-mask-image: linear-gradient(#000 75%, transparent); mask-image: linear-gradient(#000 75%, transparent); }
+.fold-btn { margin-top: 4px; padding: 3px 0; background: none; border: 0; color: var(--accent); font: 500 12.5px var(--sans); cursor: pointer; }
+.fold-btn:hover { text-decoration: underline; text-underline-offset: 2px; }
 
 /* the checklist — the heart of it */
 .steps { margin: 10px 0 2px; display: flex; flex-direction: column; }

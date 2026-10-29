@@ -23,6 +23,9 @@ export function repoWorkflowsDir(repoRoot) {
   return path.join(repoRoot, '.claude', 'workflows');
 }
 export function repoRunsDir(repoRoot) {
+  // Tests point this elsewhere so their runs never land in a real project.
+  const override = process.env.ORDERLY_RUNS_ROOT;
+  if (override) return path.join(override, String(repoRoot).replace(/[\\/:]+/g, '-'));
   return path.join(repoRoot, '.claude', 'workflows', 'runs');
 }
 export function repoSkillsDir(repoRoot) {

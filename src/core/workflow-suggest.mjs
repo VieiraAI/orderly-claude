@@ -12,6 +12,9 @@ const STOP = new Set([
   'a', 'an', 'and', 'as', 'at', 'by', 'for', 'from', 'if', 'in', 'is', 'it',
   'me', 'my', 'of', 'on', 'or', 'our', 'so', 'that', 'the', 'this', 'to', 'us',
   'we', 'will', 'with', 'you', 'your',
+  // Words almost any ask contains; matching on them alone is noise.
+  'make', 'do', 'want', 'need', 'get', 'help', 'please', 'can', 'could', 'would',
+  'should', 'some', 'thing', 'things', 'new', 'like', 'just', 'all', 'any',
 ]);
 
 /** Lowercase + split on non-letter/digit, drop short + stop words. */
@@ -23,11 +26,12 @@ export function tokenize(text) {
     .filter((t) => t && t.length >= 2 && !STOP.has(t));
 }
 
-/** The haystack for a def: its id, title, whenToUse, tags, scope. */
+/** The haystack for a def: its id, title, description, whenToUse, tags, category. */
 export function defSurface(def) {
   const parts = [
     def.id,
     def.title,
+    def.desc,
     def.whenToUse,
     ...(Array.isArray(def.tags) ? def.tags : []),
     def.category,

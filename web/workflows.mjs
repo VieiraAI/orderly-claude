@@ -114,7 +114,9 @@ function renderCatalogChips() {
     bar = document.createElement('div');
     bar.id = 'catalogChips';
     bar.className = 'chips-row';
-    document.getElementById('viewCatalog').prepend(bar);
+    // Below "What do you want to do?", which is the first thing to try.
+    const finder = document.querySelector('#viewCatalog .finder');
+    if (finder) finder.after(bar); else document.getElementById('viewCatalog').prepend(bar);
   }
   const cats = ['all', ...new Set(state.workflows.map((w) => w.category).filter(Boolean))];
   bar.innerHTML = cats.map((c) => {
@@ -435,17 +437,17 @@ function runRow(r) {
     <div class="wf">
       <span class="pip ${live ? `${cat} running` : cat}"></span>
       <div style="min-width:0;">
-        <div class="nm">${escapeHtml(r.workflowTitle || r.workflowId)} ${drift}</div>
+        <div class="nm">${escapeHtml(r.workflowTitle || r.workflowId)} ${drift}${r.rating ? `<span class="rated ${r.rating}" title="${escapeHtml(r.retro || '')}">${r.rating === 'up' ? 'marked good' : 'marked not good'}</span>` : ''}</div>
         <div class="sess">${escapeHtml(trigger(r))}${r.sessionId ? ` · session ${r.sessionId.slice(0, 8)}` : ''}${r.repoRoot ? ` · ${escapeHtml(r.repoRoot.split('/').pop())}` : ''}</div>
       </div>
     </div>
     <span class="state ${st.cls}">${escapeHtml(st.text)}${totals ? `<span class="row-totals">${totals}</span>` : ''}</span>
     <span class="row-actions">
-      ${r.resumable && !r.halt ? `<button class="row-btn" data-act="resume" data-id="${r.runId}" title="Carry on from where it stopped">▸ resume</button>` : ''}
-      ${!live ? `<button class="row-btn" data-act="again" data-id="${r.runId}" title="Run this workflow again, with the same inputs filled in">↻ again</button>` : ''}
-      ${!live ? `<button class="row-btn" data-act="rerun" data-id="${r.runId}" title="Repeat exactly what this run ran">⟲ repeat</button>` : ''}
-      <button class="row-btn" data-act="share" data-id="${r.runId}" title="Signed link to a static copy">◎</button>
-      ${!live ? `<button class="row-btn danger" data-act="delete" data-id="${r.runId}" title="Delete this run">${del ? 'click again' : '✕'}</button>` : ''}
+      ${r.resumable && !r.halt ? `<button class="row-btn" data-act="resume" data-id="${r.runId}" title="Carry on from where it stopped">▸ Resume</button>` : ''}
+      ${!live ? `<button class="row-btn" data-act="again" data-id="${r.runId}" title="Start a new run of this workflow with these inputs, which you can change first">↻ Again with changes</button>` : ''}
+      ${!live ? `<button class="row-btn" data-act="rerun" data-id="${r.runId}" title="Run exactly what this run ran, now">⟲ Repeat</button>` : ''}
+      <button class="row-btn" data-act="share" data-id="${r.runId}" title="Copy a link to a read-only copy of this run, good for a week">◎ Share</button>
+      ${!live ? `<button class="row-btn danger" data-act="delete" data-id="${r.runId}" title="Delete this run" aria-label="Delete this run">${del ? 'Click again to delete' : '✕ Delete'}</button>` : ''}
     </span>
     ${detail}
     <div class="choice-slot" id="cs-${r.runId}"></div>
@@ -477,7 +479,7 @@ function scheduleRow(s) {
     <div class="sched-last">last: ${last}${s.missed ? `<div class="missed">${s.missed} missed while Orderly was closed <button class="link-btn" data-clear-missed="${s.id}">clear</button></div>` : ''}</div>
     <span class="row-actions">
       <button class="row-btn" data-sched-toggle="${s.id}" data-on="${s.enabled ? 1 : 0}">${s.enabled ? 'pause' : 'resume'}</button>
-      <button class="row-btn danger" data-sched-del="${s.id}">${del ? 'click again' : '✕'}</button>
+      <button class="row-btn danger" data-sched-del="${s.id}" title="Remove this schedule" aria-label="Remove this schedule">${del ? 'Click again to remove' : '✕ Remove'}</button>
     </span>
   </div>`;
 }
@@ -572,7 +574,7 @@ function showChoice(runId, list) {
 function armOrDo(key, btn, fn) {
   if (runsView.armed.has(key)) { runsView.armed.delete(key); fn(); return; }
   runsView.armed.add(key);
-  btn.textContent = 'click again';
+  btn.textContent = 'Click again to confirm';
   setTimeout(() => { if (runsView.armed.delete(key)) renderRuns(); }, 3000);
 }
 
@@ -832,7 +834,7 @@ function decisionRow(d) {
       <div class="d-a">${a}</div>
       <div class="d-where">${where}</div>
     </div>
-    <button class="row-btn d-share" data-share-kind="${d.kind}" title="Signed URL to this moment">◎ share</button>
+    <button class="row-btn d-share" data-share-kind="${d.kind}" title="Copy a link to a read-only copy, good for a week">◎ Share</button>
     <span class="open">open →</span>
   </div>`;
 }
@@ -1090,32 +1092,27 @@ function shortenPath(p) {
 
 const TAB_COPY = {
   workflows: {
-    eyebrow: 'Workflows · a job you run the same way every time',
-    title:   'Pick a workflow.',
-    desc:    'A workflow is a set of steps you would otherwise type out one prompt at a time. Press one button and watch each step finish on the canvas, instead of scrolling a terminal to work out what happened.',
+    title:   'Workflows',
+    desc:    'Steps you would otherwise type out one prompt at a time. Press one button and watch each step finish.',
     newHref: '/workflow-editor.html',
     newLabel: '+ New workflow',
   },
   runs: {
-    eyebrow: 'Runs · everything your workflows are doing, and have done',
-    title:   'What ran. What needs you.',
-    desc:    'Answer the questions your workflows are waiting on, see where one broke and pick it back up, repeat one, or set one to run on a schedule. Every run keeps what each step produced.',
+    title:   'Runs',
+    desc:    'What your workflows are doing and have done. Answer what they are waiting on, pick a broken one back up, or repeat one.',
   },
   skills: {
-    eyebrow: 'Skills · what Claude knows how to do on this machine',
-    title:   'What Claude knows how to do.',
+    title:   'Skills',
     desc:    'Every skill installed across your projects, plus your global library, in one list. Worth a look before writing a workflow — the step you need may already exist.',
   },
   prompts: {
-    eyebrow: 'Prompts · one saved message, with blanks to fill in',
-    title:   'Pick a prompt.',
+    title:   'Prompts',
     desc:    'A prompt is a message you keep instead of retyping it. Fill in the blanks, hit Send, and it goes into the session you are watching. A workflow is many steps; a prompt is one message.',
     newHref: '/prompts-new.html',
     newLabel: '+ New prompt',
   },
   decisions: {
-    eyebrow: 'Decisions · every time you chose a direction',
-    title:   'What you decided, and why.',
+    title:   'Decisions',
     desc:    'Every question a workflow put to you and what you answered, plus any step you flagged yourself in Sessions. The answer to "why is it built this way?" once you have forgotten.',
   },
 };
@@ -1129,7 +1126,6 @@ function switchTab(tab) {
   for (const el of document.querySelectorAll('[data-tab]')) el.classList.toggle('on', el.dataset.tab === tab);
   document.getElementById('hereTab').textContent = tab;
   const copy = TAB_COPY[tab] || TAB_COPY.workflows;
-  document.getElementById('heroEyebrow').textContent = copy.eyebrow;
   document.getElementById('heroTitle').textContent   = copy.title;
   document.getElementById('heroDesc').textContent    = copy.desc;
   document.getElementById('heroImport')?.classList.toggle('hidden', tab !== 'workflows');
@@ -1155,6 +1151,47 @@ function tabFromHash() {
   return ['runs', 'skills', 'prompts', 'decisions'].includes(h) ? h : 'workflows';
 }
 window.addEventListener('hashchange', () => switchTab(tabFromHash()));
+
+/*
+ * "What do you want to do?" — matches the ask against each workflow's name,
+ * description, "when to use it" and search words. Nothing found offers to
+ * start a new one with that name.
+ */
+let finderTimer = null, finderSeq = 0;
+function mountFinder() {
+  const input = document.getElementById('finderIn');
+  const out = document.getElementById('finderOut');
+  if (!input) return;
+  const run = async () => {
+    const q = input.value.trim();
+    const seq = ++finderSeq;
+    if (!q) { out.innerHTML = ''; return; }
+    let matches = [];
+    try {
+      const r = await fetch('/api/workflows/suggest', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ q, limit: 3 }),
+      }).then((x) => x.json());
+      matches = r.matches || [];
+    } catch { /* show the new-workflow offer below */ }
+    if (seq !== finderSeq) return;
+    const newHref = `/workflow-editor.html?title=${encodeURIComponent(q.slice(0, 60))}`;
+    out.innerHTML = matches.length
+      ? matches.map((m) => `<div class="finder-row" data-id="${esc(m.id)}">
+          <span class="finder-name">${esc(m.title || m.id)}</span>
+          <span class="finder-why">${esc(m.reason)}</span>
+          <a class="hero-btn ghost" href="/workflow-editor.html?from=${encodeURIComponent(m.id)}">Open</a>
+          <button class="hero-btn" data-run="${esc(m.id)}">◆ Run</button>
+        </div>`).join('') + `<a class="finder-new" href="${newHref}">None of these — start a new workflow</a>`
+      : `<div class="finder-none">No workflow does that yet. <a href="${newHref}">Start one called “${esc(q.slice(0, 60))}”</a></div>`;
+    out.querySelectorAll('[data-run]').forEach((b) => { b.onclick = () => openSheet(b.dataset.run); });
+  };
+  input.addEventListener('input', () => { clearTimeout(finderTimer); finderTimer = setTimeout(run, 160); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { input.value = ''; out.innerHTML = ''; }
+    if (e.key === 'Enter') out.querySelector('.finder-row a')?.click();
+  });
+}
+mountFinder();
 
 for (const el of document.querySelectorAll('[data-tab]')) {
   el.addEventListener('click', (ev) => { ev.preventDefault(); location.hash = el.dataset.tab; });

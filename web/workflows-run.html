@@ -1,5 +1,12 @@
 <!doctype html>
 <html lang="en"><head>
+<script>
+  // Same setting as the session view; applied before paint so there is no flash.
+  try {
+    const forced = new URLSearchParams(location.search).get('theme');
+    document.documentElement.dataset.theme = forced || localStorage.getItem('cz-theme') || 'light';
+  } catch { document.documentElement.dataset.theme = 'light'; }
+</script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Run — Orderly Claude</title>
@@ -21,7 +28,7 @@
 </nav>
 <script type="module">
   import { mountAppMenu } from '/app-menu.mjs';
-  mountAppMenu(document.getElementById('appMenu'), { here: 'runs' });
+  mountAppMenu(document.getElementById('appMenu'), { here: 'runs', theme: true });
 </script>
 
 <div class="app">
@@ -34,6 +41,7 @@
       <div class="sub" id="runSub"><span id="runStatus">loading…</span></div>
       <div id="runNotice"></div>
       <div id="answerPanel"></div>
+      <div id="retroPanel"></div>
     </div>
     <div class="plan-rail" id="rail"></div>
   </aside>

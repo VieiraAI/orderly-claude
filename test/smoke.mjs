@@ -9,6 +9,7 @@
  * no console errors — in both themes. Exits non-zero on any failure.
  */
 import net from 'node:net';
+import http from 'node:http';
 import { startServer } from '../src/server/server.mjs';
 import { listSessions } from '../src/core/sessions.mjs';
 import { readRecords } from '../src/core/jsonl.mjs';
@@ -29,6 +30,11 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+
+// Every run this suite starts goes to a throwaway folder, not the Runs page
+// of the project it happens to be run from.
+const RUNS_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'orderly-smoke-runs-'));
+process.env.ORDERLY_RUNS_ROOT = RUNS_ROOT;
 
 let pass = 0;
 const failures = [];
@@ -716,9 +722,18 @@ async function main() {
     const one = await get('/api/workflows/redesign-page');
     check('GET /api/workflows/:id returns the def', one.workflow?.id === 'redesign-page');
 
+    // A small app to photograph: four real pages and one that 404s. The
+    // starter has to count only the real ones.
+    const appServer = http.createServer((req, res) => {
+      const page = { '/': 'Home', '/blog': 'Blog', '/about': 'About', '/pricing': 'Pricing' }[req.url];
+      res.writeHead(page ? 200 : 404, { 'content-type': 'text/html' });
+      res.end(page ? `<html><body style="font-family:Inter;padding:16px"><h1>${page}</h1><p>Some text.</p></body></html>` : '<h1>Not found</h1>');
+    });
+    await new Promise((r) => appServer.listen(0, '127.0.0.1', r));
+    const appUrl = `http://127.0.0.1:${appServer.address().port}`;
     const started = await fetch(`${base}/api/workflows/visual-regression/run`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ inputs: { baseline: 'main' } }),
+      body: JSON.stringify({ inputs: { baseline: 'main', devUrl: appUrl } }),
     }).then((r) => r.json());
     check('POST /api/workflows/:id/run starts a run', !!started.run?.runId);
     // The scheduler kicks in immediately, so the first node may already be
@@ -756,14 +771,28 @@ async function main() {
     check('every node reached done', !!finished
       && finished.graph.nodes.every((n) => n.status === 'done'),
       finished?.graph.nodes.map((n) => `${n.id}=${n.status}`).join(' '));
-    check('script node produced real stdout',
-      !!finished?.graph.nodes.find((n) => n.id === 'server')?.output?.out,
-      finished?.graph.nodes.find((n) => n.id === 'server')?.output?.out?.slice(0, 40));
-    check('capture-shots script produced a per-route grid',
-      !!finished?.graph.nodes.find((n) => n.id === 'shots')?.output?.pairs?.length);
-    check('check node reported a pass/fail',
-      typeof finished?.graph.nodes.find((n) => n.id === 'ok')?.output?.pass === 'boolean',
-      finished?.graph.nodes.find((n) => n.id === 'ok')?.output?.reason);
+    check('dev server step reports the app it found',
+      finished?.graph.nodes.find((n) => n.id === 'server')?.output?.origin === appUrl,
+      finished?.graph.nodes.find((n) => n.id === 'server')?.output?.out?.slice(0, 60));
+    const vrPairs = finished?.graph.nodes.find((n) => n.id === 'shots')?.output?.pairs || [];
+    check('capture-shots script produced a per-route grid', vrPairs.length === 5, String(vrPairs.length));
+    check('a page that 404s is not counted as captured',
+      vrPairs.find((p) => p.route === '/contact')?.status === 'failed'
+      && /404/.test(vrPairs.find((p) => p.route === '/contact')?.error || ''),
+      JSON.stringify(vrPairs.find((p) => p.route === '/contact')));
+    check('real pages are captured', vrPairs.filter((p) => p.status === 'done').length === 4,
+      vrPairs.map((p) => `${p.route}=${p.status}`).join(' '));
+    const vrCheck = finished?.graph.nodes.find((n) => n.id === 'ok')?.output;
+    check('check counts real captures and names the broken one',
+      vrCheck?.pass === true && /4 of 5/.test(vrCheck?.reason || '') && /contact/.test(vrCheck?.reason || ''),
+      vrCheck?.reason);
+    appServer.close();
+
+    // Pages that are errors or blank are recognised.
+    const { pageProblem } = await import('../src/core/capture.mjs');
+    check('pageProblem: 404 status', /404/.test(pageProblem({ status: 404, textLength: 9, elements: 1, images: 0 }) || ''));
+    check('pageProblem: blank page', /blank/.test(pageProblem({ status: 200, textLength: 0, elements: 0, images: 0 }) || ''));
+    check('pageProblem: a real page is fine', pageProblem({ status: 200, textLength: 120, elements: 12, images: 1 }) === null);
 
     // POST /stop on a finished run is a no-op; use it just to assert the route is wired.
     const stopResp = await fetch(`${base}/api/runs/${started.run.runId}/stop`, {
@@ -1257,76 +1286,47 @@ async function main() {
       Array.isArray(sugEmpty.matches) && sugEmpty.matches.length === 0,
       JSON.stringify(sugEmpty));
 
-    // fanOut: validator accepts/rejects spec, runs scripts in parallel, joins.
-    const fanGoodDef = {
+    // fanOut is gone: Repeat for each runs items in parallel and joins them.
+    const fanGone = wfMod.validateDefinition({
+      schemaVersion: 2, id: 'x', graph: { nodes: [{ id: 'f', kind: 'fanOut', spec: { over: 'inputs.items' } }], edges: [] },
+    });
+    check('fanOut is no longer a step kind', fanGone.some((p) => /unknown kind/i.test(p)), fanGone.join('; '));
+    const loopBadJoin = wfMod.validateDefinition({
       schemaVersion: 2, id: 'x', graph: {
-        nodes: [{ id: 'f', kind: 'fanOut', spec: { over: 'inputs.items', action: 'script', body: { cmd: 'echo {{item}}' }, concurrency: 2 } }],
-        edges: [],
-      },
-    };
-    check('validator accepts fanOut script',
-      wfMod.validateDefinition(fanGoodDef).length === 0,
-      wfMod.validateDefinition(fanGoodDef).join('; '));
-    const fanBadJoin = wfMod.validateDefinition({
-      schemaVersion: 2, id: 'x', graph: {
-        nodes: [{ id: 'f', kind: 'fanOut', spec: { over: 'inputs.items', body: { cmd: 'echo' }, join: 'first' } }],
+        nodes: [{ id: 'l', kind: 'loop', spec: { over: 'inputs.items', action: 'script', cmd: 'echo', join: 'first' } }],
         edges: [],
       },
     });
-    check('validator flags unknown fanOut join',
-      fanBadJoin.some((p) => /join must be/.test(p)), fanBadJoin.join('; '));
-    const fanNoBody = wfMod.validateDefinition({
-      schemaVersion: 2, id: 'x', graph: {
-        nodes: [{ id: 'f', kind: 'fanOut', spec: { over: 'inputs.items' } }],
-        edges: [],
-      },
-    });
-    check('validator flags fanOut without action',
-      fanNoBody.some((p) => /action/.test(p)), fanNoBody.join('; '));
-    const fanBadConc = wfMod.validateDefinition({
-      schemaVersion: 2, id: 'x', graph: {
-        nodes: [{ id: 'f', kind: 'fanOut', spec: { over: 'inputs.items', body: { cmd: 'echo' }, concurrency: 0 } }],
-        edges: [],
-      },
-    });
-    check('validator flags non-positive concurrency',
-      fanBadConc.some((p) => /concurrency/.test(p)), fanBadConc.join('; '));
+    check('validator flags unknown loop join', loopBadJoin.some((p) => /join must be/.test(p)), loopBadJoin.join('; '));
 
-    // fanOut end-to-end: three items run concurrently and collect outputs.
-    const fanDef = {
-      schemaVersion: 2, id: 'smoke-fanout', title: 'Fan',
-      graph: {
-        nodes: [
-          { id: 'fan', title: 'Fan', kind: 'fanOut', col: 1, row: 0,
-            spec: { over: 'inputs.items', action: 'script', body: { cmd: 'echo item={{item}}' }, concurrency: 3 } },
-        ],
-        edges: [],
-      },
+    const runLoop = async (id, spec, items) => {
+      const def = { schemaVersion: 2, id, title: id, graph: { nodes: [{ id: 'l', title: 'L', kind: 'loop', col: 1, row: 0, spec }], edges: [] } };
+      const saved = await fetch(`${base}/api/workflows`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ def, scope: 'project', overwrite: true }),
+      }).then((r) => r.json());
+      const started = await fetch(`${base}/api/workflows/${id}/run`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ inputs: { items } }),
+      }).then((r) => r.json());
+      let finished = null;
+      const until = Date.now() + 6000;
+      while (Date.now() < until) {
+        await sleep(100);
+        const r = (await get(`/api/runs/${started.run.runId}`)).run;
+        if (r && ['done', 'failed', 'stopped'].includes(r.status)) { finished = r; break; }
+      }
+      try { fs.unlinkSync(saved.file); } catch {}
+      return finished?.graph.nodes.find((n) => n.id === 'l')?.output;
     };
-    const fanSaved = await fetch(`${base}/api/workflows`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ def: fanDef, scope: 'project', overwrite: true }),
-    }).then((r) => r.json());
-    const fanStart = await fetch(`${base}/api/workflows/smoke-fanout/run`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ inputs: { items: 'a,b,c' } }),
-    }).then((r) => r.json());
-    let fanDone = null;
-    const fanBudget = Date.now() + 5000;
-    while (Date.now() < fanBudget) {
-      await sleep(100);
-      const r = (await get(`/api/runs/${fanStart.run.runId}`)).run;
-      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { fanDone = r; break; }
-    }
-    check('fanOut run finishes done', fanDone?.status === 'done', fanDone?.status);
-    const fanOut = fanDone?.graph.nodes.find((n) => n.id === 'fan')?.output;
-    check('fanOut returns results for every item',
-      fanOut?.count === 3 && fanOut?.results?.length === 3,
-      `count=${fanOut?.count}`);
-    check('fanOut per-item output has echoed item',
-      fanOut?.results?.every((r) => /item=/.test(r?.out || '')),
-      JSON.stringify(fanOut?.results?.map((r) => r.out)));
-    try { fs.unlinkSync(fanSaved.file); } catch {}
+    const firstOut = await runLoop('smoke-loop-first',
+      { over: 'inputs.items', action: 'script', cmd: 'test {{item}} = b && echo hit={{item}}', concurrency: 3, join: 'first-match' }, 'a,b,c');
+    check('loop first-match hands on the item that worked',
+      firstOut?.joined?.item === 'b' && /hit=b/.test(firstOut?.joined?.out || ''), JSON.stringify(firstOut?.joined));
+    const voteOut = await runLoop('smoke-loop-vote',
+      { over: 'inputs.items', action: 'script', cmd: 'echo {{item}}', concurrency: 2, join: 'vote' }, 'yes,yes,no');
+    check('loop vote passes when most items say yes',
+      voteOut?.joined?.pass === true && voteOut?.joined?.yes === 2, JSON.stringify(voteOut?.joined));
 
     // Worktree sandbox: validator accepts/rejects runtime block.
     const defWithRuntime = {
@@ -1631,6 +1631,66 @@ async function main() {
     check('verify fail (stop): run status is failed',
       vsDone?.status === 'failed', vsDone?.status);
     try { fs.unlinkSync(vsSaved.file); } catch {}
+
+    // Agent spec.verify looks at real pages and judges with a rubric.
+    const verifyApp = http.createServer((req, res) => {
+      const ok = req.url === '/';
+      res.writeHead(ok ? 200 : 404, { 'content-type': 'text/html' });
+      res.end(ok ? '<html><body style="font-family:Inter;color:#15181B;background:#FFFFFF;padding:16px"><h1>Hi</h1><p style="color:#ff00ff">Off brand</p></body></html>' : '<h1>Not found</h1>');
+    });
+    await new Promise((r) => verifyApp.listen(0, '127.0.0.1', r));
+    const verifyUrl = `http://127.0.0.1:${verifyApp.address().port}`;
+    const runVerifyDef = async (id, verify) => {
+      const def = { schemaVersion: 2, id, title: id, graph: { nodes: [
+        { id: 'draft', title: 'Draft', kind: 'agent', col: 1, row: 0, spec: { prompt: 'draft', output: 'markdown', verify } },
+      ], edges: [] } };
+      const saved = await fetch(`${base}/api/workflows`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ def, scope: 'project', overwrite: true }),
+      }).then((r) => r.json());
+      const st = await fetch(`${base}/api/workflows/${id}/run`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ inputs: { devUrl: verifyUrl } }),
+      }).then((r) => r.json());
+      let fin = null;
+      const until = Date.now() + 20000;
+      while (Date.now() < until) {
+        await sleep(150);
+        const r = (await get(`/api/runs/${st.run.runId}`)).run;
+        if (r && ['done', 'failed', 'stopped'].includes(r.status)) { fin = r; break; }
+      }
+      try { fs.unlinkSync(saved.file); } catch {}
+      return fin?.graph.nodes.find((n) => n.id === 'draft')?.output;
+    };
+    const v404 = await runVerifyDef('smoke-verify-404', { renders: ['/missing'], maxRetries: 0, onFail: 'skip' });
+    check('verify fails a page that 404s',
+      v404?.verify?.pass === false && v404.verify.results.some((r) => r.type === 'render' && /404/.test(r.reason)),
+      JSON.stringify(v404?.verify?.results));
+    const vBrand = await runVerifyDef('smoke-verify-brand', {
+      renders: ['/'], asserts: [{ type: 'color-in-palette', ignoreGrays: false, tolerance: 2 }, { type: 'font-is-brand' }],
+      maxRetries: 0, onFail: 'skip',
+    });
+    const vPal = vBrand?.verify?.results?.find((r) => r.type === 'color-in-palette');
+    check('verify reads colours from the rendered page',
+      vPal?.pass === false && vPal.offenders?.some((o) => o.color === '#FF00FF'), JSON.stringify(vPal));
+    check('verify reads the font from the rendered page',
+      vBrand?.verify?.results?.find((r) => r.type === 'font-is-brand')?.pass === true,
+      JSON.stringify(vBrand?.verify?.results?.find((r) => r.type === 'font-is-brand')));
+    const vJudgeFail = await runVerifyDef('smoke-verify-judge', {
+      asserts: [{ type: 'llm-judge', rubric: 'MOCK_FAIL must read well' }], maxRetries: 1, onFail: 'skip',
+    });
+    check('llm-judge can fail the work',
+      vJudgeFail?.verify?.pass === false && vJudgeFail.verify.attempts.length === 2
+      && vJudgeFail.verify.results.some((r) => r.type === 'llm-judge' && /mock judge failed/.test(r.reason)),
+      JSON.stringify(vJudgeFail?.verify));
+    const vJudgePass = await runVerifyDef('smoke-verify-judge-ok', {
+      asserts: [{ type: 'llm-judge', rubric: 'reads well' }], maxRetries: 0,
+    });
+    check('llm-judge can pass the work', vJudgePass?.verify?.pass === true, JSON.stringify(vJudgePass?.verify));
+    verifyApp.close();
+    const judgeNoRubric = wfMod.validateDefinition({ schemaVersion: 2, id: 'x', graph: {
+      nodes: [{ id: 'a', kind: 'agent', spec: { prompt: 'p', verify: { asserts: [{ type: 'llm-judge' }] } } }], edges: [] } });
+    check('validator wants a rubric for llm-judge', judgeNoRubric.some((p) => /rubric/.test(p)), judgeNoRubric.join('; '));
 
     // Control-flow kinds: Loop (map over an inputs array), Delay (short),
     // Approve (user clicks approve → run finishes done).
@@ -2185,6 +2245,7 @@ async function main() {
   try { await runWorkflowEngineChecks({ check, session: target.meta }); }
   catch (e) { check('workflow checks ran to the end', false, e.stack || e.message); }
   fs.rmSync(scratch, { recursive: true, force: true });
+  fs.rmSync(RUNS_ROOT, { recursive: true, force: true });
 
   console.log(`\n${pass} passed, ${failures.length} failed\n`);
   if (failures.length) {

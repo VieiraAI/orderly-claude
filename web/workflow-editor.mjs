@@ -56,12 +56,34 @@ const KIND_SPEC_DEFAULT = {
   approve:  () => ({ question: 'Does this look right?' }),
 };
 
+const CHECK_TYPES = [
+  ['exit-zero', 'a command succeeded'],
+  ['contains', 'an output contains some text'],
+  ['has-pairs', 'screenshots were taken of real pages'],
+  ['manual', 'I say it looks right'],
+  ['color-in-palette', 'its colours are on brand'],
+  ['font-is-brand', 'it uses the brand font'],
+  ['contrast-min', 'its text is easy to read (contrast)'],
+  ['spacing-on-scale', 'its spacing follows the scale'],
+  ['no-raw-hex', 'no colours are typed in by hand'],
+];
+const BRAND_CHECKS = new Set(['color-in-palette', 'font-is-brand', 'contrast-min', 'spacing-on-scale', 'no-raw-hex']);
+// What an Ask Claude step can check about its own result.
+const VERIFY_CHECKS = [
+  ['color-in-palette', 'Colours are on brand'],
+  ['font-is-brand', 'Uses the brand font'],
+  ['contrast-min', 'Text is easy to read (contrast 4.5 : 1)'],
+  ['spacing-on-scale', 'Spacing follows the scale'],
+  ['no-raw-hex', 'No colours typed in by hand'],
+];
+
 const SCOPE_HINT = {
   user: 'Kept in your own library (~/.claude/workflows), so it follows you into every project.',
   project: 'Kept inside this project (.claude/workflows). Commit it to share it with whoever works on the project.',
 };
 
 const state = {
+  zoom: 1,
   def: null,
   loaded: null,        // { id, scope } once it exists on disk
   builtin: false,
@@ -85,11 +107,19 @@ async function boot() {
   const q = new URLSearchParams(location.search);
   const from = q.get('from') || q.get('id');
   if (from) await loadExisting(from);
-  else state.def = blank();
+  else {
+    state.def = blank();
+    // Arriving from "start a new workflow called …" on the Workflows page.
+    const title = (q.get('title') || '').trim();
+    if (title) { state.def.title = title; state.def.id = slug(title); }
+    fillStartFrom();
+  }
   fetch('/api/skills').then((x) => x.json()).then((r) => { state.skills = r.skills || []; if (state.selectedId) renderSelected(); }).catch(() => {});
   fillKindPickers();
   bindUi();
   render();
+  // A graph wider than the screen opens fitted, so no step starts hidden.
+  if (state.content && $('edInner').parentElement.clientWidth < state.content.w) fitZoom();
   markSaved(!!state.loaded, state.def.version);
   validateSoon();
 }
@@ -99,6 +129,15 @@ async function boot() {
  * process should not have to delete template steps first; templates come
  * from opening a built-in, which saves as their own copy.
  */
+/** The empty canvas offers existing workflows to start from. */
+async function fillStartFrom() {
+  try {
+    const { workflows = [] } = await fetch('/api/workflows').then((r) => r.json());
+    const list = workflows.filter((w) => !w.invalid).slice(0, 5);
+    $('edEmptyList').innerHTML = list.map((w) => `<a href="/workflow-editor.html?from=${encodeURIComponent(w.id)}">${escapeHtml(w.title || w.id)}<span>${w.graph?.nodes?.length || 0} steps</span></a>`).join('');
+  } catch { /* the hint above still says how to begin */ }
+}
+
 function blank() {
   return normalise({ schemaVersion: 2, id: '', title: '', inputs: [], graph: { nodes: [], edges: [] } });
 }
@@ -157,11 +196,36 @@ function bindUi() {
     if (v === '') delete state.def.concurrency; else state.def.concurrency = Number(v);
     changed({ redraw: false });
   });
+  $('wfWhen').addEventListener('input', () => {
+    const v = $('wfWhen').value.trim();
+    if (v) state.def.whenToUse = $('wfWhen').value; else delete state.def.whenToUse;
+    changed({ redraw: false });
+  });
+  $('wfTags').addEventListener('input', () => {
+    const tags = $('wfTags').value.split(',').map((t) => t.trim()).filter(Boolean);
+    if (tags.length) state.def.tags = tags; else delete state.def.tags;
+    changed({ redraw: false });
+  });
+  $('wfSandbox').addEventListener('change', () => {
+    const v = $('wfSandbox').value;
+    if (v) state.def.runtime = { ...(state.def.runtime || {}), sandbox: v };
+    else delete state.def.runtime;
+    renderSandbox();
+    changed({ redraw: false });
+  });
+  $('wfKeepOnFail').addEventListener('change', () => {
+    state.def.runtime = { ...(state.def.runtime || { sandbox: 'worktree' }), keepOnFail: $('wfKeepOnFail').checked };
+    changed({ redraw: false });
+  });
   $('btnAddInput').addEventListener('click', () => {
     state.def.inputs.push({ key: `input${state.def.inputs.length + 1}`, label: '', placeholder: '' });
     changed();
   });
   $('btnTidy').addEventListener('click', tidy);
+  $('zoomIn').addEventListener('click', () => setZoom((state.zoom || 1) + 0.1));
+  $('zoomOut').addEventListener('click', () => setZoom((state.zoom || 1) - 0.1));
+  $('zoomFit').addEventListener('click', fitZoom);
+  window.addEventListener('resize', () => renderCanvas());
   $('btnSettings').addEventListener('click', () => {
     state.side = state.side === 'settings' ? null : 'settings';
     if (state.side) state.selectedId = null;
@@ -703,6 +767,39 @@ function insertRef(text) {
 
 /* --------------------------------- render -------------------------------- */
 
+function renderSandbox() {
+  const rt = state.def.runtime || {};
+  $('wfSandbox').value = rt.sandbox === 'worktree' ? 'worktree' : '';
+  $('wfKeepOnFail').checked = !!rt.keepOnFail;
+  $('wfKeepLine').classList.toggle('hidden', rt.sandbox !== 'worktree');
+  $('sandboxHint').textContent = rt.sandbox === 'worktree'
+    ? 'Each run gets its own copy of the project at its last commit, in .claude/worktrees/. Uncommitted changes are not in it. The copy is removed when the run ends.'
+    : 'Runs read and write your project folder directly, including any uncommitted changes.';
+}
+
+function renderLessons() {
+  const lessons = state.def.lessons || [];
+  $('lessonsCount').textContent = lessons.length ? `· ${lessons.length}` : '';
+  const stepName = (id) => state.def.graph.nodes.find((n) => n.id === id)?.title || id;
+  $('lessonsList').innerHTML = lessons.length
+    ? lessons.map((l, i) => `<div class="lesson-row ${l.pin || l.rating === 'down' ? 'live' : ''}">
+        <div class="lesson-text">${escapeHtml(l.note)}<span class="pd">${l.node ? escapeHtml(stepName(l.node)) : 'whole workflow'}${l.rating === 'down' ? ' · run marked not good' : l.rating === 'up' ? ' · run marked good' : ''}</span></div>
+        <label class="check-line"><input type="checkbox" data-pin-lesson="${i}" ${l.pin ? 'checked' : ''}> Use next time</label>
+        <button class="run-btn danger x" data-rm-lesson="${i}" title="Remove this lesson" aria-label="Remove this lesson">✕</button>
+      </div>`).join('')
+    : '<div class="list-empty">None yet. Mark a finished run as good or not good on its run page to add one.</div>';
+  for (const el of $('lessonsList').querySelectorAll('[data-pin-lesson]')) {
+    el.onchange = () => { state.def.lessons[Number(el.dataset.pinLesson)].pin = el.checked; renderLessons(); changed({ redraw: false }); };
+  }
+  for (const b of $('lessonsList').querySelectorAll('[data-rm-lesson]')) {
+    b.onclick = () => {
+      state.def.lessons.splice(Number(b.dataset.rmLesson), 1);
+      if (!state.def.lessons.length) delete state.def.lessons;
+      renderLessons(); changed({ redraw: false });
+    };
+  }
+}
+
 function render() {
   const d = state.def;
   $('wfId').value = d.id || '';
@@ -714,6 +811,10 @@ function render() {
   $('wfEstimate').value = d.estimate || '';
   $('wfBudget').value = d.budgetUsd ?? '';
   $('wfConcurrency').value = d.concurrency ? String(d.concurrency) : '';
+  $('wfWhen').value = d.whenToUse || '';
+  $('wfTags').value = (d.tags || []).join(', ');
+  renderSandbox();
+  renderLessons();
   $('builtinBanner').classList.toggle('hidden', !state.builtin);
   $('btnExport').disabled = !state.loaded;
   $('btnDeleteWf').disabled = !state.loaded;
@@ -767,6 +868,7 @@ function renderInputs() {
 
 function renderCanvas() {
   const inner = $('edInner');
+  state.origin = gridOrigin();
   // Keep edges SVG, drop cards.
   for (const el of inner.querySelectorAll('.n-card')) el.remove();
   for (const n of state.def.graph.nodes) {
@@ -777,22 +879,56 @@ function renderCanvas() {
   // the SVG stays width:100% of the (narrower) inner, and edges to those
   // nodes draw outside the SVG viewport and get clipped — invisible.
   const nodes = state.def.graph.nodes;
-  const maxX = nodes.reduce((m, n) => Math.max(m, GUTTER + (n.col || 0) * COL_W + 220), 1600);
-  const maxY = nodes.reduce((m, n) => Math.max(m, GUTTER + (n.row || 0) * ROW_H + 120), 900);
-  inner.style.width  = `${maxX + GUTTER}px`;
-  inner.style.height = `${maxY + GUTTER}px`;
+  const o = state.origin;
+  state.content = {
+    w: nodes.reduce((m, n) => Math.max(m, GUTTER + ((n.col || 0) - o.col) * COL_W + 220), 0) + GUTTER,
+    h: nodes.reduce((m, n) => Math.max(m, GUTTER + ((n.row || 0) - o.row) * ROW_H + 140), 0) + GUTTER,
+  };
+  const canvas = inner.parentElement;
+  const w = Math.max(state.content.w, canvas.clientWidth / (state.zoom || 1));
+  const h = Math.max(state.content.h, canvas.clientHeight / (state.zoom || 1));
+  inner.style.width  = `${w}px`;
+  inner.style.height = `${h}px`;
+  applyZoom();
   renderEdges();
+}
+
+/*
+ * Zoom scales the canvas; the negative margins take the scaled-away space
+ * back out of the scroll area, which a transform alone leaves behind.
+ */
+function applyZoom() {
+  const inner = $('edInner');
+  const z = state.zoom || 1;
+  inner.style.transform = z === 1 ? '' : `scale(${z})`;
+  inner.style.transformOrigin = '0 0';
+  inner.style.marginRight  = `${(z - 1) * parseFloat(inner.style.width || 0)}px`;
+  inner.style.marginBottom = `${(z - 1) * parseFloat(inner.style.height || 0)}px`;
+  const label = $('zoomLevel');
+  if (label) label.textContent = `${Math.round(z * 100)}%`;
+}
+
+function setZoom(z) {
+  state.zoom = Math.min(1.5, Math.max(0.3, Math.round(z * 100) / 100));
+  renderCanvas();
+}
+
+/** Scale so every step is in view, never larger than 100%. */
+function fitZoom() {
+  const canvas = $('edInner').parentElement;
+  if (!state.content?.w) return setZoom(1);
+  setZoom(Math.min(1, (canvas.clientWidth - 24) / state.content.w, (canvas.clientHeight - 24) / state.content.h));
 }
 
 /** One line on what a step does, for its card. */
 function summary(n) {
   const s = n.spec || {};
   switch (n.kind) {
-    case 'agent': return s.prompt || 'No instructions yet';
-    case 'script': return s.op ? ({ 'capture-shot': 'Screenshot a page', 'capture-shots': 'Screenshot several pages' })[s.op] : (s.cmd ? `$ ${s.cmd}` : 'No command yet');
+    case 'agent': return `${s.verify ? 'Checks its work · ' : ''}${s.prompt || 'No instructions yet'}`;
+    case 'script': return s.op ? ({ 'find-dev-server': 'Find the running dev server', 'capture-shot': 'Screenshot a page', 'capture-shots': 'Screenshot several pages' })[s.op] || s.op : (s.cmd ? `$ ${s.cmd}` : 'No command yet');
     case 'decision': return `${s.question || ''} — ${(s.options || []).map((o) => o.label).join(' / ')}`;
     case 'approve': return s.question || '';
-    case 'check': return ({ 'exit-zero': 'the command succeeded', contains: `output contains "${s.assert?.needle || ''}"`, 'has-pairs': 'screenshots were taken', manual: 'you say it looks right' })[s.assert?.type] || '';
+    case 'check': return Object.fromEntries(CHECK_TYPES)[s.assert?.type] || s.assert?.type || '';
     case 'loop': return `for each in ${s.over || '…'}`;
     case 'publish': return s.target === 'pr' ? 'Draft a pull request' : `Write ${s.path || 'a file'}`;
     case 'display': return `show ${[].concat(s.from || []).join(', ') || '…'}`;
@@ -802,9 +938,17 @@ function summary(n) {
   }
 }
 
+/** The leftmost column and top row in use, drawn at the gutter. */
+function gridOrigin() {
+  const nodes = state.def.graph.nodes;
+  if (!nodes.length) return { col: 0, row: 0 };
+  return { col: Math.min(...nodes.map((n) => n.col || 0)), row: Math.min(...nodes.map((n) => n.row || 0)) };
+}
+
 function nodeCard(n) {
-  const x = GUTTER + (n.col || 0) * COL_W;
-  const y = GUTTER + (n.row || 0) * ROW_H;
+  const o = state.origin || { col: 0, row: 0 };
+  const x = GUTTER + ((n.col || 0) - o.col) * COL_W;
+  const y = GUTTER + ((n.row || 0) - o.row) * ROW_H;
   const card = document.createElement('div');
   const probs = problemsFor(n.id);
   const cls = ['n-card', `k-${n.kind}`];
@@ -831,7 +975,7 @@ function nodeCard(n) {
     </div>
     <div class="n-title">${escapeHtml(n.title || n.id)}</div>
     <div class="n-what">${escapeHtml(summary(n))}</div>
-    <div class="n-foot"><span>⚡ ${n.cost ?? 1}</span><span class="n-flags">${flags.join(' · ')}</span></div>`;
+    ${flags.length ? `<div class="n-foot"><span class="n-flags">${flags.join(' · ')}</span></div>` : ''}`;
   card.title = probs.map(plain).join('\n');
   card.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -857,7 +1001,8 @@ function attachDrag(card, n) {
   });
   window.addEventListener('mousemove', (e) => {
     if (!dragging) return;
-    const dx = e.clientX - startX, dy = e.clientY - startY;
+    const z = state.zoom || 1;
+    const dx = (e.clientX - startX) / z, dy = (e.clientY - startY) / z;
     // Treat tiny pointer wobble as a click, not a drag. Without this the
     // mouseup always re-renders and tears the card out of the DOM before
     // the click handler can run, so selection appears broken.
@@ -874,8 +1019,9 @@ function attachDrag(card, n) {
     document.body.style.userSelect = '';
     if (!moved) return; // plain click — let the click handler fire selectNode.
     // Snap pixels back to col/row and re-render.
-    n.col = Math.max(0, Math.round((parseFloat(card.style.left) - GUTTER) / COL_W));
-    n.row = Math.max(0, Math.round((parseFloat(card.style.top)  - GUTTER) / ROW_H));
+    const o = state.origin || { col: 0, row: 0 };
+    n.col = Math.max(0, Math.round((parseFloat(card.style.left) - GUTTER) / COL_W) + o.col);
+    n.row = Math.max(0, Math.round((parseFloat(card.style.top)  - GUTTER) / ROW_H) + o.row);
     changed();
   });
 }
@@ -894,12 +1040,12 @@ function renderEdges() {
   // Size the SVG to the actual canvas-inner area so paths don't get clipped.
   // Without explicit width/height attributes, Firefox and some Chrome paths
   // can lose geometry outside the natural SVG viewport.
-  const innerBox = inner.getBoundingClientRect();
+
   // Size the SVG to the inner container's full extent (which renderCanvas
   // just stretched to contain every card). Both attribute and inline style
   // so paths outside the natural viewport are not clipped by the renderer.
-  const w = Math.max(inner.scrollWidth, Math.floor(innerBox.width));
-  const h = Math.max(inner.scrollHeight, Math.floor(innerBox.height));
+  const w = Math.ceil(parseFloat(inner.style.width) || inner.offsetWidth);
+  const h = Math.ceil(parseFloat(inner.style.height) || inner.offsetHeight);
   svg.setAttribute('width',  w);
   svg.setAttribute('height', h);
   svg.style.width  = `${w}px`;
@@ -911,44 +1057,57 @@ function renderEdges() {
   const cards = {};
   for (const el of inner.querySelectorAll('.n-card')) cards[el.dataset.id] = el;
   const byId = Object.fromEntries(state.def.graph.nodes.map((n) => [n.id, n]));
-  const parentBox = { left: innerBox.left, top: innerBox.top };
   // Two paths per edge: visible curve + a fat invisible one for clicks.
   // Clicking an edge opens the step it leads into, where its "Comes after"
   // list can remove it or change a Decision's branch.
   const parts = [];
+  // Several branches of one choice can lead to the same step; their lines
+  // overlap, so they share one label instead of stacking three on one spot.
+  const pairLabels = {}, pairFirst = {};
+  (state.def.graph.edges || []).forEach((edge, i) => {
+    const t = edgeLabelText(byId[edge[0]], edge[2]);
+    if (!t) return;
+    const k = `${edge[0]}→${edge[1]}`;
+    (pairLabels[k] ||= []).push(t);
+    if (pairFirst[k] == null) pairFirst[k] = i;
+  });
   (state.def.graph.edges || []).forEach((edge, i) => {
     const [a, b, label] = edge;
     const srcEl = cards[a], dstEl = cards[b];
     if (!srcEl || !dstEl) return;
-    const sr = srcEl.getBoundingClientRect();
-    const dr = dstEl.getBoundingClientRect();
-    const ax = sr.right - parentBox.left;
-    const ay = sr.top   - parentBox.top + sr.height / 2;
-    const bx = dr.left  - parentBox.left;
-    const by = dr.top   - parentBox.top + dr.height / 2;
+    // Layout offsets, not screen rectangles: they are the SVG's own
+    // coordinates whatever the zoom.
+    const ax = srcEl.offsetLeft + srcEl.offsetWidth;
+    const ay = srcEl.offsetTop + srcEl.offsetHeight / 2;
+    const bx = dstEl.offsetLeft;
+    const by = dstEl.offsetTop + dstEl.offsetHeight / 2;
     // Tangent length — bigger for larger horizontal/vertical spans so the
     // curve has room to open up and doesn't fold back on itself.
-    const spanX = Math.max(40, Math.abs(bx - ax));
-    const spanY = Math.max(0,  Math.abs(by - ay));
-    const dx = Math.max(60, spanX * 0.5, spanY * 0.4);
+    // A forward edge bends within the gap between the two columns; letting
+    // the tangent outgrow that gap is what made curves loop back behind
+    // their own card. Only an edge that runs backwards gets a wide loop.
+    const gap = bx - ax;
+    const spanY = Math.abs(by - ay);
+    const dx = gap > 20 ? Math.min(Math.max(30, gap * 0.5), 200) : Math.max(80, spanY * 0.3);
     const d  = `M${ax},${ay} C${ax + dx},${ay} ${bx - dx},${by} ${bx},${by}`;
-    parts.push(`<path class="edge-hit" data-i="${i}" d="${d}" fill="none" stroke="transparent" stroke-width="14"/>`);
-    const stroke = label ? '#a3abff' : '#efb36c';
-    parts.push(`<path class="edge ${label ? 'labeled' : ''}" data-i="${i}" d="${d}" fill="none" stroke="${stroke}" stroke-width="1.4" opacity="0.75"/>`);
+    parts.push(`<path class="edge-hit" data-i="${i}" d="${d}" fill="none" stroke="transparent"/>`);
+    const stroke = label ? 'var(--accent)' : 'var(--design)';
+    parts.push(`<path class="edge ${label ? 'labeled' : ''}" data-i="${i}" d="${d}" fill="none" style="stroke:${stroke}" stroke-width="1.4" opacity="0.75"/>`);
     // Pinch dots at each end so the curve clearly lands on its node.
-    parts.push(`<circle cx="${ax}" cy="${ay}" r="2.5" fill="${stroke}" opacity="0.9"/>`);
-    parts.push(`<circle cx="${bx}" cy="${by}" r="2.5" fill="${stroke}" opacity="0.9"/>`);
-    const text = edgeLabelText(byId[a], label);
+    parts.push(`<circle cx="${ax}" cy="${ay}" r="2.5" style="fill:${stroke}" opacity="0.9"/>`);
+    parts.push(`<circle cx="${bx}" cy="${by}" r="2.5" style="fill:${stroke}" opacity="0.9"/>`);
+    const k = `${a}→${b}`;
+    const text = pairFirst[k] === i ? pairLabels[k].join(' / ') : '';
     if (text) {
       const mx = (ax + bx) / 2;
       const my = (ay + by) / 2;
       const lw = Math.max(28, text.length * 7 + 10);
       parts.push(
-        `<g class="edge-label" data-i="${i}" transform="translate(${mx - lw / 2},${my - 10})" style="cursor:pointer;">
-           <rect width="${lw}" height="18" rx="9" fill="#131318" stroke="#a3abff" stroke-width="1"/>
+        `<g class="edge-label" data-i="${i}" transform="translate(${mx - lw / 2},${my - 24})" style="cursor:pointer;">
+           <rect width="${lw}" height="18" rx="9" style="fill:var(--label-bg);stroke:var(--accent)" stroke-width="1"/>
            <text x="${lw / 2}" y="12" text-anchor="middle"
                  font-family="Geist Mono, monospace" font-size="10"
-                 fill="#a3abff">${escapeHtml(text)}</text>
+                 style="fill:var(--accent)">${escapeHtml(text)}</text>
          </g>`);
     }
   });
@@ -1083,7 +1242,13 @@ function renderSpecForm(n) {
   const refHead = (label, key, hint = '') => `<div class="field-head"><label for="sp-${key}">${label}${hint ? ` <span class="hint">${hint}</span>` : ''}</label><button type="button" class="ref-btn" data-for="sp-${key}">+ insert</button></div>`;
   const ta = (key, val, ph) => `<textarea id="sp-${key}" data-spec="${key}" data-ref="1" placeholder="${escapeAttr(ph)}">${escapeHtml(val || '')}</textarea>`;
   const txt = (key, val, ph, ref = false) => `<input id="sp-${key}" data-spec="${key}" ${ref ? 'data-ref="1"' : ''} value="${escapeAttr(val ?? '')}" placeholder="${escapeAttr(ph)}">`;
-  const sel = (key, val, options) => `<select id="sp-${key}" data-spec="${key}">${options.map(([v, l]) => opt(v, l, val)).join('')}</select>`;
+  // A value the form has no option for (written by hand, or by a newer
+  // version) is kept and shown, not silently replaced by the first option.
+  const sel = (key, val, options) => {
+    const known = options.some(([v]) => String(v) === String(val ?? ''));
+    const extra = !known && val != null && val !== '' ? opt(val, `${val} (set in the file)`, val) : '';
+    return `<select id="sp-${key}" data-spec="${key}">${extra}${options.map(([v, l]) => opt(v, l, val)).join('')}</select>`;
+  };
   const upSel = (key, val) => ups.length
     ? `<select id="sp-${key}" data-spec="${key}">${opt('', 'Pick a step before this one', val)}${ups.map((u) => opt(u.id, u.title || u.id, val)).join('')}</select>`
     : '<div class="list-empty">Connect a step into this one first.</div>';
@@ -1094,11 +1259,13 @@ function renderSpecForm(n) {
         + ta('prompt', s.prompt, 'Write a one-page summary of {{nodes.research.output}} for {{inputs.audience}}.')
         + `<div class="row2"><div><label for="sp-model">Model</label>${sel('model', s.model || 'sonnet', [['haiku', 'Haiku — fast'], ['sonnet', 'Sonnet — balanced'], ['opus', 'Opus — most capable']])}</div>`
         + `<div><label for="sp-output">It produces</label>${sel('output', s.output || 'markdown', [['markdown', 'Text'], ['json', 'Data (JSON)'], ['json-findings', 'Review findings'], ['html', 'A web page'], ['json-hunks', 'A code change']])}</div></div>`
-        + `<label>Skills to use <span class="hint">named in the prompt; Claude uses one where it applies</span></label>${skillPicker(s.uses || [])}`;
+        + `<label>Skills to use <span class="hint">named in the prompt; Claude uses one where it applies</span></label>${skillPicker(s.uses || [])}`
+        + verifyBox(s.verify);
       break;
     case 'script':
-      html = `<label for="sp-op">It does</label>${sel('op', s.op || '', [['', 'Run a command'], ['capture-shot', 'Screenshot a page'], ['capture-shots', 'Screenshot several pages']])}`
-        + (s.op ? '<div class="hint block-hint">Uses the running app Orderly found for this project, or the page given as an input.</div>'
+      html = `<label for="sp-op">It does</label>${sel('op', s.op || '', [['', 'Run a command'], ['find-dev-server', 'Find the running dev server'], ['capture-shot', 'Screenshot a page'], ['capture-shots', 'Screenshot several pages']])}`
+        + (s.op === 'find-dev-server' ? '<div class="hint block-hint">Stops the run with a clear message if the project\'s dev server is not running, so later screenshots are of your app and not something else.</div>'
+          : s.op ? '<div class="hint block-hint">Uses the running app Orderly found for this project, or the page given as an input. Error pages and blank pages are not counted as captured.</div>'
           : refHead('Command', 'cmd', 'runs in the project folder; inserted values are quoted') + ta('cmd', s.cmd, 'npm test')
             + refHead('Show on the run page', 'show', 'pictures or clips it makes; * matches many') + txt('show', s.show, 'out/*.png, out/demo.mp4', true));
       break;
@@ -1112,9 +1279,12 @@ function renderSpecForm(n) {
       html = refHead('What are you approving?', 'question') + txt('question', s.question, 'Ship {{inputs.version}}?', true);
       break;
     case 'check':
-      html = `<label for="sp-assert.type">Passes when</label>${sel('assert.type', s.assert?.type || 'exit-zero', [['exit-zero', 'a command succeeded'], ['contains', 'an output contains some text'], ['has-pairs', 'screenshots were taken'], ['manual', 'I say it looks right']])}`
+      html = `<label for="sp-assert.type">Passes when</label>${sel('assert.type', s.assert?.type || 'exit-zero', CHECK_TYPES)}`
         + `<label for="sp-assert.from">Looking at</label>${upSel('assert.from', s.assert?.from)}`
         + (s.assert?.type === 'contains' ? refHead('The text', 'assert.needle') + txt('assert.needle', s.assert?.needle, 'All tests passed', true) : '')
+        + (s.assert?.type === 'contrast-min' ? `<label for="sp-assert.ratio">At least</label>${sel('assert.ratio', String(s.assert?.ratio || 4.5), [['3', '3 : 1 — large text only'], ['4.5', '4.5 : 1 — normal text (WCAG AA)'], ['7', '7 : 1 — strictest (WCAG AAA)']])}` : '')
+        + (s.assert?.type === 'font-is-brand' ? `<label for="sp-assert.role">Font</label>${sel('assert.role', s.assert?.role || 'sans', [['sans', 'Body font'], ['mono', 'Code font']])}` : '')
+        + (BRAND_CHECKS.has(s.assert?.type) ? '<div class="hint block-hint">Reads the screenshots or rendered pages of the step it looks at, against the colours and fonts in <code>.claude/brand.json</code> and <code>web/app.css</code>.</div>' : '')
         + `<label for="sp-onFail">If it fails</label>${sel('onFail', s.onFail || 'stop', [['stop', 'Stop the whole run'], ['skip', 'Skip what comes after, finish the rest']])}`;
       break;
     case 'loop':
@@ -1124,7 +1294,8 @@ function renderSpecForm(n) {
           ? refHead('Command', 'cmd', 'use {{item}} for the current item') + ta('cmd', s.cmd, 'npx lighthouse {{item}}')
           : refHead('What should Claude do with each?', 'prompt', 'use {{item}} for the current item') + ta('prompt', s.prompt, 'Summarise {{item}} in two sentences.'))
         + `<div class="row2"><div><label for="sp-max">At most</label>${sel('max', String(s.max || 50), [['5', '5 items'], ['20', '20 items'], ['50', '50 items'], ['100', '100 items'], ['500', '500 items']])}</div>`
-        + `<div><label for="sp-concurrency">At once</label>${sel('concurrency', String(s.concurrency || 1), [['1', 'One at a time'], ['2', '2'], ['4', '4'], ['8', '8']])}</div></div>`;
+        + `<div><label for="sp-concurrency">At once</label>${sel('concurrency', String(s.concurrency || 1), [['1', 'One at a time'], ['2', '2'], ['4', '4'], ['8', '8']])}</div></div>`
+        + `<label for="sp-join">Hand on</label>${sel('join', s.join || 'concat', [['concat', 'Every result'], ['first-match', 'The first one that worked'], ['vote', 'Pass if most say yes']])}`;
       break;
     case 'publish':
       html = `<label for="sp-target">It</label>${sel('target', s.target || 'file', [['file', 'Writes a file in the project'], ['pr', 'Drafts a pull request']])}`
@@ -1147,10 +1318,17 @@ function renderSpecForm(n) {
       html = `<label for="sp-legacy">Instructions</label><textarea id="sp-legacy" data-legacy="1">${escapeHtml(n.prompt || n.command || '')}</textarea>`;
   }
   mount.innerHTML = html;
+  for (const el of mount.querySelectorAll('[data-verify], [data-verify-check]')) {
+    const turnsOn = el.dataset.verify === 'on';
+    el.addEventListener(el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input', () => {
+      readVerify(mount);
+      changed({ redraw: turnsOn ? true : 'canvas' });
+    });
+  }
 
   for (const el of mount.querySelectorAll('[data-spec]')) {
     const key = el.dataset.spec;
-    const numeric = ['max', 'concurrency'].includes(key);
+    const numeric = ['max', 'concurrency', 'assert.ratio'].includes(key);
     // These change which other fields the form shows.
     const shaping = ['op', 'action', 'target', 'assert.type'].includes(key);
     el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
@@ -1207,6 +1385,53 @@ function renderSpecForm(n) {
   // Preview the main text field without waiting for a focus.
   if (!state.refField || !mount.contains(state.refField)) state.refField = mount.querySelector('[data-ref]');
   previewSoon();
+}
+
+/** Ask Claude: look at the result, and try again with what was wrong. */
+function verifyBox(v) {
+  const on = !!v;
+  const types = new Set((v?.asserts || []).map((a) => a.type));
+  const judge = (v?.asserts || []).find((a) => a.type === 'llm-judge');
+  const routes = (v?.renders || []).map((r) => (typeof r === 'string' ? r : r.route)).join(', ');
+  const o = (val, label, cur) => `<option value="${val}" ${String(cur) === String(val) ? 'selected' : ''}>${label}</option>`;
+  return `<div class="verify-box ${on ? 'on' : ''}">
+    <label class="check-line"><input type="checkbox" data-verify="on" ${on ? 'checked' : ''}> Check its work before moving on</label>
+    ${on ? `<div class="verify-body">
+      <label for="vf-routes">Pages to look at <span class="hint">in the running app; comma separated; empty = don't open any</span></label>
+      <input id="vf-routes" data-verify="routes" value="${escapeAttr(routes)}" placeholder="/, /pricing">
+      <div class="hint block-hint">A page that errors or comes back blank fails the check.</div>
+      <label>Checks</label>
+      <div class="pick-list">${VERIFY_CHECKS.map(([t, l]) => `<label><input type="checkbox" data-verify-check="${t}" ${types.has(t) ? 'checked' : ''}> ${l}</label>`).join('')}</div>
+      <label for="vf-rubric">Judge it against <span class="hint">optional; a second model reads the result</span></label>
+      <textarea id="vf-rubric" class="short" data-verify="rubric" placeholder="The hero says what the product does in one line, with no placeholder text.">${escapeHtml(judge?.rubric || '')}</textarea>
+      <div class="row2">
+        <div><label for="vf-retries">If it fails, try again</label><select id="vf-retries" data-verify="retries">${[0, 1, 2, 3].map((n) => o(n, n === 0 ? 'No' : `${n} more time${n > 1 ? 's' : ''}`, v.maxRetries ?? 1)).join('')}</select></div>
+        <div><label for="vf-onfail">If it still fails</label><select id="vf-onfail" data-verify="onFail">${o('stop', 'Stop the run', v.onFail || 'stop')}${o('skip', 'Carry on, marked failed', v.onFail || 'stop')}</select></div>
+      </div>
+    </div>` : ''}
+  </div>`;
+}
+
+/** Read the verify box back into spec.verify. */
+function readVerify(mount) {
+  const n = selectedNode(); if (!n) return;
+  n.spec = n.spec || {};
+  if (!mount.querySelector('[data-verify="on"]')?.checked) { delete n.spec.verify; return; }
+  const prev = n.spec.verify || {};
+  const routesEl = mount.querySelector('[data-verify="routes"]');
+  if (!routesEl) { n.spec.verify = { renders: [], asserts: [], maxRetries: 1, onFail: 'stop', ...prev }; return; }
+  const renders = routesEl.value.split(',').map((r) => r.trim()).filter(Boolean);
+  const keep = (prev.asserts || []).filter((a) => !VERIFY_CHECKS.some(([t]) => t === a.type) && a.type !== 'llm-judge');
+  const asserts = [...keep, ...[...mount.querySelectorAll('[data-verify-check]:checked')].map((el) => (
+    el.dataset.verifyCheck === 'contrast-min' ? { type: 'contrast-min', ratio: 4.5 } : { type: el.dataset.verifyCheck }))];
+  const rubric = mount.querySelector('[data-verify="rubric"]').value.trim();
+  if (rubric) asserts.push({ type: 'llm-judge', rubric });
+  n.spec.verify = {
+    ...(renders.length ? { renders } : {}),
+    ...(asserts.length ? { asserts } : {}),
+    maxRetries: Number(mount.querySelector('[data-verify="retries"]').value),
+    onFail: mount.querySelector('[data-verify="onFail"]').value,
+  };
 }
 
 function skillPicker(chosen) {

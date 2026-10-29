@@ -3,7 +3,7 @@ import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
-import { SHOTS_DIR } from './paths.mjs';
+import { SHOTS_DIR, INSTANCES_FILE } from './paths.mjs';
 import { CDP, httpJSON } from './cdp.mjs';
 import { comparePairInPage } from './visual.mjs';
 
@@ -81,8 +81,12 @@ export async function detectDevServer(projectDir, { selfPort = null } = {}) {
    * app while photographing the viewer. Our own pid covers every port we
    * listen on; selfPort is belt and braces for the fixed-port fallback below.
    */
+  // Other Orderly windows are viewers too, not the app: a second copy on
+  // another port was being photographed as if it were the dev server.
+  const orderly = orderlyInstances();
   const ours = (srv) => srv.pid === process.pid
-    || (selfPort != null && srv.port === Number(selfPort));
+    || (selfPort != null && srv.port === Number(selfPort))
+    || orderly.pids.has(srv.pid) || orderly.ports.has(srv.port);
   if (projectDir) {
     const depth = (p) => p.split('/').filter(Boolean).length;
     const mine = [];
@@ -106,6 +110,13 @@ export async function detectDevServer(projectDir, { selfPort = null } = {}) {
     .map(async (p) => ((await alive(p)) ? p : null));
   const found = (await Promise.all(checks)).filter(Boolean);
   return found.length ? `http://localhost:${found[0]}` : null;
+}
+
+function orderlyInstances() {
+  try {
+    const all = JSON.parse(fs.readFileSync(INSTANCES_FILE, 'utf8'));
+    return { pids: new Set(all.map((i) => i.pid)), ports: new Set(all.map((i) => Number(i.port))) };
+  } catch { return { pids: new Set(), ports: new Set() }; }
 }
 
 function freePort(start = 9222) {
@@ -167,7 +178,7 @@ class Browser {
     this.idle.unref?.();
   }
 
-  async shot(url, outFile, { width = 1440, height = 900, settleMs = 650, fullPage = false } = {}) {
+  async shot(url, outFile, { width = 1440, height = 900, settleMs = 650, fullPage = false, probe = false } = {}) {
     const cdp = await this.ensure();
     this.touchIdle();
     // Size comes from Emulation below; Target.createTarget rejects it in new headless.
@@ -182,6 +193,13 @@ class Browser {
       // A page holding an SSE or HMR socket may never fire load — carry on regardless.
       await cdp.once('Page.loadEventFired', sessionId, 7000);
       await sleep(settleMs);
+      let page = null;
+      if (probe) {
+        try {
+          const r = await cdp.send('Runtime.evaluate', { expression: PAGE_PROBE, returnByValue: true }, sessionId);
+          page = r.result?.value || null;
+        } catch { /* a probe failure must not lose the screenshot */ }
+      }
 
       const params = { format: 'png' };
       if (fullPage) {
@@ -194,7 +212,7 @@ class Browser {
       const { data } = await cdp.send('Page.captureScreenshot', params, sessionId);
       fs.mkdirSync(path.dirname(outFile), { recursive: true });
       fs.writeFileSync(outFile, Buffer.from(data, 'base64'));
-      return { ok: true, file: outFile };
+      return { ok: true, file: outFile, page };
     } finally {
       try { await cdp.send('Target.closeTarget', { targetId }); } catch {}
     }
@@ -229,6 +247,55 @@ class Browser {
       try { await cdp.send('Target.closeTarget', { targetId }); } catch {}
     }
   }
+}
+
+/*
+ * What the page actually is, read after it settles: the HTTP status, whether
+ * anything is on it, and the type, colours and spacing it renders with. The
+ * status and emptiness let a capture tell a real page from an error page;
+ * the rest feeds the brand checks.
+ */
+const PAGE_PROBE = `(() => {
+  const nav = performance.getEntriesByType('navigation')[0];
+  const body = document.body;
+  const text = (body?.innerText || '').trim();
+  const els = [...document.querySelectorAll('body *')].slice(0, 400);
+  const visible = els.filter((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+  const toHex = (c) => { const m = c && c.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)(?:,\\s*([\\d.]+))?/); if (!m || m[4] === '0') return null;
+    return '#' + [m[1], m[2], m[3]].map((n) => (+n).toString(16).padStart(2, '0')).join(''); };
+  const bgOf = (e) => { for (let x = e; x; x = x.parentElement) { const h = toHex(getComputedStyle(x).backgroundColor); if (h) return h; } return '#ffffff'; };
+  const colors = new Set(), spacing = new Set(), pairs = [];
+  if (body) { const b = toHex(getComputedStyle(body).backgroundColor) || toHex(getComputedStyle(document.documentElement).backgroundColor); if (b) colors.add(b); }
+  for (const e of visible) {
+    const cs = getComputedStyle(e);
+    const fg = toHex(cs.color), bg = toHex(cs.backgroundColor);
+    if (fg) colors.add(fg); if (bg) colors.add(bg);
+    for (const k of ['paddingTop', 'paddingLeft', 'marginTop', 'marginBottom', 'gap']) {
+      const v = parseFloat(cs[k]); if (v > 0 && v < 200) spacing.add(Math.round(v));
+    }
+    const own = [...e.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim());
+    if (own && fg && pairs.length < 40) pairs.push({ label: e.tagName.toLowerCase(), fg, bg: bgOf(e) });
+  }
+  return {
+    status: nav && nav.responseStatus ? nav.responseStatus : null,
+    title: document.title || '',
+    textLength: text.length,
+    elements: visible.length,
+    images: document.images.length,
+    fontFamily: body ? getComputedStyle(body).fontFamily : '',
+    colors: [...colors].slice(0, 60),
+    spacing: [...spacing].slice(0, 60),
+    contrastPairs: pairs,
+  };
+})()`;
+
+/** A captured page that is an error or has nothing on it. Null when it looks real. */
+export function pageProblem(page) {
+  if (!page) return null;
+  if (page.status && page.status >= 400) return `the page returned HTTP ${page.status}`;
+  if (/^(404|not found|page not found)/i.test(page.title || '')) return 'the page says it was not found';
+  if (page.textLength === 0 && page.images === 0 && page.elements < 3) return 'the page is blank';
+  return null;
 }
 
 const browser = new Browser();

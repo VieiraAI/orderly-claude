@@ -147,6 +147,18 @@ function defToPreviewRun(def) {
   };
 }
 
+function runSeconds(r) {
+  if (!r.startedAt) return null;
+  const end = r.endedAt ? Date.parse(r.endedAt) : Date.now();
+  const s = (end - Date.parse(r.startedAt)) / 1000;
+  return Number.isFinite(s) && s >= 0 ? s : null;
+}
+function fmtSeconds(s) {
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)} s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m} min ${Math.round(s % 60)} s` : `${Math.floor(m / 60)} h ${m % 60} min`;
+}
+
 function money(n) { return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`; }
 
 function render() {
@@ -168,7 +180,10 @@ function render() {
   const totalBits = [];
   if (totals.cost) totalBits.push(money(totals.cost));
   if (run.budgetUsd) totalBits.push(`limit ${money(run.budgetUsd)}`);
-  if (totals.elapsedS) totalBits.push(`${totals.elapsedS.toFixed(1)} s`);
+  // How long the run took on the clock, not the sum of model time: those
+  // disagreed, and the clock is what a person waited for.
+  const took = runSeconds(run);
+  if (took != null) totalBits.push(`took ${fmtSeconds(took)}`);
   const totalStr = totalBits.length ? ` · <span class="run-totals">${totalBits.join(' · ')}</span>` : '';
   const legacyPill = (run.schemaVersion || 1) < 2
     ? ' · <span class="legacy-pill" title="This run was defined under the pre-v2 schema. Rendered through the compat layer.">legacy</span>'
@@ -183,6 +198,7 @@ function render() {
   document.getElementById('runSession').textContent = bits.filter(Boolean).join(' · ');
   renderNotice();
   renderAnswer();
+  renderRetro();
   renderPlanRail();
   layoutCanvas();
   renderTimeline();
@@ -207,6 +223,77 @@ function renderNotice() {
     out.push(['info', `This run used version ${run.definitionVersion} of the workflow; it is on version ${meta.currentVersion} now. Repeating this run repeats what it ran.`]);
   }
   document.getElementById('runNotice').innerHTML = out.map(([k, t]) => `<div class="notice ${k}">${esc(t)}</div>`).join('');
+}
+
+/*
+ * How did it go? A finished run can be marked good or not good with a line
+ * on why. The line can be kept as a lesson: next time, it is added to the
+ * instructions of the step it is about.
+ */
+let retroDraft = null;
+function renderRetro() {
+  const mount = document.getElementById('retroPanel');
+  const finished = ['done', 'failed', 'stopped'].includes(run.status);
+  if (isPreview || !finished) { mount.innerHTML = ''; return; }
+  if (!retroDraft || retroDraft.runId !== run.runId) {
+    retroDraft = { runId: run.runId, rating: run.rating || null, note: run.retro || '', node: '', keep: run.rating === 'down', saved: !!run.rating };
+  }
+  const d = retroDraft;
+  const steps = run.graph.nodes.filter((n) => n.kind === 'agent' || n.prompt || n.spec?.prompt);
+  if (d.saved && !d.editing) {
+    mount.innerHTML = `<div class="retro done">
+      <span class="retro-mark ${d.rating}">${d.rating === 'up' ? 'Marked good' : 'Marked not good'}</span>
+      ${d.note ? `<span class="retro-note">${esc(d.note)}</span>` : ''}
+      <button class="link-btn" id="retroEdit">change</button>
+      ${d.lessonSaved ? '<span class="retro-sub">Kept as a lesson for next time.</span>' : ''}
+    </div>`;
+    mount.querySelector('#retroEdit').onclick = () => { d.editing = true; renderRetro(); };
+    return;
+  }
+  mount.innerHTML = `<div class="retro">
+    <div class="retro-q">How did it go?</div>
+    <div class="retro-choice" role="group" aria-label="Rate this run">
+      <button class="run-btn ${d.rating === 'up' ? 'on' : ''}" data-rate="up" aria-pressed="${d.rating === 'up'}">Good</button>
+      <button class="run-btn ${d.rating === 'down' ? 'on' : ''}" data-rate="down" aria-pressed="${d.rating === 'down'}">Not good</button>
+    </div>
+    ${d.rating ? `
+      <label class="retro-label" for="retroNote">${d.rating === 'down' ? 'What went wrong?' : 'Anything worth repeating?'} <span class="hint">one line</span></label>
+      <input class="retro-in" id="retroNote" maxlength="300" value="${esc(d.note)}" placeholder="${d.rating === 'down' ? 'The mockups ignored the brand colours.' : 'Asking for three directions worked well.'}">
+      ${steps.length ? `<label class="retro-label" for="retroNode">About</label>
+      <select class="retro-in" id="retroNode"><option value="">The whole workflow</option>${steps.map((n) => `<option value="${esc(n.id)}" ${d.node === n.id ? 'selected' : ''}>${esc(n.title || n.id)}</option>`).join('')}</select>` : ''}
+      <label class="retro-check"><input type="checkbox" id="retroKeep" ${d.keep ? 'checked' : ''}> Add this to the step's instructions next time</label>
+      <div class="need-actions"><button class="run-btn primary" id="retroSave">Save</button><span class="need-status" id="retroStatus"></span></div>` : ''}
+  </div>`;
+  mount.querySelectorAll('[data-rate]').forEach((b) => { b.onclick = () => { d.rating = b.dataset.rate; d.keep = d.rating === 'down'; renderRetro(); mount.querySelector('#retroNote')?.focus(); }; });
+  const note = mount.querySelector('#retroNote');
+  if (note) note.oninput = () => { d.note = note.value; };
+  const nodeSel = mount.querySelector('#retroNode');
+  if (nodeSel) nodeSel.onchange = () => { d.node = nodeSel.value; };
+  const keep = mount.querySelector('#retroKeep');
+  if (keep) keep.onchange = () => { d.keep = keep.checked; };
+  const save = mount.querySelector('#retroSave');
+  if (save) save.onclick = async () => {
+    const status = mount.querySelector('#retroStatus');
+    status.textContent = 'Saving…'; status.classList.remove('bad');
+    const r = await post(`/api/runs/${encodeURIComponent(run.runId)}`, { rating: d.rating, retro: d.note.trim() }, 'PATCH');
+    if (r.status >= 400) { status.textContent = r.error || 'Could not save.'; status.classList.add('bad'); return; }
+    d.lessonSaved = false;
+    if (d.keep && d.note.trim()) {
+      const l = await post(`/api/workflows/${encodeURIComponent(run.workflowId)}/lessons`, {
+        lesson: { node: d.node || null, note: d.note.trim(), rating: d.rating, pin: true, fromRun: run.runId },
+      });
+      if (l.status >= 400) {
+        status.innerHTML = /builtin/.test(l.error || '')
+          ? 'Saved the rating. Lessons go on your own workflows — <a href="/workflows.html#workflows">make a copy of this one</a> to keep them.'
+          : esc(l.error || 'Saved the rating, but not the lesson.');
+        status.classList.add('bad');
+        d.saved = true; return;
+      }
+      d.lessonSaved = true;
+    }
+    d.saved = true; d.editing = false;
+    renderRetro();
+  };
 }
 
 function titleOf(id) { return run.graph.nodes.find((n) => n.id === id)?.title || id; }
@@ -390,9 +477,17 @@ function layoutCanvas() {
     cards[n.id] = makeCard(n, { left, top, width: CARD_W }, canvas);
   }
   const maxCol = Math.max(...cols) - minCol + 1;
-  const maxRow = Math.max(...run.graph.nodes.map((n) => n.row || 0));
+  // Each row is as tall as its tallest card, so a card full of screenshots
+  // pushes the next row down instead of covering it.
+  const rows = [...new Set(run.graph.nodes.map((n) => n.row || 0))].sort((a, b) => a - b);
+  const rowH = Object.fromEntries(rows.map((r) => [r, 0]));
+  for (const n of run.graph.nodes) rowH[n.row || 0] = Math.max(rowH[n.row || 0], cards[n.id].offsetHeight);
+  let y = PAD;
+  const rowTop = {};
+  for (const r of rows) { rowTop[r] = y; y += Math.max(ROW_H - 40, rowH[r]) + 40; }
+  for (const n of run.graph.nodes) cards[n.id].style.top = `${rowTop[n.row || 0]}px`;
   canvas.style.width  = `${PAD * 2 + maxCol * (CARD_W + COL_GAP)}px`;
-  canvas.style.height = `${PAD * 2 + (maxRow + 1) * ROW_H}px`;
+  canvas.style.height = `${y + PAD}px`;
   requestAnimationFrame(() => requestAnimationFrame(() => drawEdges(canvas, edges)));
 }
 
@@ -431,8 +526,7 @@ function makeCard(n, pos, parent) {
 /**
  * The right-side bit on the card footer. When a handler called the CLI it
  * returns `meta` with model, cost, elapsed, tokens; prefer that over the
- * static cost token the def declared. Falls back to the static credit for
- * local kinds (terminal, ask) and placeholder output.
+ * how long the step took for local kinds (terminal, ask).
  */
 function cardFootMeta(n, meta) {
   const bits = [];
@@ -442,7 +536,12 @@ function cardFootMeta(n, meta) {
   if (meta.elapsed) bits.push(esc(String(meta.elapsed)));
   if (typeof meta.tokens === 'number' && meta.tokens > 0) bits.push(`${meta.tokens} tok`);
   if (bits.length) return bits.join(' · ');
-  return `⚡ ${n.cost ?? 1}`;
+  // Wall-clock time for steps that did not call a model.
+  if (n.startedAt && n.endedAt) {
+    const s = (Date.parse(n.endedAt) - Date.parse(n.startedAt)) / 1000;
+    if (Number.isFinite(s) && s >= 0) return fmtSeconds(s);
+  }
+  return '';
 }
 
 function cardBody(n) {
@@ -527,7 +626,7 @@ function cardBody(n) {
           : p.status === 'failed' ? 'failed' : 'waits';
         const label = p.status === 'done' ? 'done'
           : p.status === 'running' ? 'capturing…'
-          : p.status === 'failed'  ? 'failed'
+          : p.status === 'failed'  ? (p.error ? 'not counted' : 'failed')
           : p.status === 'skipped' ? 'no server' : 'queued';
         const after  = p.after?.ref  || p.shot?.ref;
         const before = p.before?.ref;
@@ -545,8 +644,9 @@ function cardBody(n) {
              : slot(null));
         return `<div class="route-row ${cls}">
           <span class="route-label">${esc(p.route)}</span>
+          <span class="route-state" ${p.error ? `title="${esc(p.error)}"` : ''}>${label}</span>
           <div class="pair-mini${!hasBaseline && after ? ' solo' : ''}">${content}</div>
-          <span class="route-state">${label}</span>
+          ${p.error ? `<span class="route-why">${esc(p.error)}</span>` : ''}
         </div>`;
       }).join('');
       const title = esc(o.title || `${pairs.filter((p) => p.status === 'done').length} of ${pairs.length} captured`);
