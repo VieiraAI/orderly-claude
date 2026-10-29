@@ -20,6 +20,8 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { USER_WORKFLOWS_DIR, repoWorkflowsDir, repoRunsDir, SCRATCH_RUNS_DIR } from './paths.mjs';
 import { listSessions } from './sessions.mjs';
+import { referenceFields, referencedNodes, ancestorsOf, parseRefs } from './refs.mjs';
+import { readSettings } from './settings.mjs';
 
 const BUILTIN_DIR = fileURLToPath(new URL('./workflow-defs/', import.meta.url));
 
@@ -34,12 +36,24 @@ export function listDefinitions({ repoRoot } = {}) {
     { scope: 'builtin', dir: BUILTIN_DIR },
   ].filter(Boolean);
   for (const src of sources) {
-    for (const def of readDir(src.dir)) {
+    for (const { def, problems, file } of readDir(src.dir)) {
       if (seen.has(def.id)) continue;
-      seen.set(def.id, { ...def, scope: src.scope, source: src.dir });
+      const entry = { ...def, scope: src.scope, source: src.dir, file };
+      // A definition that stopped validating stays listed, marked, so its
+      // owner can open and fix it. Hiding it would look like it was deleted.
+      if (problems.length) { entry.invalid = true; entry.problems = problems; }
+      seen.set(def.id, entry);
     }
   }
   return [...seen.values()];
+}
+
+/** Fields that describe where a definition was found, not what it is. */
+const RUNTIME_FIELDS = ['scope', 'source', 'file', 'invalid', 'problems'];
+export function stripRuntime(def) {
+  const out = { ...def };
+  for (const k of RUNTIME_FIELDS) delete out[k];
+  return out;
 }
 
 export function getDefinition(id, { repoRoot } = {}) {
@@ -60,12 +74,11 @@ function readDir(dir) {
       console.warn(`[workflows] ${file}: invalid JSON (${e.message})`);
       continue;
     }
-    const problems = validateDefinition(d);
-    if (problems.length) {
-      console.warn(`[workflows] ${file}: skipped (${problems.join('; ')})`);
+    if (!d || typeof d.id !== 'string' || !d.id.trim()) {
+      console.warn(`[workflows] ${file}: skipped (no id)`);
       continue;
     }
-    defs.push(d);
+    defs.push({ def: d, problems: validateDefinition(d), file });
   }
   return defs;
 }
@@ -127,7 +140,9 @@ export function validateDefinition(d) {
       if (!ids.has(from)) problems.push(`edge from unknown node: ${from}`);
       if (!ids.has(to))   problems.push(`edge to unknown node: ${to}`);
     }
-    if (hasCycle(ids, edges)) problems.push('graph has a cycle');
+    const cyclic = hasCycle(ids, edges);
+    if (cyclic) problems.push('graph has a cycle');
+    if (v2 && !cyclic) problems.push(...referenceProblems(d));
     if (v2) {
       // Decision options must match the labels on its outgoing edges.
       for (const n of nodes) {
@@ -141,7 +156,88 @@ export function validateDefinition(d) {
       }
     }
   }
+  problems.push(...guardrailProblems(d));
   return problems;
+}
+
+/**
+ * A node may only name nodes upstream of it: anything else has not run yet
+ * when it starts, so the reference would resolve to nothing.
+ */
+function referenceProblems(d) {
+  const problems = [];
+  const graph = d.graph;
+  const ids = new Set(graph.nodes.map((n) => n.id));
+  for (const n of graph.nodes) {
+    const upstream = ancestorsOf(n.id, graph);
+    const named = new Set();
+    for (const f of referenceFields(n)) for (const id of referencedNodes(f.value)) named.add([id, f.key]);
+    if (n.kind === 'check' && n.spec?.assert?.from) named.add([n.spec.assert.from, 'assert.from']);
+    if (n.kind === 'display') {
+      for (const id of [].concat(n.spec?.from || []).filter(Boolean)) named.add([id, 'from']);
+    }
+    for (const [id, field] of named) {
+      if (!ids.has(id)) problems.push(`node ${n.id}: ${field} names node "${id}", which does not exist`);
+      else if (id === n.id) problems.push(`node ${n.id}: ${field} names itself`);
+      else if (!upstream.has(id)) problems.push(`node ${n.id}: ${field} names "${id}", which is not upstream of it — connect ${id} → ${n.id} first`);
+    }
+  }
+  return problems;
+}
+
+/** Limits that keep a workflow from running away with time or money. */
+function guardrailProblems(d) {
+  const problems = [];
+  const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+  if (d.budgetUsd != null && !(Number(d.budgetUsd) > 0)) problems.push('budgetUsd must be a positive amount');
+  if (d.concurrency != null && !int(d.concurrency, 1, 16)) problems.push('concurrency must be 1–16');
+  const keys = new Set();
+  for (const f of d.inputs || []) {
+    if (!f || !/^[A-Za-z_][\w-]*$/.test(f.key || '')) problems.push(`input "${f?.key ?? ''}": key must be a short name without spaces`);
+    else if (keys.has(f.key)) problems.push(`input "${f.key}" is declared twice`);
+    keys.add(f?.key);
+  }
+  for (const n of d.graph?.nodes || []) {
+    const s = n.spec || {};
+    if (s.timeoutMs != null && !int(s.timeoutMs, 1000, 3_600_000)) problems.push(`node ${n.id}: timeout must be between 1 second and 1 hour`);
+    if (s.retry != null) {
+      if (!int(s.retry.attempts ?? 0, 0, 5)) problems.push(`node ${n.id}: retries must be 0–5`);
+      if (s.retry.backoffMs != null && !int(s.retry.backoffMs, 0, 600_000)) problems.push(`node ${n.id}: retry wait must be under 10 minutes`);
+    }
+    if (n.kind === 'loop') {
+      if (s.max != null && !int(Number(s.max), 1, 500)) problems.push(`node ${n.id}: a loop may run at most 500 items`);
+      if (s.concurrency != null && !int(Number(s.concurrency), 1, 8)) problems.push(`node ${n.id}: loop concurrency must be 1–8`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * Things worth saying that do not stop a workflow from running. The editor
+ * shows them; the scheduler ignores them.
+ */
+export function lintDefinition(d) {
+  const warnings = [];
+  const declared = new Set((d.inputs || []).map((f) => f.key));
+  for (const n of d.graph?.nodes || []) {
+    if (n.kind === 'inputs') for (const f of n.spec?.fields || []) declared.add(f.key);
+  }
+  const nodes = d.graph?.nodes || [];
+  const edges = d.graph?.edges || [];
+  for (const n of nodes) {
+    for (const f of referenceFields(n)) {
+      for (const r of parseRefs(f.value)) {
+        if (r.kind === 'inputs' && !declared.has(r.key.split('.')[0])) {
+          warnings.push(`node ${n.id}: {{inputs.${r.key}}} is not one of the workflow's inputs, so it will be empty unless someone supplies it`);
+        }
+        if (r.kind === 'item' && n.kind !== 'loop') warnings.push(`node ${n.id}: {{item}} only means something inside a loop`);
+      }
+    }
+    if (nodes.length > 1 && !edges.some((e) => e[0] === n.id || e[1] === n.id)) {
+      warnings.push(`node ${n.id} is not connected to anything, so it runs on its own at the start`);
+    }
+  }
+  return warnings;
 }
 
 /** Lightweight per-kind spec check for v2. One line per missing requirement. */
@@ -213,41 +309,61 @@ function hasCycle(ids, edges) {
  * Start a run. Writes a run.json with every node in `pending`, status
  * `running`, and returns the run.
  */
-export function startRun({ workflowId, inputs = {}, repoRoot, sessionId = null, trigger = 'you' }) {
-  const def = getDefinition(workflowId, { repoRoot });
-  if (!def) throw new Error(`workflow not found: ${workflowId}`);
-  const runId = randomUUID();
-  const now = new Date().toISOString();
-  const nodes = (def.graph?.nodes || []).map((n) => ({
-    id: n.id, title: n.title, kind: n.kind,
-    col: n.col, row: n.row, cost: n.cost,
-    // Carry per-kind config through to the run copy so handlers can read it.
-    spec: n.spec,
-    model: n.model, prompt: n.prompt, command: n.command,
-    question: n.question, choices: n.choices, route: n.route,
-    status: 'pending', waitsFor: null, output: null,
-    startedAt: null, endedAt: null,
-  }));
+export function startRun({
+  workflowId, inputs = {}, repoRoot, sessionId = null, trigger = 'you',
+  budgetUsd, scheduleId = null, definition = null,
+}) {
+  const found = definition || getDefinition(workflowId, { repoRoot });
+  if (!found) throw new Error(`workflow not found: ${workflowId}`);
+  if (found.invalid) throw new Error(`"${found.title || workflowId}" needs fixing before it can run: ${found.problems.join('; ')}`);
+  const def = stripRuntime(found);
+  const settings = readSettings();
   const run = {
-    runId,
+    runId: randomUUID(),
     workflowId,
     workflowTitle: def.title,
     category: def.category,
-    scope: def.scope,
+    scope: found.scope,
     // Record which schema the def used so the renderer can mark legacy runs.
     schemaVersion: def.schemaVersion || 1,
+    // The graph as it was when this run began. Reruns and resumes read this,
+    // never the file on disk, so editing a workflow cannot change a run.
+    definition: def,
+    definitionVersion: def.version || 1,
     status: 'running',
     trigger,
+    scheduleId,
     sessionId,
     repoRoot: repoRoot || null,
-    startedAt: now,
+    // The process driving this run. A run whose owner is gone was cut short.
+    ownerPid: process.pid,
+    startedAt: new Date().toISOString(),
     endedAt: null,
     inputs,
-    graph: { nodes, edges: def.graph?.edges || [] },
+    budgetUsd: firstMoney(budgetUsd, def.budgetUsd, settings.budget.perRunUsd),
+    concurrency: def.concurrency || settings.concurrency,
+    graph: { nodes: freshNodes(def), edges: [...(def.graph?.edges || [])] },
     cost: 0,
   };
   writeRun(run);
   return run;
+}
+
+function firstMoney(...vals) {
+  for (const v of vals) {
+    const n = Number(v);
+    if (v != null && v !== '' && Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+/** Every authored field on each node, plus the runtime fields, all reset. */
+function freshNodes(def) {
+  return (def.graph?.nodes || []).map((n) => ({
+    ...structuredClone(n),
+    status: 'pending', waitsFor: null, output: null,
+    startedAt: null, endedAt: null, attempts: 0,
+  }));
 }
 
 /** Overwrite a run atomically. `run.runId` + `run.repoRoot` locate the file. */
@@ -344,13 +460,59 @@ export function writeWorkflow({ def, scope = 'project', repoRoot = null, overwri
     : scope === 'project' ? (repoRoot ? repoWorkflowsDir(repoRoot) : null)
     : null;
   if (!dir) throw new Error(`unknown scope: ${scope}`);
+  if (!/^[a-z0-9][a-z0-9-_]*$/i.test(def.id)) throw new Error('id must be a short name of letters, numbers and dashes');
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `${def.id}.json`);
-  if (fs.existsSync(file) && !overwrite) {
-    throw new Error(`a workflow with id "${def.id}" already exists at ${file}`);
+  let prior = null;
+  if (fs.existsSync(file)) {
+    if (!overwrite) throw new Error(`a workflow with id "${def.id}" already exists at ${file}`);
+    try { prior = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* replace a broken file */ }
   }
-  fs.writeFileSync(file, JSON.stringify(def, null, 2) + '\n');
+  const out = stripRuntime(def);
+  // Each save is a new version, so a run can say which one it ran.
+  out.version = prior ? Math.max(prior.version || 1, out.version || 1) + 1 : (out.version || 1);
+  out.updatedAt = new Date().toISOString();
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(out, null, 2) + '\n');
+  fs.renameSync(tmp, file);
   return file;
+}
+
+/** Remove a workflow the person owns. Built-ins cannot be deleted. */
+export function deleteWorkflow({ id, scope, repoRoot = null }) {
+  const dir = scope === 'user' ? USER_WORKFLOWS_DIR
+    : scope === 'project' && repoRoot ? repoWorkflowsDir(repoRoot) : null;
+  if (!dir) throw new Error(scope === 'builtin' ? 'built-in workflows cannot be deleted' : `unknown scope: ${scope}`);
+  const file = path.join(dir, `${id}.json`);
+  if (!fs.existsSync(file)) return false;
+  fs.rmSync(file);
+  return true;
+}
+
+/** An id not yet taken in `scope`, built from `base`. */
+export function freeId(base, { scope = 'user', repoRoot = null } = {}) {
+  const dir = scope === 'user' ? USER_WORKFLOWS_DIR : repoWorkflowsDir(repoRoot);
+  const clean = String(base || 'workflow').toLowerCase().replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '') || 'workflow';
+  let id = clean, i = 2;
+  while (fs.existsSync(path.join(dir, `${id}.json`))) id = `${clean}-${i++}`;
+  return id;
+}
+
+/**
+ * Copy any workflow — a built-in included — into the person's own library,
+ * where they can change it. This is the easiest way to make one: start from
+ * something that works.
+ */
+export function duplicateWorkflow(id, { repoRoot = null, scope = 'user' } = {}) {
+  const src = getDefinition(id, { repoRoot });
+  if (!src) throw new Error(`workflow not found: ${id}`);
+  const copy = stripRuntime(structuredClone(src));
+  copy.id = freeId(src.scope === 'builtin' ? id : `${id}-copy`, { scope, repoRoot });
+  copy.title = src.scope === 'builtin' ? `${src.title} (yours)` : `${src.title} (copy)`;
+  copy.version = 1;
+  copy.derivedFrom = { id: src.id, scope: src.scope, version: src.version || 1 };
+  const file = writeWorkflow({ def: copy, scope, repoRoot, overwrite: false });
+  return { def: copy, file };
 }
 
 /** Delete a run folder. Returns true if the folder existed. */
@@ -374,37 +536,37 @@ export function deleteRun(runId) {
 export function rerunRun(runId, { fromNodeId = null } = {}) {
   const prior = readRun(runId);
   if (!prior) throw new Error(`run not found: ${runId}`);
-  const def = getDefinition(prior.workflowId, { repoRoot: prior.repoRoot });
+  // The graph this run actually ran. Only runs from before definitions were
+  // pinned fall back to the file, which may since have changed.
+  const def = prior.definition || getDefinition(prior.workflowId, { repoRoot: prior.repoRoot });
   if (!def) throw new Error(`workflow not found: ${prior.workflowId}`);
+  if (def.invalid) throw new Error(`"${def.title || prior.workflowId}" needs fixing before it can run: ${def.problems.join('; ')}`);
   const newRunId = randomUUID();
   const now = new Date().toISOString();
   const preservedIds = fromNodeId
     ? collectAncestors(def.graph, fromNodeId)
     : new Set();
-  const nodes = (def.graph.nodes || []).map((n) => {
+  const nodes = freshNodes(def).map((n) => {
     const prev = prior.graph?.nodes?.find((x) => x.id === n.id);
     const keep = preservedIds.has(n.id) && prev?.status === 'done';
-    return {
-      id: n.id, title: n.title, kind: n.kind,
-      col: n.col, row: n.row, cost: n.cost,
-      spec: n.spec,
-      model: n.model, prompt: n.prompt, command: n.command,
-      question: n.question, choices: n.choices, route: n.route,
-      status: keep ? 'done' : 'pending',
-      waitsFor: null,
-      output: keep ? prev.output : null,
-      startedAt: keep ? prev.startedAt : null,
-      endedAt:   keep ? prev.endedAt   : null,
-    };
+    return keep
+      ? { ...n, status: 'done', output: prev.output, startedAt: prev.startedAt, endedAt: prev.endedAt, attempts: prev.attempts || 1 }
+      : n;
   });
   const run = {
     runId: newRunId, workflowId: prior.workflowId,
     workflowTitle: def.title, category: def.category, scope: prior.scope,
     schemaVersion: def.schemaVersion || prior.schemaVersion || 1,
+    definition: def,
+    definitionVersion: def.version || prior.definitionVersion || 1,
     status: 'running', trigger: `rerun of ${runId.slice(0, 8)}`,
+    rerunOf: runId,
     sessionId: prior.sessionId, repoRoot: prior.repoRoot,
+    ownerPid: process.pid,
     startedAt: now, endedAt: null,
     inputs: { ...(prior.inputs || {}) },
+    budgetUsd: prior.budgetUsd ?? null,
+    concurrency: prior.concurrency || readSettings().concurrency,
     graph: { nodes, edges: [...(def.graph.edges || [])] },
   };
   writeRun(run);
@@ -427,14 +589,30 @@ function collectAncestors(graph, nodeId) {
   return seen;
 }
 
+/*
+ * Parsed run files, keyed by path and invalidated by mtime and size. The Runs
+ * page lists every run on every change event, and re-parsing hundreds of
+ * files, some holding whole HTML mockups, each time is what would make it
+ * slow first. Entries are shared: change one only on the way to writeRun.
+ */
+const runCache = new Map();
+
+function cachedRun(file) {
+  let st;
+  try { st = fs.statSync(file); } catch { runCache.delete(file); return null; }
+  const hit = runCache.get(file);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.run;
+  const run = parse(file);
+  if (run) runCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, run });
+  return run;
+}
+
 function collectRuns(dir, repoRoot, out) {
   let kids;
   try { kids = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const k of kids) {
     if (!k.isDirectory()) continue;
-    const file = path.join(dir, k.name, 'run.json');
-    if (!fs.existsSync(file)) continue;
-    const run = parse(file);
+    const run = cachedRun(path.join(dir, k.name, 'run.json'));
     if (!run) continue;
     if (repoRoot && !run.repoRoot) run.repoRoot = repoRoot;
     out.push(run);
@@ -455,9 +633,146 @@ function parse(file) {
  * repo not opened in Claude Code lately is simply not scanned, which keeps the
  * list bounded. */
 export function knownRepoRoots() {
-  const roots = new Set();
+  const roots = new Set(extraRoots);
   for (const s of listSessions({ limit: 400 })) {
     if (s.cwd) roots.add(s.cwd);
   }
   return [...roots];
+}
+
+/*
+ * Folders to search even if Claude Code has never run in them: the project
+ * being watched, and the one Orderly was started from. Without this, a run
+ * started in a fresh project was written to disk and then never listed, and
+ * that project's prompts and skills were invisible.
+ */
+const extraRoots = new Set();
+export function registerRoot(dir) {
+  if (dir && typeof dir === 'string') extraRoots.add(path.resolve(dir));
+}
+
+/* ------------------------- Interruption and resume ------------------------ */
+
+const LIVE = new Set(['running', 'awaiting-answer']);
+/** Statuses a person can pick back up from. */
+export const RESUMABLE = new Set(['interrupted', 'stopped', 'failed']);
+
+function pidAlive(pid) {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/**
+ * Runs marked live whose owning process is gone were cut short — a crash, a
+ * closed laptop, a killed terminal. Left alone they say `running` for ever
+ * with nothing driving them. Mark them `interrupted`, naming where they
+ * stopped, so the Runs page can offer Resume.
+ *
+ * A run owned by another Orderly that is still alive is left alone: several
+ * can run at once, one per session.
+ */
+export function reconcileRuns({ ownedHere = new Set() } = {}) {
+  const fixed = [];
+  for (const run of listRuns({ limit: 5000 })) {
+    if (!LIVE.has(run.status) || ownedHere.has(run.runId)) continue;
+    if (run.ownerPid && run.ownerPid !== process.pid && pidAlive(run.ownerPid)) continue;
+    markInterrupted(run, 'Orderly was closed while this was running');
+    writeRun(run);
+    fixed.push(run.runId);
+  }
+  return fixed;
+}
+
+/** Shared by reconcile and by a clean shutdown. Mutates `run`. */
+export function markInterrupted(run, reason) {
+  const at = new Date().toISOString();
+  const cut = [];
+  for (const n of run.graph?.nodes || []) {
+    if (n.status === 'running') { n.status = 'interrupted'; n.endedAt = at; n.progress = undefined; cut.push(n.id); }
+  }
+  run.status = 'interrupted';
+  run.endedAt = at;
+  run.interruption = { at, reason, nodes: cut };
+  return run;
+}
+
+/** Nodes that do something it would be wrong to repeat by accident. */
+export function repeatRisky(node) {
+  return node?.spec?.idempotent === false;
+}
+
+/**
+ * Put an interrupted, stopped or failed run back into a state the scheduler
+ * can carry on from. Finished nodes keep their output and are not run again.
+ *
+ * A node marked `idempotent: false` that had already started is not decided
+ * for the person: `choices[nodeId]` must say `repeat` (run it again) or
+ * `assume-done` (it got far enough; carry on after it). Without a choice this
+ * returns `needsChoice` and changes nothing.
+ */
+export function prepareResume(run, { choices = {}, budgetUsd } = {}) {
+  if (!RESUMABLE.has(run.status)) throw new Error(`a ${run.status} run cannot be resumed`);
+  const needsChoice = [];
+  for (const n of run.graph.nodes) {
+    const started = !!n.startedAt && !['done', 'skipped', 'pending'].includes(n.status);
+    if (started && repeatRisky(n) && !['repeat', 'assume-done'].includes(choices[n.id])) {
+      needsChoice.push({ nodeId: n.id, title: n.title, kind: n.kind, command: n.spec?.cmd || null });
+    }
+  }
+  if (needsChoice.length) return { needsChoice };
+
+  const at = new Date().toISOString();
+  for (const n of run.graph.nodes) {
+    // A failed gate is re-checked rather than waved through on resume.
+    const failedGate = n.kind === 'check' && n.status === 'done' && n.output?.pass === false
+      && (n.spec?.onFail || 'stop') === 'stop';
+    if (choices[n.id] === 'assume-done' && n.status !== 'done') {
+      Object.assign(n, { status: 'done', endedAt: at, output: { ...(n.output || {}), note: 'Not repeated on resume — you said it had already happened.' } });
+    } else if (failedGate || ['running', 'interrupted', 'failed', 'stopped'].includes(n.status)) {
+      // Keep the question a person may already have answered while the run
+      // was down; drop everything else the node half-produced.
+      const pendingAnswer = n.pendingAnswer;
+      Object.assign(n, { status: 'pending', output: null, startedAt: null, endedAt: null, progress: undefined, waitsFor: null });
+      if (pendingAnswer !== undefined) n.pendingAnswer = pendingAnswer;
+    }
+  }
+  run.status = 'running';
+  run.endedAt = null;
+  run.ownerPid = process.pid;
+  run.resumes = (run.resumes || 0) + 1;
+  run.lastResumedAt = at;
+  delete run.halt;
+  if (budgetUsd != null) {
+    const b = Number(budgetUsd);
+    if (!(b > 0)) throw new Error('the new limit must be a positive amount');
+    run.budgetUsd = b;
+  }
+  return { run };
+}
+
+/** The node currently waiting on a person, if any. */
+export function openQuestion(run) {
+  const n = (run?.graph?.nodes || []).find((x) =>
+    (x.status === 'running' || x.status === 'interrupted') && x.waitsFor === 'you');
+  if (!n) return null;
+  const o = n.output || {};
+  return { nodeId: n.id, title: n.title, kind: n.kind, question: o.question || n.title, choices: o.choices || null };
+}
+
+/**
+ * Record an answer in the run file, whether or not anything is running it.
+ * The scheduler reads it back when the node runs, so a question can be
+ * answered after a restart, or tomorrow.
+ */
+export function recordAnswer(run, nodeId, answer) {
+  const n = run.graph.nodes.find((x) => x.id === nodeId);
+  if (!n) throw new Error(`no node "${nodeId}" in this run`);
+  if (n.waitsFor !== 'you') throw new Error(`"${n.title || nodeId}" is not waiting for an answer`);
+  const choices = n.output?.choices;
+  if (Array.isArray(choices) && choices.length && !choices.includes(answer)) {
+    throw new Error(`answer must be one of: ${choices.join(', ')}`);
+  }
+  if (answer === undefined || answer === null || String(answer).trim() === '') throw new Error('an answer is required');
+  n.pendingAnswer = answer;
+  return n;
 }

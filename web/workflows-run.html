@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Run — Orderly Claude</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -31,15 +32,23 @@
         <h2 id="runTitle">—</h2>
       </div>
       <div class="sub" id="runSub"><span id="runStatus">loading…</span></div>
+      <div id="runNotice"></div>
+      <div id="answerPanel"></div>
     </div>
     <div class="plan-rail" id="rail"></div>
   </aside>
   <div class="canvas-wrap">
+    <div class="timeline hidden" id="timeline"></div>
     <div class="canvas" id="canvas">
       <svg class="edges" id="edges"></svg>
     </div>
   </div>
 </div>
+
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <button class="x" id="drawerClose" title="Close">×</button>
+  <div id="drawerBody"></div>
+</aside>
 
 <script type="module" src="/workflows-run.mjs"></script>
 </body></html>

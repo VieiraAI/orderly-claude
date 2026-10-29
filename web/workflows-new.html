@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workflow editor — Orderly Claude</title>
+<!-- The editor moved to workflow-editor.html; keep old links and bookmarks working. -->
+<script>
+  const q = new URLSearchParams(location.search);
+  const id = q.get('id') || q.get('from');
+  location.replace(`/workflow-editor.html${id ? `?from=${encodeURIComponent(id)}` : ''}`);
+</script>
+</head><body style="background:#08090a;color:#9aa0aa;font:14px system-ui;padding:40px;">
+The editor has moved. <a href="/workflow-editor.html" style="color:#a3abff;">Open it</a>.
+</body></html>

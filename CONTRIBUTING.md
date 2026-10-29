@@ -47,6 +47,8 @@ caught it is worth more than the fix.
 | `web/` | the page — plain modules, no framework, no bundler |
 | `plugin/` | a Claude Code mod drawing the same bubbles in a terminal pane |
 | `test/smoke.mjs` | the whole suite |
+| `test/workflow-engine.mjs` | workflows, called by the suite; runs alone too |
+| `docs/workflows-plan.md` | why workflows work the way they do |
 
 Two things are worth knowing before changing the core:
 

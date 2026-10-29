@@ -361,6 +361,11 @@ async function inspectPage(url) {
 }
 
 async function main() {
+  // Never touch the person's real schedules or spend limits: the server this
+  // suite boots runs the schedule ticker, and would otherwise fire them.
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'orderly-smoke-'));
+  process.env.ORDERLY_SCHEDULES_DIR = path.join(scratch, 'data');
+  process.env.ORDERLY_SETTINGS_FILE = path.join(scratch, 'data', 'settings.json');
   console.log('\nCore\n');
 
   const ops = lineDiff('a\nb\nc', 'a\nX\nc');
@@ -641,6 +646,9 @@ async function main() {
     capture: false,
   });
   const base = `http://127.0.0.1:${port}`;
+  // Runs this suite starts land in the real project's Runs page; remember
+  // when it began so they can be removed again at the end.
+  const suiteStartedAt = new Date(Date.now() - 1000).toISOString();
   const get = (p) => fetch(base + p).then((r) => r.json());
 
   try {
@@ -1550,8 +1558,26 @@ async function main() {
       shutdownBrowser();
     }
   } finally {
+    // Leave nothing behind on the Runs page of the machine the suite ran on:
+    // every smoke-* workflow's runs, and the built-in runs this session
+    // started while the suite was running.
+    try {
+      const { runs = [] } = await fetch(`${base}/api/runs?limit=5000&since=${encodeURIComponent(suiteStartedAt)}`).then((r) => r.json());
+      for (const r of runs) {
+        const ours = r.workflowId.startsWith('smoke-')
+          || (r.sessionId === target.meta.sessionId && (r.workflowId === 'visual-regression'));
+        if (ours) await fetch(`${base}/api/runs/${r.runId}`, { method: 'DELETE' });
+      }
+    } catch { /* the server may already be gone */ }
     close();
   }
+
+  // Workflows: references, limits, durability, schedules and the three pages,
+  // each against throwaway servers in a temp project.
+  const { runWorkflowEngineChecks } = await import('./workflow-engine.mjs');
+  try { await runWorkflowEngineChecks({ check, session: target.meta }); }
+  catch (e) { check('workflow checks ran to the end', false, e.stack || e.message); }
+  fs.rmSync(scratch, { recursive: true, force: true });
 
   console.log(`\n${pass} passed, ${failures.length} failed\n`);
   if (failures.length) {

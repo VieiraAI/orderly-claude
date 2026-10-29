@@ -18,8 +18,19 @@ import { Runner } from '../core/runner.mjs';
 import { SHOTS_DIR, INSTANCES_FILE, ensureDirs, transcriptPathFor, uploadsFor } from '../core/paths.mjs';
 import { randomUUID } from 'node:crypto';
 import { loadShots, attachShots } from '../core/shots.mjs';
-import { listDefinitions, getDefinition, startRun, readRun, listRuns, runsForSession, deleteRun, rerunRun, scaffoldWorkflow, writeWorkflow, validateDefinition } from '../core/workflows.mjs';
+import {
+  listDefinitions, getDefinition, startRun, readRun, listRuns, runsForSession, deleteRun, rerunRun,
+  scaffoldWorkflow, writeWorkflow, validateDefinition, lintDefinition, deleteWorkflow, duplicateWorkflow,
+  stripRuntime, freeId, reconcileRuns, prepareResume, openQuestion, recordAnswer, writeRun, RESUMABLE,
+  registerRoot,
+} from '../core/workflows.mjs';
 import { Scheduler } from '../core/workflow-runner.mjs';
+import { resolveText, referenceFields } from '../core/refs.mjs';
+import { readSettings, writeSettings, runSpend } from '../core/settings.mjs';
+import {
+  listSchedules, createSchedule, updateSchedule, deleteSchedule, describeRule,
+  acquireLock, releaseLock, tick as tickSchedules,
+} from '../core/schedules.mjs';
 import { openBlob } from '../core/blobs.mjs';
 import { listSkills } from '../core/skills.mjs';
 import { listPrompts, getPrompt, interpolate, scaffoldPrompt, writePrompt, validatePrompt } from '../core/prompts.mjs';
@@ -145,23 +156,22 @@ function readInstances() {
 }
 
 /** Trim a run down to what a list row renders — the node bodies stay on disk. */
-function summariseRun(r) {
+function summariseRun(r, versions = null) {
   const nodes = r.graph?.nodes || [];
-  const done = nodes.filter((n) => n.status === 'done').length;
-  const running = nodes.find((n) => n.status === 'running');
-  const asking = nodes.find((n) => n.status === 'running' && n.kind === 'ask') || nodes.find((n) => n.kind === 'ask' && n.status !== 'done' && n.status !== 'pending');
-  // Roll up per-node meta for a budget-at-a-glance total.
-  const totals = { cost: 0, tokens: 0, elapsedS: 0 };
-  for (const n of nodes) {
-    const m = n.output?.meta;
-    if (!m) continue;
-    if (typeof m.cost === 'number')   totals.cost += m.cost;
-    if (typeof m.tokens === 'number') totals.tokens += m.tokens;
-    if (typeof m.elapsed === 'string') {
-      const s = parseFloat(m.elapsed);
-      if (Number.isFinite(s)) totals.elapsedS += s;
-    }
-  }
+  const count = (st) => nodes.filter((n) => n.status === st).length;
+  const running = nodes.find((n) => n.status === 'running' && n.waitsFor !== 'you');
+  // The question itself, so the Runs page can be answered from where it is.
+  // Runs from before questions were recorded on the node fall back to the
+  // first ask-ish node that has started.
+  const q = openQuestion(r) || legacyQuestion(r);
+  const failed = nodes.find((n) => n.status === 'failed');
+  const elapsedS = nodes.reduce((t, n) => {
+    const s = parseFloat(n.output?.meta?.elapsed);
+    return Number.isFinite(s) ? t + s : t;
+  }, 0);
+  const tokens = nodes.reduce((t, n) => t + (Number(n.output?.meta?.tokens) || 0), 0);
+  const spend = runSpend(r);
+  const current = versions?.get(r.workflowId);
   return {
     runId: r.runId,
     workflowId: r.workflowId,
@@ -169,19 +179,45 @@ function summariseRun(r) {
     category: r.category,
     status: r.status,
     trigger: r.trigger,
+    scheduleId: r.scheduleId || null,
     sessionId: r.sessionId,
     repoRoot: r.repoRoot,
     startedAt: r.startedAt,
     endedAt: r.endedAt,
     cost: r.cost,
     totalNodes: nodes.length,
-    doneNodes: done,
+    doneNodes: count('done'),
+    skippedNodes: count('skipped'),
     runningLabel: running ? running.title : null,
-    askingLabel: asking ? asking.title : null,
-    totalCost:   totals.cost || null,
-    totalTokens: totals.tokens || null,
-    totalElapsed: totals.elapsedS ? `${totals.elapsedS.toFixed(1)} s` : null,
+    askingLabel: q ? q.title : null,
+    needsYou: q,
+    failedNode: failed ? { id: failed.id, title: failed.title, error: failed.output?.error || null } : null,
+    halt: r.halt || null,
+    error: r.error || null,
+    interruption: r.interruption || null,
+    resumable: RESUMABLE.has(r.status),
+    budgetUsd: r.budgetUsd ?? null,
+    inputs: r.inputs || {},
+    definitionVersion: r.definitionVersion || null,
+    currentVersion: current ?? null,
+    totalCost:   spend || null,
+    totalTokens: tokens || null,
+    totalElapsed: elapsedS ? `${elapsedS.toFixed(1)} s` : null,
   };
+}
+
+function legacyQuestion(r) {
+  const n = (r.graph?.nodes || []).find((x) => ['ask', 'decision', 'approve'].includes(x.kind)
+    && x.status === 'running' && x.output?.question);
+  return n ? { nodeId: n.id, title: n.title, kind: n.kind, question: n.output.question, choices: n.output.choices || null } : null;
+}
+
+/** Spend by scheduled runs since local midnight. */
+function scheduledSpendToday() {
+  const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+  return listRuns({ limit: 5000 })
+    .filter((r) => r.trigger === 'schedule' && Date.parse(r.startedAt) >= midnight.getTime())
+    .reduce((t, r) => t + runSpend(r), 0);
 }
 
 function readBody(req, limit = 1_000_000) {
@@ -249,6 +285,7 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
     const meta = tabMeta.get(id) || {};
     liveTitle = meta.title || liveTitle;
     liveCwd = meta.cwd || liveCwd;
+    registerRoot(liveCwd);
     runnerFor(id).cwd = meta.cwd || runnerFor(id).cwd;
     if (capture) await next.setCapture(true);
     broadcast('tabs', { tabs: tabs(), active: liveId });
@@ -290,10 +327,18 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
 
   // One scheduler per in-flight workflow run; dropped on terminal state.
   const schedulers = new Map();
+  /** A live run another Orderly process is driving. Hands off. */
+  function ownedElsewhere(run) {
+    if (schedulers.has(run.runId) || !['running', 'awaiting-answer'].includes(run.status)) return false;
+    if (!run.ownerPid || run.ownerPid === process.pid) return false;
+    try { process.kill(run.ownerPid, 0); return true; } catch { return false; }
+  }
   function startScheduler(run) {
     const s = new Scheduler(run);
     s.on('update', (e) => broadcast('update', { runId: e.runId, nodeId: e.nodeId || null }));
-    s.on('finish', (e) => { broadcast('run-finish', e); schedulers.delete(e.runId); });
+    // Only unregister if it is still this scheduler: a resume may have
+    // replaced it under the same run id.
+    s.on('finish', (e) => { broadcast('run-finish', e); if (schedulers.get(e.runId) === s) schedulers.delete(e.runId); });
     s.on('fail',   (e) => { broadcast('run-finish', { ...e, status: 'failed' }); });
     schedulers.set(run.runId, s);
     s.start();
@@ -615,18 +660,23 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       if (url.pathname === '/api/workflows/validate' && req.method === 'POST') {
         const body = await readBody(req);
         const problems = validateDefinition(body.def || {});
-        return send(200, { ok: problems.length === 0, problems });
+        const warnings = problems.length ? [] : lintDefinition(body.def || {});
+        return send(200, { ok: problems.length === 0, problems, warnings });
       }
       if (url.pathname === '/api/workflows' && req.method === 'POST') {
         const body = await readBody(req);
         try {
+          const scope = body.scope || 'project';
           const file = writeWorkflow({
-            def: body.def, scope: body.scope || 'project',
-            repoRoot: body.scope === 'project' ? (body.repoRoot || liveCwd) : null,
+            def: body.def, scope,
+            repoRoot: scope === 'project' ? (body.repoRoot || liveCwd) : null,
             overwrite: !!body.overwrite,
           });
-          return send(200, { saved: true, file });
-        } catch (e) { return send(400, { error: e.message }); }
+          const written = JSON.parse(fs.readFileSync(file, 'utf8'));
+          return send(200, { saved: true, file, id: written.id, scope, version: written.version });
+        } catch (e) {
+          return send(/already exists/.test(e.message) ? 409 : 400, { error: e.message });
+        }
       }
 
 
@@ -768,7 +818,74 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       }
 
 
+      // Import a definition file someone shared. A clashing id is refused
+      // with a free one suggested, never silently overwritten.
+      if (url.pathname === '/api/workflows/import' && req.method === 'POST') {
+        const body = await readBody(req, 5_000_000);
+        const def = stripRuntime(body.def || {});
+        const scope = body.scope || 'user';
+        const problems = validateDefinition(def);
+        if (problems.length) return send(400, { error: 'This file is not a workflow Orderly can run', problems });
+        try {
+          const file = writeWorkflow({ def, scope, repoRoot: scope === 'project' ? liveCwd : null, overwrite: !!body.overwrite });
+          return send(200, { saved: true, file, id: def.id });
+        } catch (e) {
+          if (/already exists/.test(e.message)) {
+            return send(409, { error: `You already have a workflow called "${def.id}"`, suggestedId: freeId(def.id, { scope, repoRoot: liveCwd }) });
+          }
+          return send(400, { error: e.message });
+        }
+      }
+
+      // Resolve one field of a node against the latest run of this workflow,
+      // so the editor can show what a reference will become.
+      if (url.pathname === '/api/workflows/preview' && req.method === 'POST') {
+        const body = await readBody(req, 5_000_000);
+        const def = body.def || {};
+        const node = (def.graph?.nodes || []).find((n) => n.id === body.nodeId);
+        if (!node) return send(404, { error: 'no such node' });
+        const field = referenceFields(node).find((f) => f.key === body.field) || { value: body.text || '', mode: 'text' };
+        const last = listRuns({ limit: 2000 }).find((r) => r.workflowId === def.id);
+        const run = last
+          ? { ...last, graph: { nodes: last.graph.nodes, edges: def.graph?.edges || last.graph.edges } }
+          : { inputs: {}, graph: { nodes: def.graph?.nodes || [], edges: def.graph?.edges || [] } };
+        const { text, missing } = resolveText(field.value, { run, nodeId: node.id, mode: field.mode === 'shell' ? 'shell' : 'text' });
+        return send(200, {
+          text, missing,
+          fromRun: last ? { runId: last.runId, startedAt: last.startedAt, status: last.status } : null,
+        });
+      }
+
+      const wfExportMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/export$/);
+      if (wfExportMatch && req.method === 'GET') {
+        const def = getDefinition(decodeURIComponent(wfExportMatch[1]), { repoRoot: liveCwd });
+        if (!def) return send(404, { error: 'workflow not found' });
+        res.writeHead(200, {
+          'content-type': 'application/json',
+          'content-disposition': `attachment; filename="${def.id}.workflow.json"`,
+          'cache-control': 'no-store',
+        });
+        return res.end(JSON.stringify(stripRuntime(def), null, 2) + '\n');
+      }
+
+      const wfDupMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/duplicate$/);
+      if (wfDupMatch && req.method === 'POST') {
+        const body = await readBody(req).catch(() => ({}));
+        try {
+          const scope = body.scope || 'user';
+          const { def, file } = duplicateWorkflow(decodeURIComponent(wfDupMatch[1]), { repoRoot: liveCwd, scope });
+          return send(200, { saved: true, id: def.id, scope, file });
+        } catch (e) { return send(400, { error: e.message }); }
+      }
+
       const wfMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)$/);
+      if (wfMatch && req.method === 'DELETE') {
+        const scope = url.searchParams.get('scope') || 'user';
+        try {
+          const ok = deleteWorkflow({ id: decodeURIComponent(wfMatch[1]), scope, repoRoot: liveCwd });
+          return ok ? send(200, { deleted: true }) : send(404, { error: 'workflow not found' });
+        } catch (e) { return send(400, { error: e.message }); }
+      }
       if (wfMatch && req.method === 'GET') {
         const def = getDefinition(wfMatch[1], { repoRoot: liveCwd });
         return def ? send(200, { workflow: def }) : send(404, { error: 'workflow not found' });
@@ -825,23 +942,159 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
 
       const runAnswerMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/answer$/);
       if (runAnswerMatch && req.method === 'POST') {
-        const s = schedulers.get(runAnswerMatch[1]);
-        if (!s) return send(404, { error: 'not running' });
+        const id = runAnswerMatch[1];
         const body = await readBody(req);
         if (!body.nodeId) return send(400, { error: 'nodeId required' });
-        const ok = s.answer(body.nodeId, body.answer);
-        return ok ? send(200, { answered: true }) : send(409, { error: 'no answer pending for that node' });
+        const s = schedulers.get(id);
+        if (s) {
+          try {
+            const ok = s.answer(body.nodeId, body.answer);
+            return ok ? send(200, { answered: true, resumed: false }) : send(409, { error: 'no answer pending for that node' });
+          } catch (e) { return send(400, { error: e.message }); }
+        }
+        // Nothing is running it here. If another live Orderly owns it, that
+        // one must take the answer; otherwise record it and carry on.
+        const run = readRun(id, { repoRoot: liveCwd });
+        if (!run) return send(404, { error: 'run not found' });
+        if (ownedElsewhere(run)) return send(409, { error: 'Another Orderly window is running this — answer it there' });
+        try { recordAnswer(run, body.nodeId, body.answer); } catch (e) { return send(400, { error: e.message }); }
+        if (['running', 'awaiting-answer'].includes(run.status)) {
+          // Marked live with a dead owner: it was cut short.
+          run.status = 'interrupted';
+        }
+        writeRun(run);
+        if (!RESUMABLE.has(run.status)) return send(200, { answered: true, resumed: false });
+        const prepared = prepareResume(run);
+        if (prepared.needsChoice) return send(200, { answered: true, resumed: false, needsChoice: prepared.needsChoice });
+        writeRun(prepared.run);
+        startScheduler(prepared.run);
+        broadcast('run-start', { runId: id, workflowId: prepared.run.workflowId });
+        return send(200, { answered: true, resumed: true });
+      }
+
+      const runResumeMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/resume$/);
+      if (runResumeMatch && req.method === 'POST') {
+        const id = runResumeMatch[1];
+        if (schedulers.has(id)) return send(409, { error: 'already running' });
+        const body = await readBody(req).catch(() => ({}));
+        const run = readRun(id, { repoRoot: liveCwd });
+        if (!run) return send(404, { error: 'run not found' });
+        if (ownedElsewhere(run)) return send(409, { error: 'Another Orderly window is running this' });
+        if (['running', 'awaiting-answer'].includes(run.status)) run.status = 'interrupted';
+        let prepared;
+        try { prepared = prepareResume(run, { choices: body.choices || {}, budgetUsd: body.budgetUsd }); }
+        catch (e) { return send(400, { error: e.message }); }
+        if (prepared.needsChoice) return send(409, { needsChoice: prepared.needsChoice });
+        writeRun(prepared.run);
+        startScheduler(prepared.run);
+        broadcast('run-start', { runId: id, workflowId: prepared.run.workflowId });
+        return send(200, { resumed: true, run: prepared.run });
+      }
+
+      if (url.pathname === '/api/settings' && req.method === 'GET') {
+        return send(200, { settings: readSettings(), scheduledSpendToday: scheduledSpendToday() });
+      }
+      if (url.pathname === '/api/settings' && req.method === 'POST') {
+        const body = await readBody(req);
+        try { return send(200, { settings: writeSettings(body) }); }
+        catch (e) { return send(400, { error: e.message }); }
+      }
+
+      if (url.pathname === '/api/schedules' && req.method === 'GET') {
+        const defs = new Map(listDefinitions({ repoRoot: liveCwd }).map((d) => [d.id, d]));
+        const schedules = listSchedules().map((sc) => {
+          const last = sc.lastRunId ? readRun(sc.lastRunId) : null;
+          return {
+            ...sc,
+            describe: describeRule(sc.rule),
+            workflowTitle: defs.get(sc.workflowId)?.title || sc.workflowId,
+            workflowMissing: !defs.has(sc.workflowId),
+            lastRun: last ? summariseRun(last) : null,
+          };
+        });
+        return send(200, {
+          schedules,
+          settings: readSettings(),
+          scheduledSpendToday: scheduledSpendToday(),
+          // Said wherever schedules are shown, because it is the whole deal.
+          note: 'Schedules run only while Orderly is open on this machine. If it is closed or asleep when one is due, that run is skipped and counted — never made up later.',
+        });
+      }
+      if (url.pathname === '/api/schedules' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (!getDefinition(body.workflowId, { repoRoot: liveCwd })) return send(404, { error: 'workflow not found' });
+        try {
+          const sc = createSchedule({
+            workflowId: body.workflowId, repoRoot: liveCwd, inputs: body.inputs || {},
+            rule: body.rule, budgetUsd: body.budgetUsd,
+          });
+          broadcast('schedules', { events: [{ id: sc.id, kind: 'created' }] });
+          return send(200, { schedule: { ...sc, describe: describeRule(sc.rule) } });
+        } catch (e) { return send(400, { error: e.message }); }
+      }
+      const schedMatch = url.pathname.match(/^\/api\/schedules\/([^/]+)$/);
+      if (schedMatch && req.method === 'PATCH') {
+        const body = await readBody(req);
+        try {
+          const sc = updateSchedule(schedMatch[1], body);
+          broadcast('schedules', { events: [{ id: sc.id, kind: 'updated' }] });
+          return send(200, { schedule: { ...sc, describe: describeRule(sc.rule) } });
+        } catch (e) { return send(/not found/.test(e.message) ? 404 : 400, { error: e.message }); }
+      }
+      if (schedMatch && req.method === 'DELETE') {
+        const ok = deleteSchedule(schedMatch[1]);
+        if (ok) broadcast('schedules', { events: [{ id: schedMatch[1], kind: 'deleted' }] });
+        return ok ? send(200, { deleted: true }) : send(404, { error: 'schedule not found' });
       }
 
       if (url.pathname === '/api/runs') {
-        const sessionFilter = url.searchParams.get('session');
-        const runs = sessionFilter ? runsForSession(sessionFilter) : listRuns();
-        return send(200, { runs: runs.map(summariseRun) });
+        const q = url.searchParams;
+        const versions = new Map(listDefinitions({ repoRoot: liveCwd }).map((d) => [d.id, d.version || 1]));
+        let runs = q.get('session') ? runsForSession(q.get('session')) : listRuns({ limit: Number(q.get('limit')) || 500 });
+        const all = runs.map((r) => summariseRun(r, versions));
+        // The panel's counts describe everything, whatever is filtered.
+        const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+        const weekStart = dayStart.getTime() - 6 * 86_400_000;
+        const counts = { running: 0, needsYou: 0, failed: 0, interrupted: 0, doneToday: 0 };
+        const spend = { today: 0, week: 0 };
+        for (const r of all) {
+          if (r.needsYou) counts.needsYou++;
+          else if (r.status === 'running') counts.running++;
+          if (r.status === 'failed') counts.failed++;
+          if (r.status === 'interrupted') counts.interrupted++;
+          const t = Date.parse(r.startedAt);
+          if (r.status === 'done' && t >= dayStart.getTime()) counts.doneToday++;
+          if (t >= dayStart.getTime()) spend.today += r.totalCost || 0;
+          if (t >= weekStart) spend.week += r.totalCost || 0;
+        }
+        let shown = all;
+        if (q.get('workflow')) shown = shown.filter((r) => r.workflowId === q.get('workflow'));
+        if (q.get('status')) {
+          const want = q.get('status');
+          shown = shown.filter((r) => want === 'needs-you' ? !!r.needsYou : r.status === want);
+        }
+        if (q.get('since')) {
+          const since = Date.parse(q.get('since'));
+          if (Number.isFinite(since)) shown = shown.filter((r) => Date.parse(r.startedAt) >= since);
+        }
+        // Questions and cut-short runs are listed whatever the filter, so an
+        // old question never hides behind "last 7 days".
+        const waiting = all.filter((r) => r.needsYou);
+        const cutShort = all.filter((r) => r.status === 'interrupted' && !r.needsYou).slice(0, 20);
+        return send(200, { runs: shown, counts, spend, total: all.length, waiting, cutShort });
       }
       const runMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);
       if (runMatch && req.method === 'GET') {
         const run = readRun(runMatch[1], { repoRoot: liveCwd });
-        return run ? send(200, { run }) : send(404, { error: 'run not found' });
+        if (!run) return send(404, { error: 'run not found' });
+        const def = getDefinition(run.workflowId, { repoRoot: run.repoRoot || liveCwd });
+        return send(200, {
+          run,
+          currentVersion: def ? def.version || 1 : null,
+          question: openQuestion(run) || legacyQuestion(run),
+          live: schedulers.has(run.runId),
+          ownedElsewhere: ownedElsewhere(run),
+        });
       }
 
       if (url.pathname === '/api/blob') {
@@ -878,13 +1131,55 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
   // miss our own, and pick whatever unrelated app answered first.
   await openTab(sessionId, { file, cwd, title });
   watcher().focused = true;
+
+  registerRoot(liveCwd);
+  registerRoot(process.cwd());
+
+  // Runs another process left marked live are not running any more.
+  try {
+    const fixed = reconcileRuns({ ownedHere: new Set(schedulers.keys()) });
+    if (fixed.length) console.log(`  ${fixed.length} interrupted run${fixed.length === 1 ? '' : 's'} can be resumed from the Runs page`);
+  } catch (e) { console.error('[orderly-claude] reconcile:', e.message); }
+
+  // Schedules fire only while some Orderly is open, and only from the one
+  // holding the lock, so two windows never fire the same schedule twice.
+  const scheduleTick = async () => {
+    try {
+      if (!acquireLock()) return;
+      const events = await tickSchedules({
+        start: (sc) => {
+          const run = startRun({
+            workflowId: sc.workflowId, inputs: sc.inputs || {}, repoRoot: sc.repoRoot || liveCwd,
+            sessionId: null, trigger: 'schedule', budgetUsd: sc.budgetUsd, scheduleId: sc.id,
+          });
+          startScheduler(run);
+          broadcast('run-start', { runId: run.runId, workflowId: run.workflowId });
+          return run;
+        },
+        isActive: (id) => schedulers.has(id) || ['running', 'awaiting-answer'].includes(readRun(id)?.status),
+        spentToday: scheduledSpendToday,
+        dailyLimit: readSettings().budget.scheduledPerDayUsd,
+      });
+      if (events.length) broadcast('schedules', { events });
+    } catch (e) { console.error('[orderly-claude] schedules:', e.message); }
+  };
+  const scheduleTimer = setInterval(scheduleTick, Number(process.env.ORDERLY_SCHEDULE_TICK_MS) || 60_000);
+  scheduleTimer.unref?.();
+  scheduleTick();
   const close = () => {
     for (const r of runners.values()) r.stop();
-    for (const s of schedulers.values()) s.stop();
+    // Nobody chose to end these runs, so they are left resumable rather than
+    // recorded as though someone had pressed Stop.
+    for (const s of schedulers.values()) s.suspend();
     schedulers.clear();
+    clearInterval(scheduleTimer);
+    releaseLock();
     for (const w of watchers.values()) w.stop();
     shutdownBrowser(); // otherwise the headless Chrome outlives the CLI
     server.close();
+    // An open page holds an event stream for ever; without this the port
+    // stays held until every browser tab gives up.
+    server.closeAllConnections?.();
   };
 
   return { server, watchers, tabs, runners, close };

@@ -41,9 +41,10 @@ const KIND_LABEL = {
   publish: 'Publish', display: 'Display', inputs: 'Inputs',
   loop: 'Loop', delay: 'Delay', approve: 'Approve',
 };
+// Shown only until a step has run and reported the model it actually used.
 const KIND_MODEL = {
-  document: 'claude · opus-4-7', report: 'claude · opus-4-7',
-  mockup: 'skill · frontend-design', diff: 'claude · acceptEdits',
+  document: 'claude', report: 'claude',
+  mockup: 'claude', diff: 'claude',
   shots: 'orderly · capture', 'shots-set': 'orderly · capture',
   terminal: 'bash', ask: 'you', pr: 'github',
   agent: 'claude · cli', script: 'bash', decision: 'you', check: 'orderly',
@@ -93,27 +94,32 @@ if (!runId && !isPreview) {
 
 let run = null;
 let cards = {};
+let meta = {};           // currentVersion, question, live, ownedElsewhere
+let selectedId = null;
+const armed = new Set();
 
 async function load() {
   if (isPreview) {
     // Preview mode: synthesise a run-shaped object from the def so the
     // existing canvas can render the workflow's structure. No scheduler,
     // no outputs; the Run button in the actions bar starts a real run.
-    const r = await fetch(`/api/workflows/${encodeURIComponent(previewDefId)}`).then((x) => x.json());
+    const r = await fetch(`/api/workflows/${encodeURIComponent(previewDefId)}`).then((x) => x.json()).catch(() => ({}));
     if (!r.workflow) {
       document.getElementById('runStatus').textContent = 'Workflow not found.';
       return;
     }
     run = defToPreviewRun(r.workflow);
+    meta = {};
     render();
     return;
   }
-  const r = await fetch(`/api/runs/${encodeURIComponent(runId)}`).then((x) => x.json());
+  const r = await fetch(`/api/runs/${encodeURIComponent(runId)}`).then((x) => x.json()).catch(() => ({}));
   if (!r.run) {
-    document.getElementById('runStatus').textContent = 'Run not found.';
+    document.getElementById('runStatus').textContent = 'Run not found — it may have been deleted.';
     return;
   }
   run = r.run;
+  meta = r;
   render();
 }
 
@@ -141,6 +147,8 @@ function defToPreviewRun(def) {
   };
 }
 
+function money(n) { return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`; }
+
 function render() {
   document.title = `${run.workflowTitle} — Orderly Claude`;
   document.getElementById('crumbTitle').textContent = run.workflowTitle;
@@ -148,39 +156,93 @@ function render() {
   document.getElementById('runCatPip').className    = `pip ${run.category || ''}`;
   const nodes = run.graph?.nodes || [];
   const done = nodes.filter((n) => n.status === 'done').length;
-  // Running total — same roll-up logic as the server summariser so the
-  // header matches the Runs tab row.
   const totals = { cost: 0, tokens: 0, elapsedS: 0 };
   for (const n of nodes) {
     const m = n.output?.meta;
     if (!m) continue;
     if (typeof m.cost === 'number') totals.cost += m.cost;
     if (typeof m.tokens === 'number') totals.tokens += m.tokens;
-    if (typeof m.elapsed === 'string') {
-      const s = parseFloat(m.elapsed);
-      if (Number.isFinite(s)) totals.elapsedS += s;
-    }
+    const s = parseFloat(m.elapsed);
+    if (Number.isFinite(s)) totals.elapsedS += s;
   }
   const totalBits = [];
-  if (totals.cost)    totalBits.push(totals.cost < 0.01 ? `$${totals.cost.toFixed(4)}` : `$${totals.cost.toFixed(3)}`);
+  if (totals.cost) totalBits.push(money(totals.cost));
+  if (run.budgetUsd) totalBits.push(`limit ${money(run.budgetUsd)}`);
   if (totals.elapsedS) totalBits.push(`${totals.elapsedS.toFixed(1)} s`);
-  if (totals.tokens)  totalBits.push(`${totals.tokens} tok`);
   const totalStr = totalBits.length ? ` · <span class="run-totals">${totalBits.join(' · ')}</span>` : '';
   const legacyPill = (run.schemaVersion || 1) < 2
     ? ' · <span class="legacy-pill" title="This run was defined under the pre-v2 schema. Rendered through the compat layer.">legacy</span>'
     : '';
-  const statusLine = isPreview
-    ? `preview · ${nodes.length} node${nodes.length === 1 ? '' : 's'}${legacyPill}`
-    : run.status === 'running'
-      ? `<span class="live-dot"></span>Running · ${done} of ${nodes.length} done${totalStr}${legacyPill}`
-      : `${run.status} · ${done} of ${nodes.length} done${totalStr}${legacyPill}`;
-  document.getElementById('runStatus').innerHTML = statusLine;
-  if (run.sessionId) {
-    document.getElementById('runSession').textContent = `session ${run.sessionId.slice(0, 8)}`;
-  }
+  const word = { running: 'Running', 'awaiting-answer': 'Waiting for you', done: 'Done', failed: 'Failed', stopped: 'Stopped', interrupted: 'Cut short' }[run.status] || run.status;
+  const live = run.status === 'running' || run.status === 'awaiting-answer';
+  document.getElementById('runStatus').innerHTML = isPreview
+    ? `Preview · ${nodes.length} step${nodes.length === 1 ? '' : 's'} · not run yet${legacyPill}`
+    : `${live ? '<span class="live-dot"></span>' : ''}${word} · ${done} of ${nodes.length} done${totalStr}${legacyPill}`;
+  const bits = isPreview ? [] : [run.trigger === 'schedule' ? 'on schedule' : run.trigger === 'you' ? 'started by you' : run.trigger];
+  if (run.sessionId) bits.push(`session ${run.sessionId.slice(0, 8)}`);
+  document.getElementById('runSession').textContent = bits.filter(Boolean).join(' · ');
+  renderNotice();
+  renderAnswer();
   renderPlanRail();
   layoutCanvas();
+  renderTimeline();
   renderRunActions();
+  if (selectedId) openDrawer(selectedId, { keepScroll: true });
+}
+
+/** Why the run is in the state it is, in a sentence, with what to do next. */
+function renderNotice() {
+  const out = [];
+  if (meta.ownedElsewhere) out.push(['info', 'Another Orderly window is running this one. Answer or stop it there.']);
+  if (run.halt?.message) out.push(['warn', run.halt.message]);
+  if (run.status === 'interrupted') {
+    const at = run.interruption?.nodes?.length ? ` during ${run.interruption.nodes.map((id) => `“${titleOf(id)}”`).join(', ')}` : '';
+    out.push(['warn', `Orderly closed while this was running${at}. Finished steps are kept; Resume carries on from there.`]);
+  }
+  const failed = run.graph.nodes.find((n) => n.status === 'failed');
+  if (run.status === 'failed' && !run.halt) {
+    out.push(['bad', failed ? `“${failed.title}” failed: ${failed.output?.error || 'no reason given'}` : (run.error || 'This run failed.')]);
+  }
+  if (meta.currentVersion && run.definitionVersion && meta.currentVersion !== run.definitionVersion) {
+    out.push(['info', `This run used version ${run.definitionVersion} of the workflow; it is on version ${meta.currentVersion} now. Repeating this run repeats what it ran.`]);
+  }
+  document.getElementById('runNotice').innerHTML = out.map(([k, t]) => `<div class="notice ${k}">${esc(t)}</div>`).join('');
+}
+
+function titleOf(id) { return run.graph.nodes.find((n) => n.id === id)?.title || id; }
+
+/** Answer here, where the run is waiting, not somewhere else. */
+function renderAnswer() {
+  const q = meta.question;
+  const mount = document.getElementById('answerPanel');
+  if (!q || meta.ownedElsewhere) { mount.innerHTML = ''; return; }
+  const buttons = q.choices?.length
+    ? q.choices.map((c) => `<button class="answer-btn ${/reject|^no$/i.test(c) ? 'neg' : ''}" data-answer="${esc(c)}">${esc(c)}</button>`).join('')
+    : '<input class="answer-text" id="answerText" placeholder="Your answer"><button class="answer-btn" id="answerSend">Answer</button>';
+  mount.innerHTML = `<div class="answer-panel">
+    <div class="ap-eyebrow">Waiting for you · ${esc(q.title)}</div>
+    <div class="ap-q">${esc(q.question)}</div>
+    <div class="need-actions">${buttons}<span class="need-status" id="apStatus"></span></div>
+  </div>`;
+  const send = async (answer) => {
+    document.getElementById('apStatus').textContent = 'Sending…';
+    const r = await post(`/api/runs/${encodeURIComponent(run.runId)}/answer`, { nodeId: q.nodeId, answer });
+    if (r.answered) { document.getElementById('apStatus').textContent = 'Answered.'; load(); }
+    else { const el = document.getElementById('apStatus'); el.textContent = r.error || 'Could not answer.'; el.classList.add('bad'); }
+  };
+  mount.querySelectorAll('[data-answer]').forEach((b) => { b.onclick = () => send(b.dataset.answer); });
+  const box = mount.querySelector('#answerText');
+  if (box) {
+    mount.querySelector('#answerSend').onclick = () => send(box.value.trim());
+    box.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(box.value.trim()); });
+  }
+}
+
+async function post(url, body = {}, method = 'POST') {
+  const r = await fetch(url, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  let j = {};
+  try { j = await r.json(); } catch { /* empty */ }
+  return { status: r.status, ...j };
 }
 
 function renderRunActions() {
@@ -196,94 +258,108 @@ function renderRunActions() {
       <a class="run-btn" href="/workflow-editor.html?from=${encodeURIComponent(run.workflowId)}"
          title="Open this workflow in the visual editor">✎ Edit</a>
       <button class="run-btn" data-act="run-preview"
-              title="Open the inputs sheet and run this workflow">◆ Run</button>`;
+              title="Fill in its inputs and run it">◆ Run</button>`;
     bar.querySelector('[data-act="run-preview"]').onclick = runFromPreview;
     return;
   }
-  const terminal = ['done', 'failed', 'stopped'].includes(run.status);
+  const live = (run.status === 'running' || run.status === 'awaiting-answer') && !meta.ownedElsewhere;
+  const resumable = ['interrupted', 'stopped', 'failed'].includes(run.status);
+  const sel = selectedId && run.graph.nodes.find((n) => n.id === selectedId);
+  const del = armed.has('delete');
   bar.innerHTML = `
-    <button class="run-btn" data-act="rerun-all" ${terminal ? '' : 'disabled'}
-            title="Clone this run and start from the top">↻ Rerun</button>
-    <button class="run-btn" data-act="share" title="Signed URL to a static copy of this run">◎ Share</button>
-    <button class="run-btn danger" data-act="delete"
-            title="Delete this run folder">✕ Delete</button>`;
-  bar.querySelector('[data-act="rerun-all"]').onclick = () => rerunFromCanvas(null);
-  bar.querySelector('[data-act="share"]').onclick = async () => {
-    const btn = bar.querySelector('[data-act="share"]');
-    const prev = btn.textContent;
-    btn.textContent = 'Signing…';
-    try {
-      const r = await fetch(`/api/runs/${encodeURIComponent(run.runId)}/share`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
-      }).then((x) => x.json());
-      if (!r.url) throw new Error(r.error || 'no url');
-      await navigator.clipboard?.writeText(r.url).catch(() => {});
-      btn.textContent = '◎ Copied';
-      window.open(r.url, '_blank', 'noopener');
-      setTimeout(() => { btn.textContent = prev; }, 1800);
-    } catch (e) {
-      btn.textContent = prev;
-      alert(`Share failed: ${e.message}`);
+    ${live ? '<button class="run-btn danger" data-act="stop" title="Stop this run now">■ Stop</button>' : ''}
+    ${resumable && !run.halt ? '<button class="run-btn" data-act="resume" title="Carry on from where it stopped; finished steps are not repeated">▸ Resume</button>' : ''}
+    ${run.halt?.type === 'budget' ? `<span class="raise">Raise the limit to $<input class="raise-in" id="raiseIn" inputmode="decimal" value="${(run.halt.limitUsd * 2).toFixed(2)}"><button class="run-btn" data-act="raise">and resume</button></span>` : ''}
+    ${!live ? '<button class="run-btn" data-act="rerun" title="Repeat exactly what this run ran">⟲ Repeat</button>' : ''}
+    ${!live && sel ? `<button class="run-btn" data-act="rerun-from" title="Keep everything before this step, run again from it">⟲ Repeat from “${esc(sel.title)}”</button>` : ''}
+    ${!live ? `<a class="run-btn" href="/workflows.html?open=${encodeURIComponent(run.workflowId)}&again=${encodeURIComponent(run.runId)}#workflows" title="Run the workflow again with these inputs, editable first">↻ Again with changes</a>` : ''}
+    <button class="run-btn" data-act="share" title="Signed link to a static copy of this run">◎ Share</button>
+    ${!live ? `<button class="run-btn danger" data-act="delete" title="Delete this run">${del ? 'Click again to delete' : '✕ Delete'}</button>` : ''}
+    <div class="choice-slot" id="resumeChoice"></div>
+    <span class="need-status" id="actStatus"></span>`;
+  const say = (t, bad) => { const el = bar.querySelector('#actStatus'); el.textContent = t; el.classList.toggle('bad', !!bad); };
+  const act = (name, fn) => { const b = bar.querySelector(`[data-act="${name}"]`); if (b) b.onclick = fn; };
+  act('stop', async () => { const r = await post(`/api/runs/${run.runId}/stop`); if (!r.stopped) say(r.error || 'Could not stop it.', true); load(); });
+  act('resume', () => resume());
+  act('raise', () => resume({ budgetUsd: Number(bar.querySelector('#raiseIn').value) }));
+  act('rerun', () => rerunFromCanvas(null));
+  act('rerun-from', () => rerunFromCanvas(selectedId));
+  act('share', async () => {
+    const b = bar.querySelector('[data-act="share"]');
+    const r = await post(`/api/runs/${encodeURIComponent(run.runId)}/share`);
+    if (!r.url) { say(r.error || 'Could not make a link.', true); return; }
+    await navigator.clipboard?.writeText(r.url).catch(() => {});
+    b.textContent = '◎ Copied';
+    window.open(r.url, '_blank', 'noopener');
+  });
+  act('delete', async () => {
+    if (!armed.has('delete')) {
+      armed.add('delete'); renderRunActions();
+      setTimeout(() => { if (armed.delete('delete')) renderRunActions(); }, 3000);
+      return;
     }
-  };
-  bar.querySelector('[data-act="delete"]').onclick = async () => {
-    if (!confirm('Delete this run? The folder and all its outputs will be removed.')) return;
-    try {
-      const r = await fetch(`/api/runs/${encodeURIComponent(run.runId)}`, { method: 'DELETE' }).then((x) => x.json());
-      if (r.deleted) { location.href = '/workflows.html#runs'; return; }
-      throw new Error(r.error || 'delete failed');
-    } catch (e) { alert(`Delete failed: ${e.message}`); }
-  };
+    const r = await post(`/api/runs/${encodeURIComponent(run.runId)}`, {}, 'DELETE');
+    if (r.deleted) location.href = '/workflows.html#runs';
+    else say(r.error || 'Could not delete it.', true);
+  });
+
+  async function resume(extra = {}, choices = {}) {
+    say('Resuming…');
+    const r = await post(`/api/runs/${run.runId}/resume`, { ...extra, choices });
+    if (r.needsChoice) {
+      say('');
+      const picked = { ...choices };
+      bar.querySelector('#resumeChoice').innerHTML = r.needsChoice.map((c) => `<div class="choice">
+        <div><b>${esc(c.title)}</b> was running when this stopped${c.command ? ` (<code>${esc(c.command)}</code>)` : ''}, and is marked as not safe to repeat. Did it finish?</div>
+        <div class="need-actions">
+          <button class="answer-btn" data-node="${esc(c.nodeId)}" data-val="assume-done">It already happened — carry on after it</button>
+          <button class="answer-btn neg" data-node="${esc(c.nodeId)}" data-val="repeat">Run it again</button>
+        </div></div>`).join('');
+      bar.querySelectorAll('#resumeChoice [data-val]').forEach((b) => {
+        b.onclick = () => {
+          picked[b.dataset.node] = b.dataset.val;
+          if (r.needsChoice.every((c) => picked[c.nodeId])) resume(extra, picked);
+          else b.closest('.choice').classList.add('chosen');
+        };
+      });
+      return;
+    }
+    if (r.resumed) { load(); return; }
+    say(r.error || 'Could not resume it.', true);
+  }
 }
 
 /**
- * Preview-mode Run. If the def has declared inputs, prompt for each one;
- * otherwise skip straight to the POST. On success, jump to the real run
- * canvas so the user watches the scheduler march.
+ * Preview-mode Run: the workflow's own sheet, which collects every input
+ * (including an Inputs step's fields) and reports problems inline, rather
+ * than a browser prompt per field.
  */
-async function runFromPreview() {
-  const def = run._def || {};
-  const fields = Array.isArray(def.inputs) ? def.inputs : [];
-  const inputs = {};
-  for (const f of fields) {
-    const label = f.label || f.key;
-    const val = window.prompt(`${label}${f.placeholder ? ` (e.g. ${f.placeholder})` : ''}`, '');
-    if (val === null) return; // user cancelled
-    if (val.trim()) inputs[f.key] = val.trim();
-  }
-  try {
-    const r = await fetch(`/api/workflows/${encodeURIComponent(def.id)}/run`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ inputs }),
-    }).then((x) => x.json());
-    if (!r.run?.runId) throw new Error(r.error || 'run failed to start');
-    location.hash = r.run.runId;
-    location.reload();
-  } catch (e) { alert(`Run failed: ${e.message}`); }
+function runFromPreview() {
+  location.href = `/workflows.html?open=${encodeURIComponent(run.workflowId)}#workflows`;
 }
 
 async function rerunFromCanvas(fromNodeId) {
-  try {
-    const r = await fetch(`/api/runs/${encodeURIComponent(run.runId)}/rerun`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ fromNodeId }),
-    }).then((x) => x.json());
-    if (r.run?.runId) { location.href = `/workflows-run.html#${r.run.runId}`; return; }
-    throw new Error(r.error || 'rerun failed');
-  } catch (e) { alert(`Rerun failed: ${e.message}`); }
+  const r = await post(`/api/runs/${encodeURIComponent(run.runId)}/rerun`, { fromNodeId });
+  if (r.run?.runId) { location.href = `/workflows-run.html#${r.run.runId}`; return; }
+  const el = document.getElementById('actStatus');
+  if (el) { el.textContent = r.error || 'Could not repeat it.'; el.classList.add('bad'); }
 }
 
 function renderPlanRail() {
   const mount = document.getElementById('rail');
   mount.innerHTML = '';
   for (const n of run.graph.nodes) {
-    const kls = n.status === 'done' ? 'done'
-      : n.status === 'running' ? 'running'
-      : (n.kind === 'ask' || n.kind === 'decision' || n.kind === 'approve') ? 'ask'
+    const kls = n.waitsFor === 'you' ? 'ask'
+      : ['done', 'running', 'failed', 'skipped', 'interrupted', 'stopped'].includes(n.status) ? n.status
       : 'waits';
-    const state = n.status === 'done' ? 'Done'
-      : n.status === 'running' ? (n.progress || 'Making…')
-      : n.waitsFor ? `Waits for ${n.waitsFor}` : 'Pending';
+    const state = n.waitsFor === 'you' ? 'Waiting for you'
+      : n.status === 'done' ? (n.durationMs ? `Done · ${dur(n.durationMs)}${n.attempts > 1 ? ` · ${n.attempts} tries` : ''}` : 'Done')
+      : n.status === 'running' ? (n.progress || 'Working…')
+      : n.status === 'failed' ? 'Failed'
+      : n.status === 'skipped' ? 'Skipped — another branch was taken'
+      : n.status === 'interrupted' ? 'Cut short'
+      : n.status === 'stopped' ? 'Stopped'
+      : 'Not started';
     const row = document.createElement('div');
     row.className = 'item';
     row.dataset.id = n.id;
@@ -304,13 +380,17 @@ function layoutCanvas() {
   canvas.querySelectorAll('.card').forEach((el) => el.remove());
   cards = {};
   const PAD = 32, CARD_W = 220, COL_GAP = 40, ROW_H = 240;
+  // Columns may start at 0 or 1 depending on who placed them; lay out from
+  // whichever is leftmost so nothing lands off the canvas.
+  const cols = run.graph.nodes.map((n) => n.col || 0);
+  const minCol = Math.min(...cols);
   for (const n of run.graph.nodes) {
-    const left = PAD + (n.col - 1) * (CARD_W + COL_GAP);
-    const top  = PAD + n.row * ROW_H;
+    const left = PAD + ((n.col || 0) - minCol) * (CARD_W + COL_GAP);
+    const top  = PAD + (n.row || 0) * ROW_H;
     cards[n.id] = makeCard(n, { left, top, width: CARD_W }, canvas);
   }
-  const maxCol = Math.max(...run.graph.nodes.map((n) => n.col));
-  const maxRow = Math.max(...run.graph.nodes.map((n) => n.row));
+  const maxCol = Math.max(...cols) - minCol + 1;
+  const maxRow = Math.max(...run.graph.nodes.map((n) => n.row || 0));
   canvas.style.width  = `${PAD * 2 + maxCol * (CARD_W + COL_GAP)}px`;
   canvas.style.height = `${PAD * 2 + (maxRow + 1) * ROW_H}px`;
   requestAnimationFrame(() => requestAnimationFrame(() => drawEdges(canvas, edges)));
@@ -370,8 +450,11 @@ function cardBody(n) {
     || (n.kind === 'script' && !!n.output?.pairs)
     || (n.kind === 'document' && !!n.output?.body)
     || (n.kind === 'agent' && !!n.output?.body);
-  if (n.status === 'waits')   return `<div class="wait-note">Waits for ${esc(n.waitsFor || 'upstream nodes')}</div>`;
-  if (n.status === 'pending') return `<div class="wait-note">Pending</div>`;
+  // Before the running check: a step waiting on a person is technically running.
+  if (n.waitsFor === 'you') {
+    return `<div class="ask-q">${esc(n.output?.question || 'Waiting for you.')}</div><div class="ask-cta">◆ Answer on the left</div>`;
+  }
+  if (n.status === 'pending') return `<div class="wait-note">Not started</div>`;
   if (n.status === 'running' && !selfProgress) {
     return `<div class="running-note"><span class="dot-pulse"></span>${esc(n.progress || 'Making…')}</div>`;
   }
@@ -382,6 +465,13 @@ function cardBody(n) {
   if (n.status === 'stopped') {
     return `<div class="wait-note">Stopped before it finished.</div>`;
   }
+  if (n.status === 'interrupted') {
+    return `<div class="wait-note">Cut short when Orderly closed. Resume runs it again.</div>`;
+  }
+  if (n.status === 'skipped') {
+    return `<div class="wait-note">Skipped — a choice earlier took another branch.</div>`;
+  }
+
   const o = n.output || {};
   // v2 kinds that aren't covered by the legacy render switch — handle first.
   if (n.kind === 'check' && typeof o.pass === 'boolean') {
@@ -477,7 +567,9 @@ function cardBody(n) {
         <div class="pr-body">${esc(o.bodyPreview || '').replace(/\n/g, '<br>')}</div>
         ${o.url ? `<a class="pr-url">${esc(o.url)} →</a>` : ''}`;
     case 'ask':
-      return `<div class="ask-q">${esc(o.question || 'Decide here.')}</div><div class="ask-cta">◆ Open to answer →</div>`;
+      return o.answer !== undefined
+        ? `<div class="ask-q">${esc(o.question || '')}</div><div class="ask-cta answered">You chose: ${esc(String(o.answer))}</div>`
+        : `<div class="ask-q">${esc(o.question || 'Decide here.')}</div>`;
     case 'diff': {
       const hunks = (o.hunks || []).slice(0, 3);
       const rows = hunks.map((h) => `<div class="hunk-row ${esc(h.op)}"><span class="sign">${h.op === 'add' ? '+' : h.op === 'del' ? '−' : ' '}</span><span>${esc(h.line)}</span></div>`).join('');
@@ -524,25 +616,103 @@ function nse(tag, attrs) {
 }
 
 function selectNode(id) {
+  selectedId = id;
   for (const el of document.querySelectorAll('.card.sel, .plan-rail .item.sel')) el.classList.remove('sel');
   document.querySelector(`.card[data-id="${id}"]`)?.classList.add('sel');
   document.querySelector(`.plan-rail .item[data-id="${id}"]`)?.classList.add('sel');
-  // Offer "rerun from here" on the actions bar when the run is terminal.
-  const bar = document.getElementById('runActions');
-  if (!bar) return;
-  const terminal = ['done', 'failed', 'stopped'].includes(run.status);
-  let fromBtn = bar.querySelector('[data-act="rerun-from"]');
-  if (!terminal) { fromBtn?.remove(); return; }
-  if (!fromBtn) {
-    fromBtn = document.createElement('button');
-    fromBtn.className = 'run-btn';
-    fromBtn.dataset.act = 'rerun-from';
-    bar.prepend(fromBtn);
-  }
-  const node = run.graph.nodes.find((n) => n.id === id);
-  fromBtn.textContent = `↻ Rerun from ${node?.title || id}`;
-  fromBtn.title = 'Clone this run, keep outputs upstream of this node, re-run from here';
-  fromBtn.onclick = () => rerunFromCanvas(id);
+  renderRunActions();
+  openDrawer(id);
+}
+
+function dur(ms) {
+  if (!Number.isFinite(ms)) return '';
+  if (ms < 1000) return `${ms} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
+  return `${Math.floor(ms / 60_000)} min ${Math.round((ms % 60_000) / 1000)} s`;
+}
+
+/** Everything about one step: what it was set to do, given, made, and why it failed. */
+function openDrawer(id, { keepScroll = false } = {}) {
+  const n = run.graph.nodes.find((x) => x.id === id);
+  if (!n) return;
+  const drawer = document.getElementById('drawer');
+  const body = document.getElementById('drawerBody');
+  const scroll = drawer.scrollTop;
+  const o = n.output || {};
+  const s = n.spec || {};
+  const sec = (h, inner) => inner ? `<div class="dr-sec"><div class="dr-h">${h}</div>${inner}</div>` : '';
+  const pre = (t, cls = '') => `<pre class="dr-pre ${cls}">${esc(String(t))}</pre>`;
+  const started = n.startedAt ? new Date(n.startedAt).toLocaleTimeString() : null;
+  const facts = [
+    ['Status', n.waitsFor === 'you' ? 'waiting for you' : n.status],
+    ['Started', started],
+    ['Took', n.durationMs ? dur(n.durationMs) : n.startedAt && n.endedAt ? dur(Date.parse(n.endedAt) - Date.parse(n.startedAt)) : null],
+    ['Tries', n.attempts > 1 ? String(n.attempts) : null],
+    ['Model', o.meta?.model || s.model || null],
+    ['Cost', typeof o.meta?.cost === 'number' ? money(o.meta.cost) : null],
+  ].filter(([, v]) => v);
+  const authored = s.prompt || s.cmd || s.question || n.prompt || n.command || null;
+  let made = '';
+  if (o.body) made = pre(o.body);
+  else if (o.out !== undefined) made = pre(`${o.prompt ? `${o.prompt}\n` : ''}${o.out || '(no output)'}${o.code !== undefined ? `\n\nexit ${o.code}` : ''}`, 'term');
+  else if (o.findings) made = `<ul class="dr-list">${o.findings.map((f) => `<li><b>${esc(f.tag)}</b> ${esc(f.text)}</li>`).join('')}</ul>`;
+  else if (o.answer !== undefined) made = `<div class="dr-answer">${esc(String(o.answer))}</div>`;
+  else if (o.pass !== undefined) made = `<div class="dr-answer ${o.pass ? '' : 'bad'}">${o.pass ? 'Passed' : 'Did not pass'} — ${esc(o.reason || '')}</div>`;
+  else if (o.results) made = `<ul class="dr-list">${o.results.map((r) => `<li><b>${esc(String(r.item))}</b> ${esc(String(r.error || r.text || r.out || '').slice(0, 300))}</li>`).join('')}</ul>${o.note ? `<div class="dr-note">${esc(o.note)}</div>` : ''}`;
+  else if (o.data !== undefined) made = pre(typeof o.data === 'string' ? o.data : JSON.stringify(o.data, null, 2));
+  else if (o.html) made = pre(o.html);
+  else if (o.path) made = `<div class="dr-answer">Wrote <code>${esc(o.path)}</code>${o.bytes != null ? ` · ${o.bytes} bytes` : ''}</div>${o.body ? pre(o.body) : ''}`;
+  else if (o.note) made = `<div class="dr-note">${esc(o.note)}</div>`;
+  else if (o.title) made = `<div class="dr-answer">${esc(o.title)}</div>`;
+  const terminal = !['running', 'awaiting-answer'].includes(run.status);
+  body.innerHTML = `
+    <div class="dr-kind">${esc(KIND_LABEL[n.kind] || n.kind)}</div>
+    <h3 class="dr-title">${esc(n.title || n.id)}</h3>
+    <dl class="dr-facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
+    ${n.status === 'failed' ? sec('Why it failed', `<div class="fail-note">${esc(o.error || 'No reason was recorded.')}</div>`) : ''}
+    ${n.lastError && n.status !== 'failed' ? sec('Earlier try failed', `<div class="dr-note">${esc(n.lastError)}</div>`) : ''}
+    ${sec('Set up to', authored ? pre(authored) : '')}
+    ${sec('What it was given', n.sent && n.sent.replace(/^\$ /, '') !== authored ? pre(n.sent) : '')}
+    ${sec('What it produced', made)}
+    ${terminal && n.status !== 'pending' ? `<button class="run-btn" id="drRerun">⟲ Repeat from this step</button>` : ''}`;
+  body.querySelector('#drRerun')?.addEventListener('click', () => rerunFromCanvas(n.id));
+  drawer.setAttribute('aria-hidden', 'false');
+  drawer.classList.add('on');
+  if (keepScroll) drawer.scrollTop = scroll;
+}
+
+document.getElementById('drawerClose').onclick = () => {
+  document.getElementById('drawer').classList.remove('on');
+  document.getElementById('drawer').setAttribute('aria-hidden', 'true');
+  selectedId = null;
+  for (const el of document.querySelectorAll('.card.sel, .plan-rail .item.sel')) el.classList.remove('sel');
+  renderRunActions();
+};
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') document.getElementById('drawerClose').click(); });
+
+/** Each step as a bar against the run's clock, so a slow one shows as a long bar. */
+function renderTimeline() {
+  const el = document.getElementById('timeline');
+  const timed = run.graph.nodes.filter((n) => n.startedAt);
+  if (!timed.length) { el.classList.add('hidden'); return; }
+  const t0 = Math.min(...timed.map((n) => Date.parse(n.startedAt)));
+  const now = Date.now();
+  const end = (n) => (n.endedAt ? Date.parse(n.endedAt) : now);
+  const t1 = Math.max(...timed.map(end), t0 + 1000);
+  const span = t1 - t0;
+  el.classList.remove('hidden');
+  el.innerHTML = `<div class="tl-head"><span>Timeline</span><span>${dur(span)}</span></div>` + timed
+    .sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt))
+    .map((n) => {
+      const left = ((Date.parse(n.startedAt) - t0) / span) * 100;
+      const width = Math.max(0.6, ((end(n) - Date.parse(n.startedAt)) / span) * 100);
+      const st = n.waitsFor === 'you' ? 'ask' : n.status;
+      return `<div class="tl-row" data-id="${esc(n.id)}" title="${esc(n.title)} · ${dur(end(n) - Date.parse(n.startedAt))}">
+        <span class="tl-name">${esc(n.title)}</span>
+        <span class="tl-track"><span class="tl-bar ${st}" style="left:${left}%;width:${width}%"></span></span>
+        <span class="tl-dur">${dur(end(n) - Date.parse(n.startedAt))}</span></div>`;
+    }).join('');
+  el.querySelectorAll('.tl-row').forEach((r) => { r.onclick = () => selectNode(r.dataset.id); });
 }
 
 function esc(s) {
@@ -558,9 +728,18 @@ function blobUrl(ref) {
 /* Live updates — the broadcast carries no run payload, so refetch on signal.
  * `?snapshot=1` skips the stream so headless screenshotters can finish loading. */
 if (!new URLSearchParams(location.search).has('snapshot')) {
+  // Every run's events arrive here; reload only for this one, and at most a
+  // few times a second while a step streams.
   const src = new EventSource('/events');
-  src.addEventListener('update',    () => load().catch(() => {}));
-  src.addEventListener('run-start', () => load().catch(() => {}));
+  let pending = null;
+  const mine = (e) => {
+    let id = null;
+    try { id = JSON.parse(e.data || '{}').runId; } catch { /* no payload */ }
+    if (id && id !== runId) return;
+    clearTimeout(pending);
+    pending = setTimeout(() => load().catch(() => {}), 120);
+  };
+  for (const ev of ['update', 'run-start', 'run-finish']) src.addEventListener(ev, mine);
 }
 window.addEventListener('resize', () => run && drawEdges(document.getElementById('canvas'), document.getElementById('edges')));
 
