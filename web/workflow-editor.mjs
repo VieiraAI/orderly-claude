@@ -1,0 +1,1207 @@
+/*
+ * Visual workflow editor. Nodes are draggable cards on a dot-grid canvas,
+ * edges are SVG curves between card edges. The header holds the workflow's
+ * identity, Add node, and save; the sidebar opens for the selected step or
+ * for the workflow's settings, and gets out of the way otherwise. A JSON
+ * mode swaps the canvas for the raw def as an escape hatch.
+ *
+ * The people using this did not write Orderly, so every field the engine
+ * reads has a control here, named for what it does, and nothing here opens a
+ * browser dialog: they block automation and read worse than saying it inline.
+ *
+ * Node coordinates are stored on the def as `col`/`row`. The editor keeps
+ * pixel positions in parallel so dragging is smooth and the saved def
+ * reflects what the user placed on screen (snapped to a 20px grid).
+ */
+const $ = (id) => document.getElementById(id);
+const COL_W = 240, ROW_H = 180, GUTTER = 60;
+
+const KIND_GLYPH = {
+  // legacy
+  document: '📄', report: '✎', mockup: '▦', diff: '±',
+  shots: '◫', 'shots-set': '▦▦', terminal: '>_', ask: '?', pr: '↑',
+  // v2
+  agent: '◆', script: '>_', decision: '◇', check: '✓',
+  publish: '↑', display: '▦', inputs: '≡',
+  loop: '↻', delay: '◷', approve: '✓',
+};
+
+/** What each kind does, said plainly. Order is the order offered. */
+const KINDS = {
+  agent:    { name: 'Ask Claude',        desc: 'Claude does a piece of thinking or writing' },
+  script:   { name: 'Run a command',     desc: 'A shell command in the project, or a screenshot' },
+  decision: { name: 'Ask me to choose',  desc: 'You pick; only that branch runs' },
+  approve:  { name: 'Ask me to approve', desc: 'Waits for you; reject ends the run' },
+  check:    { name: 'Check',             desc: 'Stops the run if something is wrong' },
+  loop:     { name: 'Repeat for each',   desc: 'Does one thing per item in a list' },
+  publish:  { name: 'Save or publish',   desc: 'Writes a file, or drafts a PR' },
+  display:  { name: 'Show together',     desc: 'Gathers earlier results side by side' },
+  delay:    { name: 'Wait',              desc: 'Pauses for a set time' },
+  inputs:   { name: 'Ask for inputs',    desc: 'Fields filled in when the run starts' },
+};
+const LEGACY = { document: 'Document', report: 'Report', mockup: 'Mockup', diff: 'Diff', shots: 'Screenshot',
+  'shots-set': 'Screenshots', terminal: 'Terminal', ask: 'Question', pr: 'Pull request' };
+
+/** Starter spec per v2 kind so a freshly-added node is immediately valid. */
+const KIND_SPEC_DEFAULT = {
+  agent:    () => ({ model: 'sonnet', output: 'markdown', prompt: '' }),
+  script:   () => ({ cmd: '' }),
+  decision: () => ({ question: 'Which way?', options: [{ label: 'Yes', edgeLabel: 'yes' }, { label: 'No', edgeLabel: 'no' }] }),
+  check:    () => ({ assert: { type: 'exit-zero', from: '' } }),
+  publish:  () => ({ target: 'file', path: 'outputs/result.md' }),
+  display:  () => ({ render: 'markdown', from: [] }),
+  inputs:   () => ({ fields: [{ key: 'topic', label: 'Topic', type: 'text' }] }),
+  loop:     () => ({ over: '{{inputs.items}}', action: 'agent', prompt: 'Do this for {{item}}.', max: 20, concurrency: 2 }),
+  delay:    () => ({ wait: '30s' }),
+  approve:  () => ({ question: 'Does this look right?' }),
+};
+
+const SCOPE_HINT = {
+  user: 'Kept in your own library (~/.claude/workflows), so it follows you into every project.',
+  project: 'Kept inside this project (.claude/workflows). Commit it to share it with whoever works on the project.',
+};
+
+const state = {
+  def: null,
+  loaded: null,        // { id, scope } once it exists on disk
+  builtin: false,
+  selectedId: null,
+  connectFromId: null,
+  side: null,          // 'settings' when the sidebar shows the workflow
+  mode: 'visual',
+  dirty: false,
+  idTouched: false,
+  problems: [],
+  warnings: [],
+  skills: [],
+  refField: null,      // the field a reference will be inserted into
+};
+
+/* ---------------------------------- init --------------------------------- */
+
+async function boot() {
+  // /workflow-editor.html?from=<id> loads an existing def into the editor so
+  // "Edit" on a workflow's preview page lands you in a prefilled editor.
+  const q = new URLSearchParams(location.search);
+  const from = q.get('from') || q.get('id');
+  if (from) await loadExisting(from);
+  else state.def = blank();
+  fetch('/api/skills').then((x) => x.json()).then((r) => { state.skills = r.skills || []; if (state.selectedId) renderSelected(); }).catch(() => {});
+  fillKindPickers();
+  bindUi();
+  render();
+  markSaved(!!state.loaded, state.def.version);
+  validateSoon();
+}
+
+/**
+ * New workflows start from an empty canvas. Someone building their own
+ * process should not have to delete template steps first; templates come
+ * from opening a built-in, which saves as their own copy.
+ */
+function blank() {
+  return normalise({ schemaVersion: 2, id: '', title: '', inputs: [], graph: { nodes: [], edges: [] } });
+}
+
+function normalise(def) {
+  def.schemaVersion = def.schemaVersion || 2;
+  def.inputs = Array.isArray(def.inputs) ? def.inputs : [];
+  def.graph = def.graph || {};
+  def.graph.nodes = def.graph.nodes || [];
+  def.graph.edges = def.graph.edges || [];
+  return def;
+}
+
+async function loadExisting(id) {
+  const r = await fetch(`/api/workflows/${encodeURIComponent(id)}`).then((x) => x.json()).catch(() => ({}));
+  if (!r.workflow) { state.def = blank(); toast(`There is no workflow called "${id}".`, 'err'); return; }
+  // Drop server-side fields that aren't part of the on-disk def.
+  const { scope, source, file, invalid, problems, ...clean } = r.workflow;
+  state.def = normalise(clean);
+  state.builtin = scope === 'builtin';
+  state.loaded = state.builtin ? null : { id: clean.id, scope };
+  // A built-in saves as the person's own copy, in their library.
+  $('wfScope').value = state.builtin ? 'user' : scope;
+  document.title = `${clean.title || clean.id} — workflow editor`;
+}
+
+function fillKindPickers() {
+  $('newKind').innerHTML = Object.entries(KINDS).map(([k, v]) => `<option value="${k}">${escapeHtml(v.name)}</option>`).join('');
+  const showDesc = () => { $('newKindDesc').textContent = KINDS[$('newKind').value]?.desc || ''; };
+  $('newKind').addEventListener('change', showDesc);
+  showDesc();
+  $('selKind').innerHTML = Object.entries(KINDS).map(([k, v]) => `<option value="${k}">${escapeHtml(v.name)}</option>`).join('')
+    + `<optgroup label="Older kinds">${Object.entries(LEGACY).map(([k, v]) => `<option value="${k}">${escapeHtml(v)}</option>`).join('')}</optgroup>`;
+}
+
+function bindUi() {
+  $('wfTitle').addEventListener('input', () => {
+    state.def.title = $('wfTitle').value;
+    // Until it is saved, the short name follows the name.
+    if (!state.loaded && !state.idTouched) $('wfId').value = state.def.id = slug(state.def.title);
+    changed({ redraw: false });
+  });
+  $('wfId').addEventListener('input', () => { state.idTouched = true; state.def.id = slug($('wfId').value, true); changed({ redraw: false }); });
+  $('wfId').addEventListener('change', () => { $('wfId').value = state.def.id = slug($('wfId').value); changed({ redraw: false }); });
+  $('wfScope').addEventListener('change', () => { renderScopeHint(); changed({ redraw: false }); });
+  $('wfDesc').addEventListener('input', () => { state.def.desc = $('wfDesc').value; changed({ redraw: false }); });
+  $('wfCategory').addEventListener('change', () => { state.def.category = $('wfCategory').value; changed({ redraw: false }); });
+  $('wfEstimate').addEventListener('input', () => { state.def.estimate = $('wfEstimate').value; changed({ redraw: false }); });
+  $('wfBudget').addEventListener('input', () => {
+    const v = $('wfBudget').value.trim();
+    if (v === '') delete state.def.budgetUsd; else state.def.budgetUsd = Number(v);
+    changed({ redraw: false });
+  });
+  $('wfConcurrency').addEventListener('change', () => {
+    const v = $('wfConcurrency').value;
+    if (v === '') delete state.def.concurrency; else state.def.concurrency = Number(v);
+    changed({ redraw: false });
+  });
+  $('btnAddInput').addEventListener('click', () => {
+    state.def.inputs.push({ key: `input${state.def.inputs.length + 1}`, label: '', placeholder: '' });
+    changed();
+  });
+  $('btnSettings').addEventListener('click', () => {
+    state.side = state.side === 'settings' ? null : 'settings';
+    if (state.side) state.selectedId = null;
+    render();
+  });
+  $('btnCloseSettings').addEventListener('click', () => { state.side = null; render(); });
+  $('btnExport').addEventListener('click', () => { if (state.loaded) location.href = `/api/workflows/${encodeURIComponent(state.loaded.id)}/export`; });
+  $('importFile').addEventListener('change', importFile);
+  $('btnDeleteWf').addEventListener('click', deleteWorkflow);
+
+  // Add-node floater: button opens the popover; the Add inside it drops a node.
+  $('btnAddNodeOpen')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('addPop').classList.toggle('on');
+  });
+  $('btnAddNode').addEventListener('click', (e) => {
+    e.stopPropagation();
+    addNode();
+    $('addPop').classList.remove('on');
+  });
+  // Click anywhere else closes the popovers.
+  document.addEventListener('click', (e) => {
+    const pop = $('addPop');
+    if (pop?.classList.contains('on') && !e.target.closest('.add-wrap')) pop.classList.remove('on');
+    if (!e.target.closest('#refPop') && !e.target.closest('.ref-btn')) closeRefPop();
+  });
+  $('btnDelete').addEventListener('click', deleteSelected);
+  $('btnConnect').addEventListener('click', () => {
+    state.connectFromId = state.connectFromId ? null : state.selectedId;
+    render();
+  });
+  $('selId').addEventListener('change', () => renameSelected(slug($('selId').value)));
+  $('selTitle').addEventListener('input', () => { const n = selectedNode(); if (!n) return; n.title = $('selTitle').value; changed({ redraw: 'canvas' }); });
+  $('selKind').addEventListener('change', () => changeKind($('selKind').value));
+  $('selCost').addEventListener('change', () => patchSelected({ cost: Number($('selCost').value) || 1 }));
+
+  for (const [id, apply] of [
+    ['advRetries', (n, v) => { if (Number(v)) n.spec.retry = { ...(n.spec.retry || {}), attempts: Number(v) }; else delete n.spec.retry; }],
+    ['advBackoff', (n, v) => { if (n.spec.retry) n.spec.retry.backoffMs = Number(v); }],
+    ['advTimeout', (n, v) => { if (v) n.spec.timeoutMs = Number(v); else delete n.spec.timeoutMs; }],
+  ]) {
+    $(id).addEventListener('change', () => { const n = selectedNode(); if (!n) return; n.spec = n.spec || {}; apply(n, $(id).value); changed({ redraw: 'canvas' }); renderSelected(); });
+  }
+  $('advIdem').addEventListener('change', () => {
+    const n = selectedNode(); if (!n) return; n.spec = n.spec || {};
+    if ($('advIdem').checked) delete n.spec.idempotent; else n.spec.idempotent = false;
+    changed({ redraw: 'canvas' });
+  });
+  $('advAllow').addEventListener('change', () => {
+    const n = selectedNode(); if (!n) return; n.spec = n.spec || {};
+    if ($('advAllow').checked) n.spec.allowFailure = true; else delete n.spec.allowFailure;
+    changed({ redraw: 'canvas' });
+  });
+
+  $('btnValidate').addEventListener('click', () => validate({ announce: true }));
+  $('btnSave').addEventListener('click', save);
+  $('btnRun')?.addEventListener('click', saveAndRun);
+  $('modeVisual').addEventListener('click', () => setMode('visual'));
+  $('modeJson').addEventListener('click', () => setMode('json'));
+  $('jsonArea').addEventListener('change', () => {
+    try { state.def = normalise(JSON.parse($('jsonArea').value)); changed(); toast('File applied.', 'ok'); }
+    catch (e) { toast(`That isn't valid JSON: ${e.message}`, 'err'); }
+  });
+  // Canvas clicks (background) deselect; keeps the sidebar in sync.
+  $('edCanvas').addEventListener('click', (e) => {
+    if (e.target.id === 'edCanvas' || e.target.id === 'edInner' || e.target.id === 'edEdges') {
+      state.selectedId = null; state.connectFromId = null; render();
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '');
+    if (e.key === 'Escape') {
+      closeRefPop();
+      $('addPop').classList.remove('on');
+      if (state.connectFromId) { state.connectFromId = null; render(); }
+      return;
+    }
+    if (!typing && (e.key === 'Delete' || e.key === 'Backspace') && state.selectedId) { e.preventDefault(); deleteSelected(); }
+  });
+}
+
+/* -------------------------------- actions -------------------------------- */
+
+/** Record a change: mark unsaved, redraw what's needed, re-check soon. */
+function changed({ redraw = true } = {}) {
+  state.dirty = true;
+  markSaved(false);
+  if (redraw === true) render();
+  else if (redraw === 'canvas') renderCanvas();
+  if (state.mode === 'json') $('jsonArea').value = JSON.stringify(state.def, null, 2);
+  validateSoon();
+  previewSoon();
+}
+
+function addNode() {
+  const kind = $('newKind').value;
+  const after  = $('newAfter')?.value || '';
+  const before = $('newBefore')?.value || '';
+  let id = slug(kind), i = 2;
+  while (state.def.graph.nodes.some((n) => n.id === id)) id = `${slug(kind)}${i++}`;
+  // Pick a column that makes the wiring read left-to-right. If "after" is set,
+  // land one column right of it. If "before" is set, land one left of that.
+  // If both: land in between (and leave the pre-existing edge alone — the new
+  // node sits as a sibling, not an insertion-split, which is simpler and lets
+  // the user explicitly delete the old edge if they want that semantic).
+  const nodeAt = (nid) => state.def.graph.nodes.find((n) => n.id === nid);
+  const na = nodeAt(after), nb = nodeAt(before);
+  let col = state.def.graph.nodes.length
+    ? Math.max(...state.def.graph.nodes.map((n) => n.col || 0)) + 1 : 1;
+  if (na && nb) col = Math.max((na.col || 0) + 1, Math.min((nb.col || 0) - 1, (na.col || 0) + 1));
+  else if (na) col = (na.col || 0) + 1;
+  else if (nb) col = Math.max(0, (nb.col || 0) - 1);
+  let row = na?.row ?? nb?.row ?? 0;
+  while (state.def.graph.nodes.some((n) => (n.col || 0) === col && (n.row || 0) === row)) row++;
+  const node = { id, title: KINDS[kind]?.name || id, kind, col, row, cost: 1 };
+  const starter = KIND_SPEC_DEFAULT[kind];
+  if (starter) node.spec = starter();
+  state.def.graph.nodes.push(node);
+  // Auto-wire the chosen edges. Out of a Decision, the edge takes the first
+  // of its choices not yet used; the step's sidebar can change it.
+  if (after) state.def.graph.edges.push([after, id, ...autoLabel(na)]);
+  if (before) state.def.graph.edges.push([id, before, ...autoLabel(node)]);
+  state.selectedId = id;
+  state.side = null;
+  // Reset the pickers so the next add starts fresh.
+  if ($('newAfter'))  $('newAfter').value  = '';
+  if ($('newBefore')) $('newBefore').value = '';
+  changed();
+  setTimeout(() => $('selSpec').querySelector('textarea, input')?.focus(), 0);
+}
+
+/** A connection out of a Decision takes the first of its options not yet used. */
+function autoLabel(src) {
+  if (src?.kind !== 'decision') return [];
+  const used = new Set(state.def.graph.edges.filter((e) => e[0] === src.id).map((e) => e[2]));
+  const free = (src.spec?.options || []).map((o) => o.edgeLabel).find((l) => l && !used.has(l));
+  return free ? [free] : [];
+}
+
+/** True if `from` already leads to `to`, so an edge to→from would loop. */
+function reaches(from, to) {
+  const out = {};
+  for (const [a, b] of state.def.graph.edges) (out[a] ||= []).push(b);
+  const seen = new Set(); const stack = [from];
+  while (stack.length) {
+    const id = stack.pop();
+    if (id === to) return true;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    stack.push(...(out[id] || []));
+  }
+  return false;
+}
+
+function addEdge(from, to) {
+  if (from === to) return false;
+  if (state.def.graph.edges.some(([a, b]) => a === from && b === to)) { toast('Those two are already connected.', ''); return false; }
+  if (reaches(to, from)) { toast(`That would make a loop: "${to}" already leads back to "${from}".`, 'err'); return false; }
+  const src = state.def.graph.nodes.find((n) => n.id === from);
+  state.def.graph.edges.push([from, to, ...autoLabel(src)]);
+  return true;
+}
+
+/** Fill the after/before pickers with current node ids. Preserves selection. */
+function refreshAddPickers() {
+  const nodes = state.def.graph.nodes;
+  const opts = ['<option value="">— none —</option>']
+    .concat(nodes.map((n) => `<option value="${escapeAttr(n.id)}">${escapeHtml(n.title || n.id)}</option>`));
+  for (const id of ['newAfter', 'newBefore']) {
+    const sel = $(id);
+    if (!sel) continue;
+    const v = sel.value;
+    sel.innerHTML = opts.join('');
+    // Only keep the previous value if the node still exists.
+    sel.value = nodes.some((n) => n.id === v) ? v : '';
+  }
+}
+
+function deleteSelected() {
+  if (!state.selectedId) return;
+  const id = state.selectedId;
+  state.def.graph.nodes = state.def.graph.nodes.filter((n) => n.id !== id);
+  state.def.graph.edges = (state.def.graph.edges || []).filter(([a, b]) => a !== id && b !== id);
+  state.selectedId = null;
+  state.connectFromId = null;
+  changed();
+}
+
+function patchSelected(fields) {
+  const n = selectedNode();
+  if (!n) return;
+  Object.assign(n, fields);
+  changed();
+}
+
+function renameSelected(newId) {
+  const n = selectedNode();
+  if (!n || !newId || newId === n.id) { renderSelected(); return; }
+  if (state.def.graph.nodes.some((x) => x.id === newId)) {
+    toast(`"${newId}" is already used by another step.`, 'err');
+    renderSelected();
+    return;
+  }
+  const old = n.id;
+  n.id = newId;
+  state.def.graph.edges = (state.def.graph.edges || []).map((e) => {
+    const [a, b, l] = e;
+    const na = a === old ? newId : a;
+    const nb = b === old ? newId : b;
+    return l ? [na, nb, l] : [na, nb];
+  });
+  // Keep references to it working.
+  const re = new RegExp(`\\{\\{\\s*nodes\\.${old.replace(/-/g, '\\-')}(?=[.\\s}])`, 'g');
+  for (const x of state.def.graph.nodes) {
+    for (const k of ['prompt', 'cmd', 'question', 'path', 'content', 'over']) {
+      if (typeof x.spec?.[k] === 'string') x.spec[k] = x.spec[k].replace(re, `{{nodes.${newId}`);
+    }
+    if (x.spec?.assert?.from === old) x.spec.assert.from = newId;
+    if (Array.isArray(x.spec?.from)) x.spec.from = x.spec.from.map((f) => (f === old ? newId : f));
+    else if (x.spec?.from === old) x.spec.from = newId;
+  }
+  state.selectedId = newId;
+  changed();
+}
+
+function changeKind(kind) {
+  const n = selectedNode(); if (!n) return;
+  const prev = n.spec || {};
+  const next = KIND_SPEC_DEFAULT[kind] ? KIND_SPEC_DEFAULT[kind]() : {};
+  // Carry across what still means the same thing.
+  for (const k of ['prompt', 'cmd', 'question', 'model']) if (prev[k] && k in next) next[k] = prev[k];
+  for (const k of ['retry', 'timeoutMs', 'idempotent']) if (prev[k] !== undefined) next[k] = prev[k];
+  n.kind = kind;
+  n.spec = next;
+  changed();
+}
+
+function selectNode(id) {
+  if (state.connectFromId && state.connectFromId !== id) {
+    // Pending connect: wire this one and clear the mode.
+    if (addEdge(state.connectFromId, id)) changed({ redraw: false });
+    state.connectFromId = null;
+    state.selectedId = id;
+    render();
+    return;
+  }
+  state.selectedId = id;
+  state.side = null;
+  render();
+}
+
+/* ------------------------------ save & files ----------------------------- */
+
+let validateTimer = null;
+function validateSoon() { clearTimeout(validateTimer); validateTimer = setTimeout(() => validate(), 350); }
+
+/**
+ * Check the def. Quietly while editing — problems mark their cards and the
+ * header; with `announce` (the check button, save) the toast lists them.
+ */
+async function validate({ announce = false } = {}) {
+  const def = { ...state.def, id: state.def.id || 'untitled' };
+  const r = await fetch('/api/workflows/validate', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ def }),
+  }).then((x) => x.json()).catch(() => ({ ok: false, problems: ['Orderly is not answering — is it still running?'] }));
+  // An empty canvas is not a problem worth shouting about while building.
+  state.problems = (r.problems || []).filter((p) => !(state.def.graph.nodes.length === 0 && /nodes is empty/.test(p)));
+  state.warnings = r.warnings || [];
+  renderCanvas();
+  if (announce) showProblems(state.problems, state.warnings);
+  return r.ok;
+}
+
+async function save() {
+  const def = state.def;
+  if (!def.title?.trim()) { toast('Give it a name first.', 'err'); $('wfTitle').focus(); return false; }
+  if (!def.id) def.id = slug(def.title);
+  const ok = await validate();
+  if (!ok) { showProblems(state.problems, state.warnings, 'Fix these, then save.'); return false; }
+  const scope = $('wfScope').value;
+  // Saving over itself is fine; saving a new one over another is not.
+  const overwrite = !!state.loaded && state.loaded.id === def.id && state.loaded.scope === scope;
+  try {
+    const r = await fetch('/api/workflows', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def, scope, overwrite }),
+    }).then(async (x) => ({ status: x.status, ...(await x.json()) }));
+    if (r.status === 409) {
+      toast(`You already have a workflow called "${def.id}". Change the short name, or open that one instead.`, 'err');
+      return false;
+    }
+    if (!r.saved) throw new Error(r.error || 'save failed');
+    def.version = r.version;
+    state.loaded = { id: r.id, scope: r.scope };
+    state.builtin = false;
+    state.dirty = false;
+    history.replaceState(null, '', `/workflow-editor.html?from=${encodeURIComponent(r.id)}`);
+    render();
+    markSaved(true, r.version);
+    toast(r.version > 1 ? `Saved as version ${r.version}. Runs already made keep the version they ran.` : 'Saved.', 'ok', 2500);
+    return true;
+  } catch (e) {
+    toast(e.message, 'err');
+    return false;
+  }
+}
+
+/**
+ * Save first, then open the workflow's own sheet, which collects every
+ * input (an Inputs step's fields included) and reports problems inline.
+ */
+async function saveAndRun() {
+  if (state.dirty || !state.loaded) { const saved = await save(); if (!saved) return; }
+  location.href = `/workflows.html?open=${encodeURIComponent(state.loaded.id)}#workflows`;
+}
+
+async function importFile() {
+  const f = $('importFile').files?.[0];
+  $('importFile').value = '';
+  if (!f) return;
+  let def;
+  try { def = JSON.parse(await f.text()); } catch { toast(`${f.name} is not a workflow file.`, 'err'); return; }
+  const scope = $('wfScope').value;
+  const post = (d) => fetch('/api/workflows/import', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ def: d, scope }),
+  }).then(async (x) => ({ status: x.status, ...(await x.json()) }));
+  const r = await post(def);
+  if (r.status === 409) {
+    toast(`${r.error}. `, 'err', 0);
+    const btn = document.createElement('button');
+    btn.className = 'act';
+    btn.textContent = `Import it as "${r.suggestedId}"`;
+    btn.onclick = async () => {
+      const again = await post({ ...def, id: r.suggestedId });
+      if (again.saved) location.href = `/workflow-editor.html?from=${encodeURIComponent(again.id)}`;
+      else toast(again.error || 'Import failed.', 'err');
+    };
+    $('status').append(btn);
+    return;
+  }
+  if (r.saved) { location.href = `/workflow-editor.html?from=${encodeURIComponent(r.id)}`; return; }
+  toast(`${r.error || 'Import failed'}${r.problems ? `: ${r.problems.slice(0, 3).join('; ')}` : ''}`, 'err');
+}
+
+/** Two clicks, not a dialog: the first arms it, the second deletes. */
+async function deleteWorkflow() {
+  const btn = $('btnDeleteWf');
+  if (!state.loaded) return;
+  if (!btn.dataset.armed) {
+    btn.dataset.armed = '1';
+    btn.textContent = 'Click again to delete';
+    setTimeout(() => { delete btn.dataset.armed; btn.textContent = 'Delete'; }, 3000);
+    return;
+  }
+  const r = await fetch(`/api/workflows/${encodeURIComponent(state.loaded.id)}?scope=${state.loaded.scope}`, { method: 'DELETE' }).then((x) => x.json());
+  if (r.deleted) location.href = '/workflows.html#workflows';
+  else toast(r.error || 'Delete failed.', 'err');
+}
+
+/* --------------------------------- toast --------------------------------- */
+
+/** Floating feedback at the bottom of the canvas. `ms` 0 keeps it up. */
+function toast(text, kind = '', ms = 4000) {
+  $('status').textContent = text;
+  $('status').className = `status ${kind}`;
+  $('problems').style.display = 'none';
+  $('warnings').style.display = 'none';
+  $('edToast').style.display = 'block';
+  clearTimeout(toast._t);
+  if (ms) toast._t = setTimeout(() => { $('edToast').style.display = 'none'; }, ms);
+}
+
+function showProblems(problems, warnings = [], lead = null) {
+  const list = (el, items, label) => {
+    if (!items.length) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    el.innerHTML = `<strong>${items.length} ${items.length === 1 ? 'thing' : 'things'} ${label}</strong><ul>${items.map((p) => `<li>${escapeHtml(plain(p))}</li>`).join('')}</ul>`;
+  };
+  $('status').textContent = lead || (problems.length ? 'Not ready to run yet.' : 'Ready to run.');
+  $('status').className = `status ${problems.length ? 'err' : 'ok'}`;
+  list($('problems'), problems, 'to fix before it can run');
+  list($('warnings'), warnings, 'worth a look');
+  $('edToast').style.display = 'block';
+  clearTimeout(toast._t);
+  if (!problems.length && !warnings.length) toast._t = setTimeout(() => { $('edToast').style.display = 'none'; }, 2000);
+}
+
+/** Engine messages lead with `node <id>:`; say the step's name instead. */
+function plain(p) {
+  return p.replace(/^node ([^:]+): /, (_, id) => `${state.def.graph.nodes.find((n) => n.id === id)?.title || id}: `)
+    .replace(/spec\.([a-z.]+)/gi, '$1');
+}
+
+function problemsFor(id) { return state.problems.filter((p) => p.startsWith(`node ${id}:`)); }
+
+/* -------------------------------- preview -------------------------------- */
+
+let previewTimer = null;
+function previewSoon() { clearTimeout(previewTimer); previewTimer = setTimeout(preview, 450); }
+
+/** Show what the focused field will actually send, from the last run. */
+async function preview() {
+  const n = selectedNode();
+  const key = state.refField?.dataset.spec;
+  const fields = ['prompt', 'cmd', 'question', 'path', 'content', 'over', 'assert.needle'];
+  const value = key && key.split('.').reduce((o, k) => o?.[k], n?.spec);
+  if (!n || !fields.includes(key) || !value) { $('preview').classList.add('hidden'); return; }
+  const r = await fetch('/api/workflows/preview', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ def: { ...state.def, id: state.def.id || 'untitled' }, nodeId: n.id, field: key }),
+  }).then((x) => x.json()).catch(() => null);
+  if (!r || r.error) { $('preview').classList.add('hidden'); return; }
+  $('preview').classList.remove('hidden');
+  $('previewText').textContent = r.text.length > 2000 ? `${r.text.slice(0, 2000)}…` : (r.text || '(empty)');
+  $('previewSrc').textContent = r.fromRun ? `from the run of ${when(r.fromRun.startedAt)}` : 'not run yet';
+  const nodeHoles = r.missing.filter((m) => /nodes\./.test(m));
+  const inputHoles = r.missing.filter((m) => /inputs\./.test(m));
+  const bits = [];
+  if (nodeHoles.length) bits.push(r.fromRun ? `Empty in the last run: ${nodeHoles.join(', ')}` : `Filled in once the steps it names have run: ${nodeHoles.join(', ')}`);
+  if (inputHoles.length) bits.push(`Filled in from what you type when you start it: ${inputHoles.join(', ')}`);
+  $('previewMissing').textContent = bits.join(' · ');
+}
+
+/* ------------------------------ references ------------------------------- */
+
+function upstream(id) {
+  const parents = {};
+  for (const [a, b] of state.def.graph.edges) (parents[b] ||= []).push(a);
+  const seen = new Set(); const stack = [...(parents[id] || [])];
+  while (stack.length) { const x = stack.pop(); if (seen.has(x)) continue; seen.add(x); stack.push(...(parents[x] || [])); }
+  return state.def.graph.nodes.filter((n) => seen.has(n.id));
+}
+
+/** The fields worth naming for each kind of output. */
+function fieldsOf(n) {
+  const k = n.kind, o = n.spec?.output;
+  const f = [['output', 'everything it produced']];
+  if (k === 'script') f.push(['output.out', 'what the command printed'], ['output.code', 'its exit code']);
+  if (k === 'agent' && o === 'json') f.push(['output.data', 'the data it returned']);
+  if (k === 'agent' && o === 'json-findings') f.push(['output.findings', 'the findings']);
+  if (k === 'decision') f.push(['output.answer', 'the choice you made']);
+  if (k === 'approve') f.push(['output.approved', 'whether you approved']);
+  if (k === 'check') f.push(['output.pass', 'whether it passed'], ['output.reason', 'why']);
+  if (k === 'loop') f.push(['output.results', "every item's result"]);
+  if (k === 'inputs') for (const x of n.spec?.fields || []) f.push([`output.values.${x.key}`, x.label || x.key]);
+  if (k === 'publish') f.push(['output.path', 'the file it wrote']);
+  return f;
+}
+
+function openRefPop(btn, field) {
+  state.refField = field;
+  const n = selectedNode();
+  const pop = $('refPop');
+  const groups = [];
+  const inputs = [...state.def.inputs.map((i) => [i.key, i.label]),
+    ...state.def.graph.nodes.filter((x) => x.kind === 'inputs').flatMap((x) => (x.spec?.fields || []).map((f) => [f.key, f.label]))];
+  if (inputs.length) groups.push(['Inputs', inputs.map(([k, l]) => [`{{inputs.${k}}}`, l || k])]);
+  if (n?.kind === 'loop') groups.push(['This item', [['{{item}}', 'the current item in the list']]]);
+  const ups = upstream(n?.id);
+  for (const u of ups) groups.push([u.title || u.id, fieldsOf(u).map(([p, d]) => [`{{nodes.${u.id}.${p}}}`, d])]);
+  if (ups.length > 1) groups.push(['Several', [['{{nodes.*.output}}', 'everything every step just before this one produced']]]);
+  pop.innerHTML = groups.length
+    ? groups.map(([g, items]) => `<div class="rg">${escapeHtml(g)}</div>${items.map(([t, d]) => `<button type="button" data-ref="${escapeAttr(t)}"><span class="rt">${escapeHtml(t)}</span><span class="rd">${escapeHtml(d)}</span></button>`).join('')}`).join('')
+    : '<div class="none">Nothing to use yet. Add an input in ⚙ Settings, or connect a step into this one to use what it produced.</div>';
+  const r = btn.getBoundingClientRect();
+  pop.style.left = `${Math.max(8, Math.min(window.innerWidth - 330, r.left - 200))}px`;
+  pop.style.top = `${Math.min(window.innerHeight - 350, r.bottom + 4)}px`;
+  pop.classList.remove('hidden');
+  for (const b of pop.querySelectorAll('button[data-ref]')) b.onclick = () => insertRef(b.dataset.ref);
+  pop.querySelector('button')?.focus();
+}
+
+function closeRefPop() { $('refPop').classList.add('hidden'); }
+
+function insertRef(text) {
+  const el = state.refField;
+  closeRefPop();
+  if (!el) return;
+  const at = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? at;
+  el.value = el.value.slice(0, at) + text + el.value.slice(end);
+  el.focus();
+  el.selectionStart = el.selectionEnd = at + text.length;
+  writeSpec(el.dataset.spec, el.value, { silent: true });
+}
+
+/* --------------------------------- render -------------------------------- */
+
+function render() {
+  const d = state.def;
+  $('wfId').value = d.id || '';
+  $('wfTitle').value = d.title || '';
+  // A saved workflow keeps its short name; runs refer to it.
+  $('wfId').readOnly = !!state.loaded;
+  $('wfDesc').value = d.desc || '';
+  $('wfCategory').value = d.category || 'build';
+  $('wfEstimate').value = d.estimate || '';
+  $('wfBudget').value = d.budgetUsd ?? '';
+  $('wfConcurrency').value = d.concurrency ? String(d.concurrency) : '';
+  $('builtinBanner').classList.toggle('hidden', !state.builtin);
+  $('btnExport').disabled = !state.loaded;
+  $('btnDeleteWf').disabled = !state.loaded;
+  $('edEmpty').classList.toggle('hidden', d.graph.nodes.length > 0 || state.mode === 'json');
+  renderScopeHint();
+  renderInputs();
+  refreshAddPickers();
+  renderCanvas();
+  renderSelected();
+  // Sidebar collapses when nothing is selected — the canvas fills the width.
+  const layout = $('edLayout');
+  if (layout) layout.classList.toggle('no-sel', !state.selectedId && state.side !== 'settings');
+  $('settingsBlock').style.display = state.side === 'settings' ? '' : 'none';
+  $('btnSettings').classList.toggle('on', state.side === 'settings');
+  if (state.mode === 'json') $('jsonArea').value = JSON.stringify(state.def, null, 2);
+}
+
+function renderScopeHint() { $('scopeHint').textContent = SCOPE_HINT[$('wfScope').value] || ''; }
+
+function markSaved(saved, version) {
+  const el = $('saveLine');
+  if (saved) { el.textContent = `saved${version ? ` · v${version}` : ''}`; el.className = 'save-line clean'; }
+  else if (state.loaded || state.def?.graph?.nodes?.length) { el.textContent = 'unsaved changes'; el.className = 'save-line dirty'; }
+  else { el.textContent = 'not saved yet'; el.className = 'save-line'; }
+}
+
+function renderInputs() {
+  const list = state.def.inputs;
+  $('inputsCount').textContent = list.length ? `· ${list.length}` : '';
+  $('inputsList').innerHTML = list.length ? list.map((f, i) => `
+    <div class="list-row three" data-i="${i}">
+      <input data-f="key" value="${escapeAttr(f.key || '')}" placeholder="key" spellcheck="false" aria-label="key">
+      <input data-f="label" value="${escapeAttr(f.label || '')}" placeholder="Label people see" aria-label="label">
+      <label class="tick"><input type="checkbox" data-f="textarea" ${f.textarea ? 'checked' : ''}> long</label>
+      <button class="run-btn danger x" data-rm="${i}" title="Remove">✕</button>
+      <input class="wide" data-f="placeholder" value="${escapeAttr(f.placeholder || '')}" placeholder="Example shown in the box (optional)">
+    </div>`).join('') : '<div class="list-empty">None. A workflow without inputs works on whatever project it is run in.</div>';
+  for (const row of $('inputsList').querySelectorAll('.list-row')) {
+    const f = list[Number(row.dataset.i)];
+    for (const el of row.querySelectorAll('[data-f]')) {
+      el.addEventListener(el.type === 'checkbox' ? 'change' : 'input', () => {
+        const k = el.dataset.f;
+        if (k === 'textarea') { if (el.checked) f.textarea = true; else delete f.textarea; }
+        else f[k] = k === 'key' ? slug(el.value, true).replace(/-/g, '_') : el.value;
+        changed({ redraw: false });
+      });
+    }
+  }
+  for (const b of $('inputsList').querySelectorAll('[data-rm]')) b.onclick = () => { list.splice(Number(b.dataset.rm), 1); changed(); };
+}
+
+function renderCanvas() {
+  const inner = $('edInner');
+  // Keep edges SVG, drop cards.
+  for (const el of inner.querySelectorAll('.n-card')) el.remove();
+  for (const n of state.def.graph.nodes) {
+    inner.append(nodeCard(n));
+  }
+  // Grow the inner container to contain every absolutely-positioned card.
+  // Without this, cards past col 6 land outside .ed-canvas-inner's bounds,
+  // the SVG stays width:100% of the (narrower) inner, and edges to those
+  // nodes draw outside the SVG viewport and get clipped — invisible.
+  const nodes = state.def.graph.nodes;
+  const maxX = nodes.reduce((m, n) => Math.max(m, GUTTER + (n.col || 0) * COL_W + 220), 1600);
+  const maxY = nodes.reduce((m, n) => Math.max(m, GUTTER + (n.row || 0) * ROW_H + 120), 900);
+  inner.style.width  = `${maxX + GUTTER}px`;
+  inner.style.height = `${maxY + GUTTER}px`;
+  renderEdges();
+}
+
+/** One line on what a step does, for its card. */
+function summary(n) {
+  const s = n.spec || {};
+  switch (n.kind) {
+    case 'agent': return s.prompt || 'No instructions yet';
+    case 'script': return s.op ? ({ 'capture-shot': 'Screenshot a page', 'capture-shots': 'Screenshot several pages' })[s.op] : (s.cmd ? `$ ${s.cmd}` : 'No command yet');
+    case 'decision': return `${s.question || ''} — ${(s.options || []).map((o) => o.label).join(' / ')}`;
+    case 'approve': return s.question || '';
+    case 'check': return ({ 'exit-zero': 'the command succeeded', contains: `output contains "${s.assert?.needle || ''}"`, 'has-pairs': 'screenshots were taken', manual: 'you say it looks right' })[s.assert?.type] || '';
+    case 'loop': return `for each in ${s.over || '…'}`;
+    case 'publish': return s.target === 'pr' ? 'Draft a pull request' : `Write ${s.path || 'a file'}`;
+    case 'display': return `show ${[].concat(s.from || []).join(', ') || '…'}`;
+    case 'delay': return `wait ${s.wait || ''}`;
+    case 'inputs': return (s.fields || []).map((f) => f.label || f.key).join(', ');
+    default: return n.prompt || n.command || '';
+  }
+}
+
+function nodeCard(n) {
+  const x = GUTTER + (n.col || 0) * COL_W;
+  const y = GUTTER + (n.row || 0) * ROW_H;
+  const card = document.createElement('div');
+  const probs = problemsFor(n.id);
+  const cls = ['n-card', `k-${n.kind}`];
+  if (n.id === state.selectedId) cls.push('sel');
+  if (n.id === state.connectFromId) cls.push('connect-src');
+  else if (state.connectFromId) cls.push('connect-target');
+  if (probs.length) cls.push('has-problem');
+  card.className = cls.join(' ');
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+  card.dataset.id = n.id;
+  card.dataset.kind = n.kind;
+  const s = n.spec || {};
+  const flags = [];
+  if (s.retry?.attempts) flags.push(`↻ ${s.retry.attempts}`);
+  if (s.timeoutMs) flags.push(`◷ ${Math.round(s.timeoutMs / 60000) || '<1'}m`);
+  if (s.idempotent === false) flags.push('once only');
+  if (s.uses?.length) flags.push(`${s.uses.length} skill${s.uses.length === 1 ? '' : 's'}`);
+  if (probs.length) flags.push(`<span class="bad">${probs.length} to fix</span>`);
+  card.innerHTML = `
+    <div class="n-head">
+      <span class="n-kind">${KIND_GLYPH[n.kind] || '●'} ${escapeHtml(KINDS[n.kind]?.name || LEGACY[n.kind] || n.kind)}</span>
+      <span class="n-id">${escapeHtml(n.id)}</span>
+    </div>
+    <div class="n-title">${escapeHtml(n.title || n.id)}</div>
+    <div class="n-what">${escapeHtml(summary(n))}</div>
+    <div class="n-foot"><span>⚡ ${n.cost ?? 1}</span><span class="n-flags">${flags.join(' · ')}</span></div>`;
+  card.title = probs.map(plain).join('\n');
+  card.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (e.shiftKey && state.selectedId && state.selectedId !== n.id) {
+      if (addEdge(state.selectedId, n.id)) changed();
+      return;
+    }
+    selectNode(n.id);
+  });
+  attachDrag(card, n);
+  return card;
+}
+
+function attachDrag(card, n) {
+  let dragging = false, moved = false, startX, startY, startLeft, startTop;
+  card.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    dragging = true; moved = false;
+    startX = e.clientX; startY = e.clientY;
+    startLeft = parseFloat(card.style.left); startTop = parseFloat(card.style.top);
+    card.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - startX, dy = e.clientY - startY;
+    // Treat tiny pointer wobble as a click, not a drag. Without this the
+    // mouseup always re-renders and tears the card out of the DOM before
+    // the click handler can run, so selection appears broken.
+    if (!moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+    moved = true;
+    card.style.left = `${Math.max(0, Math.round((startLeft + dx) / 20) * 20)}px`;
+    card.style.top  = `${Math.max(0, Math.round((startTop  + dy) / 20) * 20)}px`;
+    renderEdges();
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    card.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    if (!moved) return; // plain click — let the click handler fire selectNode.
+    // Snap pixels back to col/row and re-render.
+    n.col = Math.max(0, Math.round((parseFloat(card.style.left) - GUTTER) / COL_W));
+    n.row = Math.max(0, Math.round((parseFloat(card.style.top)  - GUTTER) / ROW_H));
+    changed();
+  });
+}
+
+/** A Decision's edges show the choice's label, not its internal key. */
+function edgeLabelText(src, label) {
+  if (!label) return '';
+  if (src?.kind === 'decision') return (src.spec?.options || []).find((o) => o.edgeLabel === label)?.label || label;
+  return label;
+}
+
+function renderEdges() {
+  const svg = $('edEdges');
+  const inner = $('edInner');
+  if (!inner) return;
+  // Size the SVG to the actual canvas-inner area so paths don't get clipped.
+  // Without explicit width/height attributes, Firefox and some Chrome paths
+  // can lose geometry outside the natural SVG viewport.
+  const innerBox = inner.getBoundingClientRect();
+  // Size the SVG to the inner container's full extent (which renderCanvas
+  // just stretched to contain every card). Both attribute and inline style
+  // so paths outside the natural viewport are not clipped by the renderer.
+  const w = Math.max(inner.scrollWidth, Math.floor(innerBox.width));
+  const h = Math.max(inner.scrollHeight, Math.floor(innerBox.height));
+  svg.setAttribute('width',  w);
+  svg.setAttribute('height', h);
+  svg.style.width  = `${w}px`;
+  svg.style.height = `${h}px`;
+  svg.setAttribute('pointer-events', 'all');
+  // Read each card's real position via its data-id attribute. Falling back
+  // to the col/row math breaks the instant the user drags a node, so we
+  // measure the DOM instead — same approach as the runtime canvas.
+  const cards = {};
+  for (const el of inner.querySelectorAll('.n-card')) cards[el.dataset.id] = el;
+  const byId = Object.fromEntries(state.def.graph.nodes.map((n) => [n.id, n]));
+  const parentBox = { left: innerBox.left, top: innerBox.top };
+  // Two paths per edge: visible curve + a fat invisible one for clicks.
+  // Clicking an edge opens the step it leads into, where its "Comes after"
+  // list can remove it or change a Decision's branch.
+  const parts = [];
+  (state.def.graph.edges || []).forEach((edge, i) => {
+    const [a, b, label] = edge;
+    const srcEl = cards[a], dstEl = cards[b];
+    if (!srcEl || !dstEl) return;
+    const sr = srcEl.getBoundingClientRect();
+    const dr = dstEl.getBoundingClientRect();
+    const ax = sr.right - parentBox.left;
+    const ay = sr.top   - parentBox.top + sr.height / 2;
+    const bx = dr.left  - parentBox.left;
+    const by = dr.top   - parentBox.top + dr.height / 2;
+    // Tangent length — bigger for larger horizontal/vertical spans so the
+    // curve has room to open up and doesn't fold back on itself.
+    const spanX = Math.max(40, Math.abs(bx - ax));
+    const spanY = Math.max(0,  Math.abs(by - ay));
+    const dx = Math.max(60, spanX * 0.5, spanY * 0.4);
+    const d  = `M${ax},${ay} C${ax + dx},${ay} ${bx - dx},${by} ${bx},${by}`;
+    parts.push(`<path class="edge-hit" data-i="${i}" d="${d}" fill="none" stroke="transparent" stroke-width="14"/>`);
+    const stroke = label ? '#a3abff' : '#efb36c';
+    parts.push(`<path class="edge ${label ? 'labeled' : ''}" data-i="${i}" d="${d}" fill="none" stroke="${stroke}" stroke-width="1.4" opacity="0.75"/>`);
+    // Pinch dots at each end so the curve clearly lands on its node.
+    parts.push(`<circle cx="${ax}" cy="${ay}" r="2.5" fill="${stroke}" opacity="0.9"/>`);
+    parts.push(`<circle cx="${bx}" cy="${by}" r="2.5" fill="${stroke}" opacity="0.9"/>`);
+    const text = edgeLabelText(byId[a], label);
+    if (text) {
+      const mx = (ax + bx) / 2;
+      const my = (ay + by) / 2;
+      const lw = Math.max(28, text.length * 7 + 10);
+      parts.push(
+        `<g class="edge-label" data-i="${i}" transform="translate(${mx - lw / 2},${my - 10})" style="cursor:pointer;">
+           <rect width="${lw}" height="18" rx="9" fill="#131318" stroke="#a3abff" stroke-width="1"/>
+           <text x="${lw / 2}" y="12" text-anchor="middle"
+                 font-family="Geist Mono, monospace" font-size="10"
+                 fill="#a3abff">${escapeHtml(text)}</text>
+         </g>`);
+    }
+  });
+  svg.innerHTML = parts.join('');
+  for (const el of svg.querySelectorAll('.edge-hit, .edge-label')) {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const edge = state.def.graph.edges[Number(el.dataset.i)];
+      if (!edge) return;
+      state.selectedId = edge[1];
+      state.side = null;
+      render();
+      // Point at the row for this connection in the step's "Comes after".
+      $('selEdges').querySelector(`.edge-row[data-i="${el.dataset.i}"]`)?.classList.add('flash');
+    });
+  }
+}
+
+function renderSelected() {
+  const n = selectedNode();
+  const block = $('selBlock');
+  if (!n) { block.style.display = 'none'; $('preview').classList.add('hidden'); return; }
+  block.style.display = '';
+  $('selSummary').textContent = n.title || n.id;
+  $('selKindLine').textContent = KINDS[n.kind]?.desc
+    || (LEGACY[n.kind] ? 'An older kind of step. It still runs; switching it to one of the kinds above gives you the full form.' : '');
+  $('selId').value = n.id;
+  $('selTitle').value = n.title || '';
+  $('selKind').value = n.kind;
+  $('selCost').value = n.cost ?? 1;
+  $('btnConnect').textContent = state.connectFromId ? 'Cancel connecting' : '↝ Connect to…';
+  const s = n.spec || {};
+  $('advRetries').value = String(s.retry?.attempts || 0);
+  $('advBackoff').value = String(s.retry?.backoffMs || 2000);
+  $('advBackoff').disabled = !s.retry?.attempts;
+  $('advTimeout').value = s.timeoutMs ? String(s.timeoutMs) : '';
+  $('advIdem').checked = s.idempotent !== false;
+  $('advAllow').checked = !!s.allowFailure;
+  $('advIdemLine').style.display = ['script', 'publish', 'loop'].includes(n.kind) ? '' : 'none';
+  $('advAllowLine').style.display = n.kind === 'script' && !s.op ? '' : 'none';
+  $('advanced').style.display = ['decision', 'approve', 'display', 'inputs', 'delay'].includes(n.kind) ? 'none' : '';
+  renderSpecForm(n);
+  renderEdgesForm(n);
+}
+
+/**
+ * Edges editor for the selected node. Lists incoming edges (parents / "comes
+ * after") and outgoing edges (children / "goes before"), with remove buttons
+ * on each row and dropdowns to add new ones from the pool of other nodes.
+ * An edge out of a Decision picks which choice it follows from a list.
+ */
+function renderEdgesForm(n) {
+  const mount = $('selEdges');
+  if (!mount) return;
+  const nodes  = state.def.graph.nodes;
+  const edges  = state.def.graph.edges || [];
+  const byId = Object.fromEntries(nodes.map((x) => [x.id, x]));
+  const incoming = edges.map((e, i) => ({ e, i })).filter(({ e }) => e[1] === n.id);
+  const outgoing = edges.map((e, i) => ({ e, i })).filter(({ e }) => e[0] === n.id);
+  const incomingSet = new Set(incoming.map(({ e }) => e[0]));
+  const outgoingSet = new Set(outgoing.map(({ e }) => e[1]));
+  const candIn  = nodes.filter((x) => x.id !== n.id && !incomingSet.has(x.id));
+  const candOut = nodes.filter((x) => x.id !== n.id && !outgoingSet.has(x.id));
+  const row = ({ e, i }, dir) => {
+    const other = dir === 'in' ? e[0] : e[1];
+    const src = byId[e[0]];
+    const title = byId[other]?.title || other;
+    const opts = src?.kind === 'decision' ? src.spec?.options || [] : [];
+    const branch = opts.length
+      ? `<select class="lbl-pick" data-branch="${i}" title="Which choice leads here">
+           <option value="">always</option>${opts.map((o) => `<option value="${escapeAttr(o.edgeLabel)}" ${o.edgeLabel === e[2] ? 'selected' : ''}>${escapeHtml(o.label)}</option>`).join('')}
+         </select>` : '';
+    return `
+      <div class="edge-row" data-i="${i}">
+        <span class="arrow">${dir === 'in' ? '↳' : '↦'}</span>
+        <span>${escapeHtml(title)}${branch}</span>
+        <button class="run-btn danger" data-act="rm-edge" data-i="${i}" title="Remove this connection">✕</button>
+      </div>`;
+  };
+  const options = (list) => list.map((x) =>
+    `<option value="${escapeAttr(x.id)}">${escapeHtml(x.title || x.id)}</option>`).join('');
+  mount.innerHTML = `
+    <h4>Comes after (${incoming.length})</h4>
+    ${incoming.map((r) => row(r, 'in')).join('') || '<div class="status" style="margin:0;">Nothing — it starts the run.</div>'}
+    ${candIn.length ? `
+      <div class="edge-add">
+        <select id="addInSel"><option value="">— pick a step —</option>${options(candIn)}</select>
+        <button class="run-btn" id="btnAddIn">+ add</button>
+      </div>` : ''}
+    <h4>Goes before (${outgoing.length})</h4>
+    ${outgoing.map((r) => row(r, 'out')).join('') || '<div class="status" style="margin:0;">Nothing — the run ends here.</div>'}
+    ${candOut.length ? `
+      <div class="edge-add">
+        <select id="addOutSel"><option value="">— pick a step —</option>${options(candOut)}</select>
+        <button class="run-btn" id="btnAddOut">+ add</button>
+      </div>` : ''}
+  `;
+  for (const btn of mount.querySelectorAll('[data-act="rm-edge"]')) {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      state.def.graph.edges.splice(Number(btn.dataset.i), 1);
+      changed();
+    });
+  }
+  for (const sel of mount.querySelectorAll('[data-branch]')) {
+    sel.addEventListener('change', () => {
+      const edge = state.def.graph.edges[Number(sel.dataset.branch)];
+      if (!edge) return;
+      if (sel.value) edge[2] = sel.value; else edge.length = 2;
+      changed();
+    });
+  }
+  mount.querySelector('#btnAddIn')?.addEventListener('click', () => {
+    const other = mount.querySelector('#addInSel')?.value;
+    if (other && addEdge(other, n.id)) changed();
+  });
+  mount.querySelector('#btnAddOut')?.addEventListener('click', () => {
+    const other = mount.querySelector('#addOutSel')?.value;
+    if (other && addEdge(n.id, other)) changed();
+  });
+}
+
+/**
+ * Per-kind spec editor, in plain words. Text fields that can name what
+ * earlier steps produced get an "+ insert" button and a live preview.
+ */
+function renderSpecForm(n) {
+  const mount = $('selSpec');
+  const s = n.spec || {};
+  const ups = upstream(n.id);
+  const opt = (v, label, cur) => `<option value="${escapeAttr(v)}" ${String(cur ?? '') === String(v) ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  const refHead = (label, key, hint = '') => `<div class="field-head"><label for="sp-${key}">${label}${hint ? ` <span class="hint">${hint}</span>` : ''}</label><button type="button" class="ref-btn" data-for="sp-${key}">+ insert</button></div>`;
+  const ta = (key, val, ph) => `<textarea id="sp-${key}" data-spec="${key}" data-ref="1" placeholder="${escapeAttr(ph)}">${escapeHtml(val || '')}</textarea>`;
+  const txt = (key, val, ph, ref = false) => `<input id="sp-${key}" data-spec="${key}" ${ref ? 'data-ref="1"' : ''} value="${escapeAttr(val ?? '')}" placeholder="${escapeAttr(ph)}">`;
+  const sel = (key, val, options) => `<select id="sp-${key}" data-spec="${key}">${options.map(([v, l]) => opt(v, l, val)).join('')}</select>`;
+  const upSel = (key, val) => ups.length
+    ? `<select id="sp-${key}" data-spec="${key}">${opt('', 'Pick a step before this one', val)}${ups.map((u) => opt(u.id, u.title || u.id, val)).join('')}</select>`
+    : '<div class="list-empty">Connect a step into this one first.</div>';
+  let html = '';
+  switch (n.kind) {
+    case 'agent':
+      html = refHead('What should Claude do?', 'prompt', 'say what to produce')
+        + ta('prompt', s.prompt, 'Write a one-page summary of {{nodes.research.output}} for {{inputs.audience}}.')
+        + `<div class="row2"><div><label for="sp-model">Model</label>${sel('model', s.model || 'sonnet', [['haiku', 'Haiku — fast'], ['sonnet', 'Sonnet — balanced'], ['opus', 'Opus — most capable']])}</div>`
+        + `<div><label for="sp-output">It produces</label>${sel('output', s.output || 'markdown', [['markdown', 'Text'], ['json', 'Data (JSON)'], ['json-findings', 'Review findings'], ['html', 'A web page'], ['json-hunks', 'A code change']])}</div></div>`
+        + `<label>Skills to use <span class="hint">named in the prompt; Claude uses one where it applies</span></label>${skillPicker(s.uses || [])}`;
+      break;
+    case 'script':
+      html = `<label for="sp-op">It does</label>${sel('op', s.op || '', [['', 'Run a command'], ['capture-shot', 'Screenshot a page'], ['capture-shots', 'Screenshot several pages']])}`
+        + (s.op ? '<div class="hint block-hint">Uses the running app Orderly found for this project, or the page given as an input.</div>'
+          : refHead('Command', 'cmd', 'runs in the project folder; inserted values are quoted') + ta('cmd', s.cmd, 'npm test'));
+      break;
+    case 'decision':
+      html = refHead('Question', 'question') + txt('question', s.question, 'Which direction wins?', true)
+        + '<label>Choices <span class="hint">pick which one each connection follows under Goes before</span></label>'
+        + (s.options || []).map((o, i) => `<div class="list-row"><input class="wide" data-opt="${i}" value="${escapeAttr(o.label || '')}" placeholder="Choice"><span></span><button class="run-btn danger x" data-rm-opt="${i}" title="Remove">✕</button></div>`).join('')
+        + '<button class="run-btn" data-act="add-opt">+ add choice</button>';
+      break;
+    case 'approve':
+      html = refHead('What are you approving?', 'question') + txt('question', s.question, 'Ship {{inputs.version}}?', true);
+      break;
+    case 'check':
+      html = `<label for="sp-assert.type">Passes when</label>${sel('assert.type', s.assert?.type || 'exit-zero', [['exit-zero', 'a command succeeded'], ['contains', 'an output contains some text'], ['has-pairs', 'screenshots were taken'], ['manual', 'I say it looks right']])}`
+        + `<label for="sp-assert.from">Looking at</label>${upSel('assert.from', s.assert?.from)}`
+        + (s.assert?.type === 'contains' ? refHead('The text', 'assert.needle') + txt('assert.needle', s.assert?.needle, 'All tests passed', true) : '')
+        + `<label for="sp-onFail">If it fails</label>${sel('onFail', s.onFail || 'stop', [['stop', 'Stop the whole run'], ['skip', 'Skip what comes after, finish the rest']])}`;
+      break;
+    case 'loop':
+      html = refHead('For each item in', 'over', 'a list: an input, or something an earlier step made') + txt('over', s.over, '{{inputs.pages}}', true)
+        + `<label for="sp-action">Do</label>${sel('action', s.action || 'agent', [['agent', 'Ask Claude'], ['script', 'Run a command']])}`
+        + (s.action === 'script'
+          ? refHead('Command', 'cmd', 'use {{item}} for the current item') + ta('cmd', s.cmd, 'npx lighthouse {{item}}')
+          : refHead('What should Claude do with each?', 'prompt', 'use {{item}} for the current item') + ta('prompt', s.prompt, 'Summarise {{item}} in two sentences.'))
+        + `<div class="row2"><div><label for="sp-max">At most</label>${sel('max', String(s.max || 50), [['5', '5 items'], ['20', '20 items'], ['50', '50 items'], ['100', '100 items'], ['500', '500 items']])}</div>`
+        + `<div><label for="sp-concurrency">At once</label>${sel('concurrency', String(s.concurrency || 1), [['1', 'One at a time'], ['2', '2'], ['4', '4'], ['8', '8']])}</div></div>`;
+      break;
+    case 'publish':
+      html = `<label for="sp-target">It</label>${sel('target', s.target || 'file', [['file', 'Writes a file in the project'], ['pr', 'Drafts a pull request']])}`
+        + (s.target === 'pr' ? '<div class="hint block-hint">Drafts the title and description from the steps before it. It does not open the PR on GitHub.</div>'
+          : refHead('File', 'path', 'inside the project') + txt('path', s.path, 'reports/{{inputs.week}}.md', true)
+            + refHead('What goes in it', 'content', 'empty = everything the steps before it produced') + ta('content', s.content, '{{nodes.summary.output}}'));
+      break;
+    case 'display':
+      html = `<label>Show</label>${ups.length ? `<div class="pick-list">${ups.map((u) => `<label><input type="checkbox" data-from="${escapeAttr(u.id)}" ${[].concat(s.from || []).includes(u.id) ? 'checked' : ''}> ${escapeHtml(u.title || u.id)}</label>`).join('')}</div>` : '<div class="list-empty">Connect the steps to show into this one.</div>'}`
+        + `<label for="sp-render">As</label>${sel('render', s.render || 'markdown', [['markdown', 'Text'], ['mockups-grid', 'Web pages side by side'], ['shots-set', 'Screenshots'], ['json', 'Data'], ['diff', 'Code changes']])}`;
+      break;
+    case 'delay':
+      html = `<label for="sp-wait">Wait</label>${sel('wait', s.wait || '30s', [['10s', '10 seconds'], ['30s', '30 seconds'], ['2m', '2 minutes'], ['5m', '5 minutes'], ['10m', '10 minutes (the most)']])}`;
+      break;
+    case 'inputs':
+      html = '<label>Fields</label>' + (s.fields || []).map((f, i) => `<div class="list-row"><input data-field="${i}" data-k="key" value="${escapeAttr(f.key || '')}" placeholder="key"><input data-field="${i}" data-k="label" value="${escapeAttr(f.label || '')}" placeholder="Label"><button class="run-btn danger x" data-rm-field="${i}" title="Remove">✕</button></div>`).join('')
+        + '<button class="run-btn" data-act="add-field">+ add field</button><div class="hint block-hint">The workflow\'s own Inputs, in ⚙ Settings, usually do this more simply.</div>';
+      break;
+    default:
+      html = `<label for="sp-legacy">Instructions</label><textarea id="sp-legacy" data-legacy="1">${escapeHtml(n.prompt || n.command || '')}</textarea>`;
+  }
+  mount.innerHTML = html;
+
+  for (const el of mount.querySelectorAll('[data-spec]')) {
+    const key = el.dataset.spec;
+    const numeric = ['max', 'concurrency'].includes(key);
+    // These change which other fields the form shows.
+    const shaping = ['op', 'action', 'target', 'assert.type'].includes(key);
+    el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
+      writeSpec(key, numeric ? Number(el.value) : el.value, { silent: !shaping });
+    });
+    if (el.dataset.ref) el.addEventListener('focus', () => { state.refField = el; previewSoon(); });
+  }
+  for (const b of mount.querySelectorAll('.ref-btn')) {
+    b.addEventListener('click', (e) => { e.stopPropagation(); openRefPop(b, $(b.dataset.for)); });
+  }
+  mount.querySelector('[data-legacy]')?.addEventListener('input', (e) => {
+    const x = selectedNode(); if (!x) return;
+    if ('command' in x && !('prompt' in x)) x.command = e.target.value; else x.prompt = e.target.value;
+    changed({ redraw: 'canvas' });
+  });
+  // Decision choices: the label is what people see; the edge label is fixed
+  // when the choice is made, so connections keep pointing at the right one.
+  for (const el of mount.querySelectorAll('[data-opt]')) {
+    el.addEventListener('input', () => { s.options[Number(el.dataset.opt)].label = el.value; changed({ redraw: 'canvas' }); });
+  }
+  for (const b of mount.querySelectorAll('[data-rm-opt]')) b.onclick = () => {
+    const [gone] = s.options.splice(Number(b.dataset.rmOpt), 1);
+    state.def.graph.edges = state.def.graph.edges.filter((e) => !(e[0] === n.id && e[2] === gone.edgeLabel));
+    changed();
+  };
+  mount.querySelector('[data-act="add-opt"]')?.addEventListener('click', () => {
+    s.options = s.options || [];
+    let k = s.options.length + 1;
+    while (s.options.some((o) => o.edgeLabel === `opt${k}`)) k++;
+    s.options.push({ label: `Choice ${s.options.length + 1}`, edgeLabel: `opt${k}` });
+    changed();
+  });
+  for (const el of mount.querySelectorAll('[data-field]')) {
+    el.addEventListener('input', () => { s.fields[Number(el.dataset.field)][el.dataset.k] = el.value; changed({ redraw: 'canvas' }); });
+  }
+  for (const b of mount.querySelectorAll('[data-rm-field]')) b.onclick = () => { s.fields.splice(Number(b.dataset.rmField), 1); changed(); };
+  mount.querySelector('[data-act="add-field"]')?.addEventListener('click', () => {
+    s.fields = s.fields || [];
+    s.fields.push({ key: `field${s.fields.length + 1}`, label: '', type: 'text' });
+    changed();
+  });
+  for (const el of mount.querySelectorAll('[data-from]')) {
+    el.addEventListener('change', () => {
+      const picked = [...mount.querySelectorAll('[data-from]:checked')].map((x) => x.dataset.from);
+      writeSpec('from', picked.length ? picked : undefined, { silent: true });
+    });
+  }
+  for (const el of mount.querySelectorAll('[data-skill]')) {
+    el.addEventListener('change', () => {
+      const picked = [...mount.querySelectorAll('[data-skill]:checked')].map((x) => x.dataset.skill);
+      writeSpec('uses', picked.length ? picked : undefined, { silent: true });
+    });
+  }
+  // Preview the main text field without waiting for a focus.
+  if (!state.refField || !mount.contains(state.refField)) state.refField = mount.querySelector('[data-ref]');
+  previewSoon();
+}
+
+function skillPicker(chosen) {
+  const skills = [...new Map(state.skills.map((k) => [k.slug, k])).values()];
+  if (!skills.length) return '<div class="list-empty">No skills installed. They live in ~/.claude/skills, or a project\'s .claude/skills.</div>';
+  return `<div class="pick-list">${skills.map((k) => `<label><input type="checkbox" data-skill="${escapeAttr(k.slug)}" ${chosen.includes(k.slug) ? 'checked' : ''}> ${escapeHtml(k.slug)} <span class="pd">${escapeHtml((k.description || '').slice(0, 70))}</span></label>`).join('')}</div>`;
+}
+
+function selectedNode() {
+  return state.def.graph.nodes.find((n) => n.id === state.selectedId) || null;
+}
+
+/**
+ * Patch `node.spec` with a dot-path key like 'assert.type' or 'prompt'.
+ * `silent` keeps the form as it is — for typing, so focus is not lost — and
+ * redraws only the cards.
+ */
+function writeSpec(key, value, { silent = false } = {}) {
+  const n = selectedNode(); if (!n) return;
+  n.spec = n.spec || {};
+  const parts = key.split('.');
+  let o = n.spec;
+  for (const p of parts.slice(0, -1)) o = (o[p] ||= {});
+  const last = parts[parts.length - 1];
+  if (value === '' || value === undefined) delete o[last]; else o[last] = value;
+  changed({ redraw: silent ? 'canvas' : true });
+}
+
+function setMode(mode) {
+  state.mode = mode;
+  document.body.classList.toggle('json-mode', mode === 'json');
+  $('modeVisual').classList.toggle('on', mode === 'visual');
+  $('modeJson').classList.toggle('on', mode === 'json');
+  render();
+}
+
+function slug(s, live = false) {
+  const out = String(s || '').toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+/, '');
+  return live ? out : out.replace(/-+$/, '');
+}
+
+function when(iso) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function escapeAttr(s) { return escapeHtml(s); }
+
+boot();

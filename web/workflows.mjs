@@ -95,7 +95,16 @@ function renderTiles() {
     mount.innerHTML = list.map(tile).join('');
   }
   for (const el of document.querySelectorAll('.tile')) {
-    el.onclick = () => openSheet(el.dataset.id);
+    // Click on a tile opens the workflow in the visual editor — the primary
+    // thing people want to do with a workflow is see and modify its graph.
+    // The small Run pill on the tile is the fast-path for just running it.
+    el.onclick = (e) => {
+      if (e.target.closest('.tile-run')) {
+        openSheet(el.dataset.id);
+        return;
+      }
+      location.href = `/workflow-editor.html?from=${encodeURIComponent(el.dataset.id)}`;
+    };
   }
 }
 
@@ -135,7 +144,10 @@ function tile(w) {
       <p>${escapeHtml(w.desc || '')}</p>
       <div class="foot">
         <span>${w.graph?.nodes?.length ?? 0} steps · ${escapeHtml(w.estimate || '—')}</span>
-        <span class="scope-tag">${w.scope === 'builtin' ? 'built-in' : w.scope === 'user' ? 'your library' : 'this project'}</span>
+        <span class="tile-right">
+          <button class="tile-run" title="Fill in its inputs and run it" ${w.invalid ? 'disabled' : ''}>◆ Run</button>
+          <span class="scope-tag">${w.scope === 'builtin' ? 'built-in' : w.scope === 'user' ? 'your library' : 'this project'}</span>
+        </span>
       </div>
     </div>`;
 }
@@ -180,7 +192,7 @@ function openSheet(id, prefill = {}) {
   } else {
     edit.textContent = 'Edit';
     edit.title = 'Open it in the editor';
-    edit.onclick = () => { location.href = `/workflows-new.html?id=${encodeURIComponent(w.id)}`; };
+    edit.onclick = () => { location.href = `/workflow-editor.html?from=${encodeURIComponent(w.id)}`; };
   }
   $('shSchedule').onclick = () => { closeSheet(); location.hash = 'runs'; setTimeout(() => openScheduleForm(w.id), 60); };
   $('shSchedule').disabled = !!w.invalid;
@@ -218,7 +230,7 @@ async function makeItYours() {
   const r = await fetch(`/api/workflows/${encodeURIComponent(w.id)}/duplicate`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: 'user' }),
   }).then((x) => x.json()).catch((e) => ({ error: e.message }));
-  if (r.saved) { location.href = `/workflows-new.html?id=${encodeURIComponent(r.id)}`; return; }
+  if (r.saved) { location.href = `/workflow-editor.html?from=${encodeURIComponent(r.id)}`; return; }
   st.textContent = r.error || 'Could not copy it.';
 }
 
@@ -1081,7 +1093,7 @@ const TAB_COPY = {
     eyebrow: 'Workflows · a job you run the same way every time',
     title:   'Pick a workflow.',
     desc:    'A workflow is a set of steps you would otherwise type out one prompt at a time. Press one button and watch each step finish on the canvas, instead of scrolling a terminal to work out what happened.',
-    newHref: '/workflows-new.html',
+    newHref: '/workflow-editor.html',
     newLabel: '+ New workflow',
   },
   runs: {

@@ -83,8 +83,12 @@ function effectiveRender(n) {
   return n.kind;
 }
 
-const runId = (location.hash || '').replace('#', '').trim();
-if (!runId) {
+const rawHash = (location.hash || '').replace('#', '').trim();
+const previewMatch = /^def:(.+)$/.exec(rawHash);
+const previewDefId = previewMatch ? decodeURIComponent(previewMatch[1]) : null;
+const runId = previewDefId ? null : rawHash;
+const isPreview = !!previewDefId;
+if (!runId && !isPreview) {
   document.getElementById('runStatus').textContent = 'No run id in URL.';
 }
 
@@ -95,6 +99,20 @@ let selectedId = null;
 const armed = new Set();
 
 async function load() {
+  if (isPreview) {
+    // Preview mode: synthesise a run-shaped object from the def so the
+    // existing canvas can render the workflow's structure. No scheduler,
+    // no outputs; the Run button in the actions bar starts a real run.
+    const r = await fetch(`/api/workflows/${encodeURIComponent(previewDefId)}`).then((x) => x.json()).catch(() => ({}));
+    if (!r.workflow) {
+      document.getElementById('runStatus').textContent = 'Workflow not found.';
+      return;
+    }
+    run = defToPreviewRun(r.workflow);
+    meta = {};
+    render();
+    return;
+  }
   const r = await fetch(`/api/runs/${encodeURIComponent(runId)}`).then((x) => x.json()).catch(() => ({}));
   if (!r.run) {
     document.getElementById('runStatus').textContent = 'Run not found — it may have been deleted.';
@@ -103,6 +121,30 @@ async function load() {
   run = r.run;
   meta = r;
   render();
+}
+
+function defToPreviewRun(def) {
+  return {
+    runId: null,
+    workflowId: def.id,
+    workflowTitle: def.title,
+    category: def.category,
+    scope: def.scope,
+    schemaVersion: def.schemaVersion || 1,
+    status: 'preview',
+    startedAt: null, endedAt: null,
+    inputs: {},
+    graph: {
+      nodes: (def.graph?.nodes || []).map((n) => ({
+        id: n.id, title: n.title, kind: n.kind,
+        col: n.col, row: n.row, cost: n.cost,
+        spec: n.spec,
+        status: 'pending', waitsFor: null, output: null,
+      })),
+      edges: def.graph?.edges || [],
+    },
+    _def: def, // keep the whole def around so the Run button has inputs
+  };
 }
 
 function money(n) { return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`; }
@@ -133,8 +175,10 @@ function render() {
     : '';
   const word = { running: 'Running', 'awaiting-answer': 'Waiting for you', done: 'Done', failed: 'Failed', stopped: 'Stopped', interrupted: 'Cut short' }[run.status] || run.status;
   const live = run.status === 'running' || run.status === 'awaiting-answer';
-  document.getElementById('runStatus').innerHTML = `${live ? '<span class="live-dot"></span>' : ''}${word} · ${done} of ${nodes.length} done${totalStr}${legacyPill}`;
-  const bits = [run.trigger === 'schedule' ? 'on schedule' : run.trigger === 'you' ? 'started by you' : run.trigger];
+  document.getElementById('runStatus').innerHTML = isPreview
+    ? `Preview · ${nodes.length} step${nodes.length === 1 ? '' : 's'} · not run yet${legacyPill}`
+    : `${live ? '<span class="live-dot"></span>' : ''}${word} · ${done} of ${nodes.length} done${totalStr}${legacyPill}`;
+  const bits = isPreview ? [] : [run.trigger === 'schedule' ? 'on schedule' : run.trigger === 'you' ? 'started by you' : run.trigger];
   if (run.sessionId) bits.push(`session ${run.sessionId.slice(0, 8)}`);
   document.getElementById('runSession').textContent = bits.filter(Boolean).join(' · ');
   renderNotice();
@@ -209,6 +253,15 @@ function renderRunActions() {
     bar.className = 'run-actions';
     document.querySelector('.panel .head').append(bar);
   }
+  if (isPreview) {
+    bar.innerHTML = `
+      <a class="run-btn" href="/workflow-editor.html?from=${encodeURIComponent(run.workflowId)}"
+         title="Open this workflow in the visual editor">✎ Edit</a>
+      <button class="run-btn" data-act="run-preview"
+              title="Fill in its inputs and run it">◆ Run</button>`;
+    bar.querySelector('[data-act="run-preview"]').onclick = runFromPreview;
+    return;
+  }
   const live = (run.status === 'running' || run.status === 'awaiting-answer') && !meta.ownedElsewhere;
   const resumable = ['interrupted', 'stopped', 'failed'].includes(run.status);
   const sel = selectedId && run.graph.nodes.find((n) => n.id === selectedId);
@@ -274,6 +327,15 @@ function renderRunActions() {
     if (r.resumed) { load(); return; }
     say(r.error || 'Could not resume it.', true);
   }
+}
+
+/**
+ * Preview-mode Run: the workflow's own sheet, which collects every input
+ * (including an Inputs step's fields) and reports problems inline, rather
+ * than a browser prompt per field.
+ */
+function runFromPreview() {
+  location.href = `/workflows.html?open=${encodeURIComponent(run.workflowId)}#workflows`;
 }
 
 async function rerunFromCanvas(fromNodeId) {
@@ -681,4 +743,4 @@ if (!new URLSearchParams(location.search).has('snapshot')) {
 }
 window.addEventListener('resize', () => run && drawEdges(document.getElementById('canvas'), document.getElementById('edges')));
 
-if (runId) load();
+if (runId || isPreview) load();

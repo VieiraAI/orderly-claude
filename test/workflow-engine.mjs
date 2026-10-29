@@ -504,60 +504,93 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     const tick = 'await new Promise((r) => setTimeout(r, 60));';
 
     // Build one in the editor, from an empty canvas.
-    let p = await open('/workflows-new.html');
+    let p = await open('/workflow-editor.html');
     let r = await p.ev(`
       const $ = (id) => document.getElementById(id);
-      const fire = (el) => el.dispatchEvent(new Event('input', { bubbles: true }));
+      const fire = (el, t = 'input') => el.dispatchEvent(new Event(t, { bubbles: true }));
       const empty = document.querySelectorAll('.n-card').length;
+      const sideHidden = $('edLayout').classList.contains('no-sel');
       $('wfTitle').value = 'Page check'; fire($('wfTitle'));
+      $('btnSettings').click(); ${tick}
       $('btnAddInput').click(); ${tick}
       const k = document.querySelector('#inputsList [data-f="key"]'); k.value = 'who'; fire(k);
-      document.querySelector('.kind-btn[data-kind="script"]').click(); ${tick}
+      const add = async (kind, after) => {
+        $('btnAddNodeOpen').click();
+        $('newKind').value = kind; fire($('newKind'), 'change');
+        $('newAfter').value = after || '';
+        $('btnAddNode').click(); ${tick}
+      };
+      const kinds = [...$('newKind').options].map((o) => o.textContent);
+      await add('script');
       const c = document.querySelector('#selSpec [data-spec="cmd"]'); c.value = 'echo hi'; fire(c);
-      document.querySelector('.kind-btn[data-kind="agent"]').click(); ${tick}
+      await add('agent', 'script');
       const pr = document.querySelector('#selSpec [data-spec="prompt"]');
       pr.focus(); pr.value = 'Use '; pr.selectionStart = pr.selectionEnd = 4;
       document.querySelector('#selSpec .ref-btn[data-for="sp-prompt"]').click(); ${tick}
       const offered = [...document.querySelectorAll('#refPop button[data-ref]')].map((b) => b.dataset.ref);
       document.querySelector('#refPop button[data-ref="{{nodes.script.output.out}}"]').click(); ${tick}
       await new Promise((r) => setTimeout(r, 900));
-      return { empty, id: $('wfId').value, cards: document.querySelectorAll('.n-card').length,
+      return { empty, sideHidden, kinds, id: $('wfId').value, cards: document.querySelectorAll('.n-card').length,
         edges: document.querySelectorAll('#edEdges .edge-hit').length, offered, prompt: pr.value,
         preview: !$('preview').classList.contains('hidden') && /Use/.test($('previewText').textContent) };`);
-    check('a new workflow starts from an empty canvas', r.empty === 0, String(r.empty));
+    check('a new workflow starts from an empty canvas, sidebar out of the way', r.empty === 0 && r.sideHidden, JSON.stringify([r.empty, r.sideHidden]));
+    check('steps are offered by what they do', r.kinds.includes('Ask Claude') && r.kinds.includes('Ask me to approve'), r.kinds.join(', '));
     check('the name fills in the short name', r.id === 'page-check', r.id);
-    check('a step added while another is selected is connected after it', r.cards === 2 && r.edges === 1, JSON.stringify(r));
+    check('a step added "after" another is connected to it', r.cards === 2 && r.edges === 1, JSON.stringify(r));
     check('the reference picker offers inputs and what earlier steps produced',
       r.offered.includes('{{inputs.who}}') && r.offered.includes('{{nodes.script.output.out}}'), r.offered.join(' '));
     check('picking a reference inserts it at the cursor, with a live preview', r.prompt === 'Use {{nodes.script.output.out}}' && r.preview, r.prompt);
     r = await p.ev(`
       document.querySelector('#edEdges .edge-hit').dispatchEvent(new MouseEvent('click', { bubbles: true })); ${tick}
-      document.getElementById('btnDeleteEdge').click();
-      await new Promise((r) => setTimeout(r, 600));
-      const problem = document.getElementById('problems').textContent;
+      const opened = document.getElementById('selSummary').textContent;
+      document.querySelector('#selEdges [data-act="rm-edge"]').click();
+      await new Promise((r) => setTimeout(r, 700));
+      const flagged = document.querySelector('.n-card[data-id="agent"]');
+      const problem = flagged.classList.contains('has-problem') ? flagged.title : '';
       document.querySelector('.n-card[data-id="script"]').click();
       document.getElementById('btnConnect').click();
       document.querySelector('.n-card[data-id="agent"]').click();
-      await new Promise((r) => setTimeout(r, 600));
+      await new Promise((r) => setTimeout(r, 700));
+      const cleared = !document.querySelector('.n-card.has-problem');
       document.getElementById('wfScope').value = 'project';
       document.getElementById('btnSave').click();
       await new Promise((r) => setTimeout(r, 900));
-      return { problem, cleared: document.getElementById('problems').style.display === 'none',
-        saved: document.getElementById('saveLine').textContent, url: location.search };`);
-    check('removing a connection a reference relies on is flagged at once', /not upstream/.test(r.problem), r.problem);
+      return { opened, problem, cleared, saved: document.getElementById('saveLine').textContent, url: location.search };`);
+    check('clicking a connection opens the step it leads into', r.opened === 'Ask Claude', r.opened);
+    check('removing a connection a reference relies on is flagged on the card at once', /not upstream/.test(r.problem), r.problem);
     check('reconnecting clears it, and saving moves to editing the saved file',
-      r.cleared && /^Saved/.test(r.saved) && r.url === '?id=page-check', JSON.stringify(r));
+      r.cleared && /^saved/.test(r.saved) && r.url === '?from=page-check', JSON.stringify(r));
     check('the editor raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
     p = await open('/workflows-new.html?id=page-check');
-    r = await p.ev(`return { cards: document.querySelectorAll('.n-card').length, edges: document.querySelectorAll('#edEdges .edge-hit').length, inputs: document.querySelectorAll('#inputsList .list-row').length };`);
-    check('a saved workflow reopens as it was left', r.cards === 2 && r.edges === 1 && r.inputs === 1, JSON.stringify(r));
+    r = await p.ev(`return { path: location.pathname, cards: document.querySelectorAll('.n-card').length, edges: document.querySelectorAll('#edEdges .edge-hit').length, inputs: document.querySelectorAll('#inputsList .list-row').length };`);
+    check('a saved workflow reopens as it was left, old links included', r.path === '/workflow-editor.html' && r.cards === 2 && r.edges === 1 && r.inputs === 1, JSON.stringify(r));
     await p.close();
     // ship-pr was copied into this project above, and that copy rightly
     // shadows the built-in; visual-regression is still only a built-in.
-    p = await open('/workflows-new.html?id=visual-regression');
+    p = await open('/workflow-editor.html?from=visual-regression');
     r = await p.ev(`return !document.getElementById('builtinBanner').classList.contains('hidden');`);
     check('opening a built-in says saving makes your own copy', r === true);
+    await p.close();
+
+    // A workflow's preview, and the catalog's way into the editor.
+    p = await open('/workflows-run.html#def:visual-regression');
+    // Clicks that navigate are fired after the evaluation returns; awaiting
+    // across a navigation loses the page the script was running in.
+    const before = await p.ev(`
+      setTimeout(() => document.querySelector('#runActions [data-act="run-preview"]').click(), 0);
+      return { status: document.getElementById('runStatus').textContent, cards: document.querySelectorAll('.card').length };`);
+    await sleep(1400);
+    r = { ...before, ...(await p.ev(`return { sheet: document.getElementById('shTitle')?.textContent || '', path: location.pathname };`)) };
+    check('a workflow previews on its canvas before it has ever run', /^Preview/.test(r.status) && r.cards >= 4, JSON.stringify(r));
+    check('Run from the preview opens its inputs sheet, not a browser prompt', r.path === '/workflows.html' && /visual regression/i.test(r.sheet), JSON.stringify(r));
+    check('the preview raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+    p = await open('/workflows.html#workflows');
+    await p.ev(`setTimeout(() => document.querySelector('.tile[data-id="visual-regression"] h3').click(), 0); return 1;`);
+    await sleep(1200);
+    r = await p.ev('return location.pathname + location.search;');
+    check('clicking a workflow in the catalog opens it in the editor', r === '/workflow-editor.html?from=visual-regression', r);
     await p.close();
 
     // The Runs panel: a question answered from the list, a failure explained.

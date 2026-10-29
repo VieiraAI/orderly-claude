@@ -125,7 +125,14 @@ main { max-width: 1280px; margin: 0 auto; padding: 0 56px 96px; }
   border-top: 1px solid var(--edge-tint);
   font-family: var(--f-mono); font-size: 11px; color: var(--faint);
 }
-.tile .scope-tag { margin-left: auto; opacity: 0.65; }
+.tile .tile-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.tile .scope-tag  { opacity: 0.65; }
+.tile .tile-run {
+  font: 10.5px var(--f-mono); color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--accent) 45%, transparent); border-radius: 999px;
+  padding: 3px 10px; cursor: pointer; letter-spacing: 0.02em;
+}
+.tile .tile-run:hover { background: color-mix(in oklab, var(--accent) 22%, transparent); }
 
 /* --------------------------------- Runs ---------------------------------- */
 
