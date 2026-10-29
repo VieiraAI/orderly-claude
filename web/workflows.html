@@ -33,7 +33,11 @@
   <div class="eyebrow" id="heroEyebrow">Workflows · available in this project</div>
   <h1 class="display" id="heroTitle">Pick a workflow.</h1>
   <p id="heroDesc">Every tile is a graph of typed-output cards. Click one for the brief sheet, fill the inputs, and open it on the canvas.</p>
-  <a id="heroNewBtn" href="/workflows-new.html" class="btn-ghost" style="margin-top:16px;display:inline-block;padding:6px 14px;font:12px var(--f-mono);color:var(--accent);border:1px solid color-mix(in oklab, var(--accent) 40%, transparent);border-radius:999px;">+ New workflow</a>
+  <div class="hero-actions">
+    <a id="heroNewBtn" href="/workflows-new.html" class="hero-btn">+ New workflow</a>
+    <label class="hero-btn ghost" id="heroImport" title="Add a workflow file someone shared with you">↑ Import<input type="file" id="importFile" accept=".json,application/json" hidden></label>
+    <span class="hero-note" id="importNote" role="status"></span>
+  </div>
 </section>
 
 <main>
@@ -108,14 +112,18 @@
   <div class="s-h">Inputs</div>
   <div class="inputs" id="shInputs"></div>
 
-  <div class="s-h">Plan</div>
+  <div class="s-h">Steps</div>
   <ul style="margin:0 0 6px;padding:0;list-style:none;font-size:13px;color:var(--mute);" id="shPlan"></ul>
+  <div id="shProblems"></div>
 
   <div class="actions">
     <button class="btn-run" id="shRun">◆ Run</button>
-    <button class="btn-ghost" onclick="closeSheet()">Cancel</button>
+    <button class="btn-ghost" id="shEdit">Edit</button>
+    <button class="btn-ghost" id="shSchedule">Schedule…</button>
+    <a class="btn-ghost" id="shExport" href="#" download>Export</a>
     <span class="est" id="shEst">—</span>
   </div>
+  <div class="sheet-status" id="shStatus" role="status"></div>
 </aside>
 
 <script type="module" src="/workflows.mjs"></script>
