@@ -54,7 +54,16 @@ function renderTiles() {
     mount.innerHTML = list.map(tile).join('');
   }
   for (const el of document.querySelectorAll('.tile')) {
-    el.onclick = () => openSheet(el.dataset.id);
+    // Click on a tile opens the workflow on the canvas (preview mode).
+    // A dedicated "Run" affordance on the tile keeps the inputs sheet
+    // reachable without burying the structure behind it.
+    el.onclick = (e) => {
+      if (e.target.closest('.tile-run')) {
+        openSheet(el.dataset.id);
+        return;
+      }
+      location.href = `/workflows-run.html#def:${encodeURIComponent(el.dataset.id)}`;
+    };
   }
 }
 
@@ -91,7 +100,10 @@ function tile(w) {
       <p>${escapeHtml(w.desc || '')}</p>
       <div class="foot">
         <span>${w.graph?.nodes?.length ?? 0} nodes · ${w.estimate || '—'}</span>
-        <span class="scope-tag">${w.scope}</span>
+        <span class="tile-right">
+          <button class="tile-run" title="Open the inputs sheet and run">◆ Run</button>
+          <span class="scope-tag">${w.scope}</span>
+        </span>
       </div>
     </div>`;
 }

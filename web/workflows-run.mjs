@@ -82,8 +82,12 @@ function effectiveRender(n) {
   return n.kind;
 }
 
-const runId = (location.hash || '').replace('#', '').trim();
-if (!runId) {
+const rawHash = (location.hash || '').replace('#', '').trim();
+const previewMatch = /^def:(.+)$/.exec(rawHash);
+const previewDefId = previewMatch ? decodeURIComponent(previewMatch[1]) : null;
+const runId = previewDefId ? null : rawHash;
+const isPreview = !!previewDefId;
+if (!runId && !isPreview) {
   document.getElementById('runStatus').textContent = 'No run id in URL.';
 }
 
@@ -91,6 +95,19 @@ let run = null;
 let cards = {};
 
 async function load() {
+  if (isPreview) {
+    // Preview mode: synthesise a run-shaped object from the def so the
+    // existing canvas can render the workflow's structure. No scheduler,
+    // no outputs; the Run button in the actions bar starts a real run.
+    const r = await fetch(`/api/workflows/${encodeURIComponent(previewDefId)}`).then((x) => x.json());
+    if (!r.workflow) {
+      document.getElementById('runStatus').textContent = 'Workflow not found.';
+      return;
+    }
+    run = defToPreviewRun(r.workflow);
+    render();
+    return;
+  }
   const r = await fetch(`/api/runs/${encodeURIComponent(runId)}`).then((x) => x.json());
   if (!r.run) {
     document.getElementById('runStatus').textContent = 'Run not found.';
@@ -98,6 +115,30 @@ async function load() {
   }
   run = r.run;
   render();
+}
+
+function defToPreviewRun(def) {
+  return {
+    runId: null,
+    workflowId: def.id,
+    workflowTitle: def.title,
+    category: def.category,
+    scope: def.scope,
+    schemaVersion: def.schemaVersion || 1,
+    status: 'preview',
+    startedAt: null, endedAt: null,
+    inputs: {},
+    graph: {
+      nodes: (def.graph?.nodes || []).map((n) => ({
+        id: n.id, title: n.title, kind: n.kind,
+        col: n.col, row: n.row, cost: n.cost,
+        spec: n.spec,
+        status: 'pending', waitsFor: null, output: null,
+      })),
+      edges: def.graph?.edges || [],
+    },
+    _def: def, // keep the whole def around so the Run button has inputs
+  };
 }
 
 function render() {
@@ -128,9 +169,12 @@ function render() {
   const legacyPill = (run.schemaVersion || 1) < 2
     ? ' · <span class="legacy-pill" title="This run was defined under the pre-v2 schema. Rendered through the compat layer.">legacy</span>'
     : '';
-  document.getElementById('runStatus').innerHTML = run.status === 'running'
-    ? `<span class="live-dot"></span>Running · ${done} of ${nodes.length} done${totalStr}${legacyPill}`
-    : `${run.status} · ${done} of ${nodes.length} done${totalStr}${legacyPill}`;
+  const statusLine = isPreview
+    ? `preview · ${nodes.length} node${nodes.length === 1 ? '' : 's'}${legacyPill}`
+    : run.status === 'running'
+      ? `<span class="live-dot"></span>Running · ${done} of ${nodes.length} done${totalStr}${legacyPill}`
+      : `${run.status} · ${done} of ${nodes.length} done${totalStr}${legacyPill}`;
+  document.getElementById('runStatus').innerHTML = statusLine;
   if (run.sessionId) {
     document.getElementById('runSession').textContent = `session ${run.sessionId.slice(0, 8)}`;
   }
@@ -146,6 +190,15 @@ function renderRunActions() {
     bar.id = 'runActions';
     bar.className = 'run-actions';
     document.querySelector('.panel .head').append(bar);
+  }
+  if (isPreview) {
+    bar.innerHTML = `
+      <a class="run-btn" href="/workflows-new.html?from=${encodeURIComponent(run.workflowId)}"
+         title="Open this workflow in the visual editor">✎ Edit</a>
+      <button class="run-btn" data-act="run-preview"
+              title="Open the inputs sheet and run this workflow">◆ Run</button>`;
+    bar.querySelector('[data-act="run-preview"]').onclick = runFromPreview;
+    return;
   }
   const terminal = ['done', 'failed', 'stopped'].includes(run.status);
   bar.innerHTML = `
@@ -181,6 +234,32 @@ function renderRunActions() {
       throw new Error(r.error || 'delete failed');
     } catch (e) { alert(`Delete failed: ${e.message}`); }
   };
+}
+
+/**
+ * Preview-mode Run. If the def has declared inputs, prompt for each one;
+ * otherwise skip straight to the POST. On success, jump to the real run
+ * canvas so the user watches the scheduler march.
+ */
+async function runFromPreview() {
+  const def = run._def || {};
+  const fields = Array.isArray(def.inputs) ? def.inputs : [];
+  const inputs = {};
+  for (const f of fields) {
+    const label = f.label || f.key;
+    const val = window.prompt(`${label}${f.placeholder ? ` (e.g. ${f.placeholder})` : ''}`, '');
+    if (val === null) return; // user cancelled
+    if (val.trim()) inputs[f.key] = val.trim();
+  }
+  try {
+    const r = await fetch(`/api/workflows/${encodeURIComponent(def.id)}/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ inputs }),
+    }).then((x) => x.json());
+    if (!r.run?.runId) throw new Error(r.error || 'run failed to start');
+    location.hash = r.run.runId;
+    location.reload();
+  } catch (e) { alert(`Run failed: ${e.message}`); }
 }
 
 async function rerunFromCanvas(fromNodeId) {
