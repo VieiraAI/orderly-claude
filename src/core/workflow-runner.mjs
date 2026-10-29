@@ -224,7 +224,9 @@ export class Scheduler extends EventEmitter {
         if (this.silenced || this.aborted) return;
         this.updateNode(node.id, {
           status: 'failed', endedAt: new Date().toISOString(), progress: undefined,
-          output: { ...(node.output || {}), error: e.message },
+          // A step that failed may still have produced something worth reading
+          // (a command's output); the handler hangs it on the error.
+          output: { ...(node.output || {}), ...(e.output || {}), error: e.message },
           durationMs: Date.now() - Date.parse(startedAt),
         });
         if (!this.halting) this.halting = { status: 'failed', error: e.message, failedNode: node.id };

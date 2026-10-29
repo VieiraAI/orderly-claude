@@ -84,8 +84,8 @@ const HANDLERS = {
     // A command that failed fails its step, as it would in any build system,
     // unless the author said a failure is something to look at, not to stop on.
     if (res.code !== 0 && !node.spec?.allowFailure && !signal?.aborted) {
-      const last = text.split('\n').filter(Boolean).slice(-3).join(' · ');
-      throw new Error(`\`${cmd.display}\` exited ${res.code}${last ? ` — ${last.slice(0, 300)}` : ''}`);
+      const why = failureLine(text);
+      throw Object.assign(new Error(`\`${cmd.display}\` exited ${res.code}${why ? ` — ${why.slice(0, 300)}` : ''}`), { output });
     }
     return output;
   },
@@ -101,7 +101,7 @@ const HANDLERS = {
     const prompt = [
       `Draft a focused Markdown document for the "${ctx.run.workflowTitle}" workflow.`,
       `This node is called "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
-      inputBlock(ctx.run.inputs),
+      promptInputs(node, ctx),
       upstream && `## Context from earlier steps\n${upstream}`,
       '',
       `Return only the Markdown body — no preamble, no closing commentary.`,
@@ -124,7 +124,7 @@ const HANDLERS = {
     const prompt = [
       `You are reviewing work produced by the "${ctx.run.workflowTitle}" workflow.`,
       `This review node is "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
-      inputBlock(ctx.run.inputs),
+      promptInputs(node, ctx),
       upstream && `## What to review\n${upstream}`,
       '',
       `Return a JSON object with this exact shape and nothing else:`,
@@ -149,10 +149,12 @@ const HANDLERS = {
     const prompt = [
       `Produce a single self-contained HTML mockup for the "${ctx.run.workflowTitle}" workflow.`,
       `This node is "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
-      inputBlock(ctx.run.inputs),
+      promptInputs(node, ctx),
       upstream && `## Direction from earlier steps\n${upstream}`,
       '',
-      `Return only the HTML (no code fences, no commentary). Use inline CSS. Keep it under 200 lines.`,
+      // A page can need script (an interactive card, a chart), so it is not
+      // limited to CSS, and not cut short at a line count.
+      `Return only the HTML (no code fences, no commentary): one self-contained file, with CSS and any JavaScript inline.`,
     ].filter(Boolean).join('\n\n');
     const { text, meta } = await callClaude(prompt, {
       ctx, cwd: cwdOf(ctx.run), signal: ctx.signal, model: pickModel(node, 'sonnet'),
@@ -167,7 +169,7 @@ const HANDLERS = {
     const prompt = [
       `Propose a small code change for the "${ctx.run.workflowTitle}" workflow.`,
       `This node is "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
-      inputBlock(ctx.run.inputs),
+      promptInputs(node, ctx),
       upstream && `## What to work from\n${upstream}`,
       '',
       `Return a JSON object with this exact shape and nothing else:`,
@@ -187,7 +189,7 @@ const HANDLERS = {
     const prompt = [
       `Draft a GitHub pull request body for the "${ctx.run.workflowTitle}" workflow.`,
       `This node is "${node.title}". ${node.prompt ? node.prompt : ''}`.trim(),
-      inputBlock(ctx.run.inputs),
+      promptInputs(node, ctx),
       upstream && `## What this PR covers\n${upstream}`,
       '',
       `Return a JSON object with this exact shape and nothing else:`,
@@ -610,17 +612,16 @@ const HANDLERS = {
   // run so downstream work doesn't start on an unapproved artifact.
   approve: async (node, ctx) => {
     const spec = node.spec || {};
-    const answer = await ctx.awaitAnswer(node.id, {
-      question: resolveOrFail(spec.question || spec.prompt || 'Approve?', ctx, node),
-      choices: ['approve', 'reject'],
-    });
+    const question = resolveOrFail(spec.question || spec.prompt || 'Approve?', ctx, node);
+    const answer = await ctx.awaitAnswer(node.id, { question, choices: ['approve', 'reject'] });
     const approved = answer === 'approve';
     if (!approved) {
       // Signal rejection the same way Check-stop does: throw so the scheduler
       // marks the node failed and finishes the run as failed. Never retried.
       throw final(`approve "${node.title}" rejected`);
     }
-    return { approved: true, answer };
+    // Keep the question: the run page says what was approved, not just that something was.
+    return { approved: true, answer, question };
   },
 
   _default: async (node, ctx) => {
@@ -677,7 +678,11 @@ function collectShown(show, ctx, node) {
  * Tests and demos set `ORDERLY_HANDLER_MODE=mock` to short-circuit the spawn
  * so the smoke suite does not bill the API on every run.
  */
-async function callClaude(prompt, { ctx, cwd, signal, model = 'sonnet', onProgress, onStream, timeoutMs = 180_000 } = {}) {
+// A designed page or a long review can take a few minutes. A step that
+// needs a different limit sets "Give up after".
+const CLAUDE_DEFAULT_TIMEOUT_MS = 10 * 60_000;
+
+async function callClaude(prompt, { ctx, cwd, signal, model = 'sonnet', onProgress, onStream, timeoutMs = CLAUDE_DEFAULT_TIMEOUT_MS } = {}) {
   ctx?.recordSent?.(prompt);
   if (ctx?.timeoutMs) timeoutMs = ctx.timeoutMs;
   if (process.env.ORDERLY_HANDLER_MODE === 'mock') {
@@ -698,7 +703,7 @@ async function callClaude(prompt, { ctx, cwd, signal, model = 'sonnet', onProgre
     '--verbose',
     '--permission-mode', 'acceptEdits',
     '--model', model, prompt];
-  const { finalPayload, text, code, err } = await execStream(argv, {
+  const { finalPayload, text, code, err, timedOut } = await execStream(argv, {
     cwd, signal, timeoutMs,
     onDelta: (delta, totals) => {
       const tail = text => text.slice(-40).replace(/\s+/g, ' ').trim();
@@ -710,6 +715,9 @@ async function callClaude(prompt, { ctx, cwd, signal, model = 'sonnet', onProgre
   });
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
   if (!finalPayload) {
+    if (timedOut) {
+      throw new Error(`Claude had not finished after ${Math.round(timeoutMs / 60_000) || '<1'} min, so the step was stopped. Raise "Give up after" on this step if it needs longer.`);
+    }
     throw new Error(`claude cli exited ${code} without a result: ${(err || '').slice(0, 200)}`);
   }
   if (finalPayload.is_error) {
@@ -730,13 +738,16 @@ async function callClaude(prompt, { ctx, cwd, signal, model = 'sonnet', onProgre
  *  as JSON; recognised event types feed onDelta so the card can advance. */
 function execStream(argv, { cwd, signal, timeoutMs = 180_000, onDelta } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(argv[0], argv.slice(1), { cwd, env: process.env, detached: true });
+    // No stdin: the CLI otherwise waits for it and prints a warning that
+    // ends up in the error message instead of the real reason.
+    const child = spawn(argv[0], argv.slice(1), { cwd, env: process.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let finalPayload = null;
+    let timedOut = false;
     let text = '';
     let tokens = 0;
     let err = '';
     let stdoutBuf = '';
-    let timer = setTimeout(() => killTree(child), timeoutMs);
+    let timer = setTimeout(() => { timedOut = true; killTree(child); }, timeoutMs);
     signal?.addEventListener('abort', () => killTree(child), { once: true });
     child.stdout.on('data', (chunk) => {
       stdoutBuf += chunk.toString();
@@ -755,7 +766,7 @@ function execStream(argv, { cwd, signal, timeoutMs = 180_000, onDelta } = {}) {
       }
     });
     child.stderr.on('data', (d) => { err += d.toString(); });
-    child.on('close', (code) => { clearTimeout(timer); resolve({ finalPayload, text, code: code ?? -1, err }); });
+    child.on('close', (code) => { clearTimeout(timer); resolve({ finalPayload, text, code: code ?? -1, err, timedOut }); });
     child.on('error', (e)   => { clearTimeout(timer); resolve({ finalPayload: null, text: '', code: -1, err: e.message }); });
   });
 }
@@ -818,6 +829,34 @@ function outputToText(node) {
   if (o.hunks)      return `\`${o.file || ''}\`: ${o.hunks.length} hunk(s)`;
   if (o.title)      return o.title;
   return '';
+}
+
+/**
+ * The run's inputs, as a block at the end of a prompt — unless the prompt
+ * already names what it uses ({{inputs.x}} or {{nodes.y…}}). Then it gets
+ * only those: a template brief handed the real roster as well tends to bake
+ * real names into what should stay blank.
+ */
+/**
+ * The line that says why a command failed. A crash ends in a stack trace and
+ * a dump of the error object, so the last lines say nothing; the line naming
+ * the error does. Falls back to the last lines.
+ */
+function failureLine(text) {
+  const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  // "TypeError: …", "Error: Command failed: …" — what a crash says first.
+  const thrown = lines.find((l) => /^[A-Z]\w*(Error|Exception): /.test(l));
+  if (thrown) return thrown;
+  const named = lines.filter((l) => !/new \w*Error\(/.test(l)).filter((l) => !/^at\s/.test(l) && /(^|\s|:)(\w*Error|error|fatal|failed|not found|cannot|can't|refused)\b/i.test(l)
+    && !/^(code|status|signal|stdout|stderr|output|pid):/i.test(l));
+  if (named.length) return named[0];
+  return lines.slice(-3).join(' · ');
+}
+
+function promptInputs(node, ctx) {
+  const authored = String(node.spec?.prompt ?? node.prompt ?? '');
+  if (node.explicit || /\{\{\s*(inputs|nodes)\./.test(authored)) return '';
+  return inputBlock(ctx.run.inputs);
 }
 
 function inputBlock(inputs) {
@@ -988,7 +1027,7 @@ async function runAgentOnce(node, ctx, extraFailures = []) {
   const upstream = shim.explicit ? '' : upstreamContext(node, ctx.run);
   const jsonPrompt = [
     prompt || `Produce JSON for node "${node.title}".`,
-    inputBlock(ctx.run.inputs),
+    promptInputs(node, ctx),
     upstream && `## Context from earlier steps\n${upstream}`,
     '',
     'Return a JSON object and nothing else.',

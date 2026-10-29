@@ -1797,7 +1797,57 @@ async function main() {
     check('approve finishes done when the user approves',
       approved?.status === 'done' && approved?.graph.nodes[0]?.output?.approved === true,
       `${approved?.status} / approved=${approved?.graph.nodes[0]?.output?.approved}`);
+    check('an approval keeps the question it asked',
+      typeof approved?.graph.nodes[0]?.output?.question === 'string' && approved.graph.nodes[0].output.question.length > 0,
+      JSON.stringify(approved?.graph.nodes[0]?.output));
     try { fs.unlinkSync(approveSaved.file); } catch {}
+
+    // A prompt that names its inputs gets only those, not every input pasted
+    // below it; one that names none still gets them all.
+    const runPromptCheck = async (id, prompt) => {
+      const def = { schemaVersion: 2, id, title: id, graph: { nodes: [
+        { id: 'a', title: 'A', kind: 'agent', col: 1, row: 0, spec: { prompt, output: 'html' } }], edges: [] } };
+      const saved = await fetch(`${base}/api/workflows`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ def, scope: 'project', overwrite: true }) }).then((r) => r.json());
+      const st = await fetch(`${base}/api/workflows/${id}/run`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ inputs: { look: 'teal', roster: 'SECRET-ROSTER' } }) }).then((r) => r.json());
+      let fin = null;
+      const until = Date.now() + 4000;
+      while (Date.now() < until) {
+        await sleep(100);
+        const r = (await get(`/api/runs/${st.run.runId}`)).run;
+        if (r && ['done', 'failed'].includes(r.status)) { fin = r; break; }
+      }
+      try { fs.unlinkSync(saved.file); } catch {}
+      return fin?.graph.nodes[0]?.sent || '';
+    };
+    const named = await runPromptCheck('smoke-prompt-named', 'Design a card. The look: {{inputs.look}}');
+    check('a prompt naming its inputs is not handed the others',
+      /teal/.test(named) && !/SECRET-ROSTER/.test(named), named.slice(0, 200));
+    check('a web page step may use JavaScript and has no line cap',
+      /JavaScript/.test(named) && !/200 lines/.test(named), named.slice(-200));
+    const unnamed = await runPromptCheck('smoke-prompt-unnamed', 'Design a card.');
+    check('a prompt naming no inputs still gets them all', /SECRET-ROSTER/.test(unnamed), unnamed.slice(0, 200));
+
+    // A command that crashes says why, and keeps what it printed.
+    const crashDef = { schemaVersion: 2, id: 'smoke-crash', title: 'Crash', graph: { nodes: [
+      { id: 'c', title: 'C', kind: 'script', col: 1, row: 0,
+        spec: { cmd: "node -e \"console.log('step one done'); throw new TypeError('the roster is empty')\"" } }], edges: [] } };
+    const crashSaved = await fetch(`${base}/api/workflows`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: crashDef, scope: 'project', overwrite: true }) }).then((r) => r.json());
+    const crashSt = await fetch(`${base}/api/workflows/smoke-crash/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).then((r) => r.json());
+    let crashed = null;
+    const crashUntil = Date.now() + 5000;
+    while (Date.now() < crashUntil) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${crashSt.run.runId}`)).run;
+      if (r && ['done', 'failed'].includes(r.status)) { crashed = r; break; }
+    }
+    const crashOut = crashed?.graph.nodes[0]?.output || {};
+    check('a crashed command names the error, not the stack dump',
+      /TypeError: the roster is empty/.test(crashOut.error || ''), crashOut.error);
+    check('a failed command keeps what it printed', /step one done/.test(crashOut.out || ''), String(crashOut.out).slice(0, 120));
+    try { fs.unlinkSync(crashSaved.file); } catch {}
 
     // Legacy compat: a workflow without schemaVersion still runs; the resulting
     // run records schemaVersion: 1 so the canvas can badge it.

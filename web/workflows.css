@@ -352,8 +352,9 @@ main { max-width: 1280px; margin: 0 auto; padding: 0 56px 96px; }
 
 .c-head { display: flex; align-items: center; gap: 6px; font-size: 11px; }
 .c-head .k-icon { color: var(--mute); display: inline-flex; }
-.c-head .k-name { color: var(--text); }
-.c-head .k-model { margin-left: auto; font-family: var(--f-mono); color: var(--faint); font-size: 10px; }
+.c-head .k-name { color: var(--text); white-space: nowrap; flex: none; }
+.c-head .k-model { margin-left: auto; font-family: var(--f-mono); color: var(--faint); font-size: 10px;
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .c-body { flex: 1; min-height: 0; font-size: 12px; color: var(--mute); }
 .c-foot { display: flex; align-items: center; justify-content: space-between; font-family: var(--f-mono); font-size: 10px; color: var(--faint); border-top: 1px solid var(--edge-tint); padding-top: 6px; margin-top: 4px; }
@@ -826,3 +827,12 @@ button.stat:hover { background: var(--raised); }
 .rated { margin-left: 8px; font: 11px var(--f-ui); padding: 1px 7px; border-radius: 999px; border: 1px solid var(--edge-tint); vertical-align: 1px; }
 .rated.up { color: var(--ok); }
 .rated.down { color: var(--ship); }
+
+/* A page an Ask Claude step made, shrunk onto its card. 1000 px wide, scaled
+   to the card; the sandbox keeps it away from this page. */
+.mock-live { position: relative; height: 150px; overflow: hidden; border: 1px solid var(--edge-tint); border-radius: 6px;
+  margin-bottom: 4px; }
+.mock-live iframe { position: absolute; top: 0; left: 0; width: 1000px; height: 1400px; border: 0;
+  transform: scale(0.196); transform-origin: 0 0; pointer-events: none; }
+.json-row { font-family: var(--f-mono); font-size: 10.5px; padding: 1px 0; }
+.json-pre { margin: 4px 0 0; font: 10px/1.4 var(--f-mono); color: var(--mute); white-space: pre-wrap; max-height: 120px; overflow: hidden; }

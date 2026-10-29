@@ -37,9 +37,10 @@ const KIND_LABEL = {
   document: 'Document', report: 'Report', mockup: 'Mockup', diff: 'Diff',
   shots: 'Screenshots', 'shots-set': 'Screenshots', terminal: 'Terminal',
   ask: 'Decision', pr: 'Pull request',
-  agent: 'Agent', script: 'Script', decision: 'Decision', check: 'Check',
-  publish: 'Publish', display: 'Display', inputs: 'Inputs',
-  loop: 'Loop', delay: 'Delay', approve: 'Approve',
+  // The same names the editor uses, so a step is called one thing everywhere.
+  agent: 'Ask Claude', script: 'Run a command', decision: 'Ask me to choose', check: 'Check',
+  publish: 'Save or publish', display: 'Show together', inputs: 'Ask for inputs',
+  loop: 'Repeat for each', delay: 'Wait', approve: 'Ask me to approve', mcp: 'Call a tool',
 };
 // Shown only until a step has run and reported the model it actually used.
 const KIND_MODEL = {
@@ -48,7 +49,7 @@ const KIND_MODEL = {
   shots: 'orderly · capture', 'shots-set': 'orderly · capture',
   terminal: 'bash', ask: 'you', pr: 'github',
   agent: 'claude · cli', script: 'bash', decision: 'you', check: 'orderly',
-  publish: 'github', display: 'orderly', inputs: 'you',
+  publish: 'orderly', display: 'orderly', inputs: 'you',
   loop: 'orderly', delay: 'orderly', approve: 'you',
 };
 
@@ -60,6 +61,7 @@ function effectiveRender(n) {
     if (o.findings) return 'report';
     if (o.hunks)    return 'diff';
     if (o.html)     return 'mockup';
+    if (o.data !== undefined) return 'json';
     return 'document';
   }
   if (n.kind === 'script') {
@@ -502,8 +504,9 @@ function makeCard(n, pos, parent) {
   // otherwise a kind-level default. Same with the credit on the foot.
   const meta = n.output?.meta || {};
   // The model that actually ran, once known; it already says "claude".
+  // "claude-sonnet-5-5" → "Sonnet 5.5": short enough to sit beside the kind.
   const modelLabel = meta.model
-    ? esc(String(meta.model).replace(/^claude-/, 'claude · '))
+    ? esc(String(meta.model).replace(/^claude-/, '').replace(/^([a-z]+)-(\d+)-(\d+).*$/i, (_, f, a, b) => `${f[0].toUpperCase()}${f.slice(1)} ${a}.${b}`))
     : n.kind === 'publish' ? (n.spec?.target === 'pr' ? 'draft PR' : 'file')
     : (KIND_MODEL[n.kind] || '');
   const footMeta = cardFootMeta(n, meta);
@@ -603,11 +606,31 @@ function cardBody(n) {
         .map((f) => `<div class="finding"><span class="tag">${esc(f.tag)}</span><span class="txt">${esc(f.text)}</span></div>`).join('');
       return `<div class="doc-h">${esc(o.title || 'Findings')}</div>${items}`;
     }
-    case 'mockup':
-      return `
-        <div class="mock-ph"><div class="mini"><div class="bar a"></div><div class="bar b"></div><div class="bar c"></div></div></div>
+    case 'mockup': {
+      // The page itself, shrunk, in a sandbox with no access to this one.
+      // Only once the run has stopped changing: every update redraws the
+      // cards, and a live page would reload each time.
+      const settled = !['running'].includes(run.status);
+      const preview = o.html && settled
+        ? `<div class="mock-live"><iframe sandbox="allow-scripts" loading="lazy" tabindex="-1" title="${esc(o.name || 'page')}" srcdoc="${esc(o.html)}"></iframe></div>`
+        : '<div class="mock-ph"><div class="mini"><div class="bar a"></div><div class="bar b"></div><div class="bar c"></div></div></div>';
+      return `${preview}
         <div class="doc-h" style="margin-top:2px;">${esc(o.name || 'mockup.html')}</div>
         <div class="doc-b">${esc(o.note || '')}</div>`;
+    }
+    case 'json': {
+      // Data: name the list it holds and its first entries, not just a file name.
+      const d = o.data;
+      const list = Array.isArray(d) ? d : (d && typeof d === 'object' ? Object.values(d).find(Array.isArray) : null);
+      const listKey = d && !Array.isArray(d) && typeof d === 'object' ? Object.keys(d).find((k) => Array.isArray(d[k])) : null;
+      if (list) {
+        const label = (x) => (x && typeof x === 'object') ? (x.name ?? x.title ?? x.id ?? Object.values(x)[0]) : x;
+        const rows = list.slice(0, 5).map((x) => `<div class="doc-b json-row">${esc(String(label(x) ?? '').slice(0, 60))}</div>`).join('');
+        return `<div class="doc-h">${list.length} ${esc(listKey || 'items')}</div>${rows}${list.length > 5 ? `<div class="doc-b">+${list.length - 5} more</div>` : ''}`;
+      }
+      const text = typeof d === 'string' ? d : JSON.stringify(d, null, 2);
+      return `<div class="doc-h">${esc(o.title || 'Data')}</div><pre class="json-pre">${esc(String(text).split('\n').slice(0, 8).join('\n'))}</pre>`;
+    }
     case 'shots': {
       const after = o.after?.ref || o.shot?.ref;
       const before = o.before?.ref;
@@ -684,10 +707,21 @@ function cardBody(n) {
       return `<div class="doc-h">${esc(o.render || 'display')} · ${sources.length}</div>${rows}`;
     }
     case 'publish': {
-      // Non-PR publish target (e.g. file write).
-      return `<div class="doc-h">${esc(o.target || 'publish')}</div><div class="doc-b">${esc(o.path || '')} ${o.bytes ? `· ${o.bytes} B` : ''}</div>`;
+      // A file write: name the file, then where it went and how big it is.
+      if (o.path) {
+        const name = o.path.split('/').pop();
+        const folder = o.path.slice(0, -name.length) || './';
+        const size = o.bytes == null ? '' : o.bytes < 1024 ? `${o.bytes} B` : `${(o.bytes / 1024).toFixed(1)} KB`;
+        return `<div class="doc-h">${esc(name)}</div><div class="doc-b">${esc(folder)}${size ? ` · ${size}` : ''}</div>`;
+      }
+      return `<div class="doc-h">${esc(o.target || 'publish')}</div><div class="doc-b">${esc(o.note || o.reason || '')}</div>`;
     }
-    default: return `<div class="doc-b">output ready</div>`;
+    case 'approve': {
+      if (o.approved) return `<div class="doc-h">Approved</div><div class="doc-b">${esc(o.question || '')}</div>`;
+      if (o.question) return `<div class="doc-h">Waiting for you</div><div class="doc-b">${esc(o.question)}</div>`;
+      return '<div class="doc-b">Not reached yet</div>';
+    }
+    default: return `<div class="doc-b">${n.status === 'done' ? 'Done' : 'Not reached yet'}</div>`;
   }
 }
 

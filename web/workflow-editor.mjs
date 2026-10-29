@@ -260,7 +260,6 @@ function bindUi() {
   $('selId').addEventListener('change', () => renameSelected(slug($('selId').value)));
   $('selTitle').addEventListener('input', () => { const n = selectedNode(); if (!n) return; n.title = $('selTitle').value; changed({ redraw: 'canvas' }); });
   $('selKind').addEventListener('change', () => changeKind($('selKind').value));
-  $('selCost').addEventListener('change', () => patchSelected({ cost: Number($('selCost').value) || 1 }));
 
   for (const [id, apply] of [
     ['advRetries', (n, v) => { if (Number(v)) n.spec.retry = { ...(n.spec.retry || {}), attempts: Number(v) }; else delete n.spec.retry; }],
@@ -1137,7 +1136,6 @@ function renderSelected() {
   $('selId').value = n.id;
   $('selTitle').value = n.title || '';
   $('selKind').value = n.kind;
-  $('selCost').value = n.cost ?? 1;
   $('btnConnect').textContent = state.connectFromId ? 'Cancel connecting' : '↝ Connect to…';
   const s = n.spec || {};
   $('advRetries').value = String(s.retry?.attempts || 0);
