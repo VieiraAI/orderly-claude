@@ -935,6 +935,73 @@ async function main() {
     check('migrated starters pass v2 validation',
       starterProblems.length === 0, starterProblems.join(' | '));
 
+    // Brand pack: primitives are unit-testable without a run.
+    const brandMod = await import('../src/core/brand.mjs');
+    const brand = {
+      colors: {},
+      palette: { whitelist: ['#415A6B', '#A94E46', '#FFFFFF'], allowGrays: true, grayTolerance: 10 },
+      fonts: { sans: { families: ['Inter', 'system-ui'] }, mono: { families: ['Menlo'] } },
+      spacing: { unit: 4, scale: [0, 4, 8, 12, 16, 24, 32], tolerance: 1 },
+      contrast: { min: 4.5 },
+    };
+    const inPal = brandMod.colorsInPalette(['#415A6B', '#A94E46'], brand, { ignoreGrays: false, tolerance: 2 });
+    check('colorsInPalette passes exact matches', inPal.ok === true, JSON.stringify(inPal.offenders));
+    const offPal = brandMod.colorsInPalette(['#FF00FF'], brand, { ignoreGrays: false, tolerance: 2 });
+    check('colorsInPalette flags off-palette color',
+      offPal.ok === false && offPal.offenders.length === 1,
+      JSON.stringify(offPal));
+    const grayIgnore = brandMod.colorsInPalette(['#808080'], brand, { ignoreGrays: true, tolerance: 2 });
+    check('colorsInPalette ignores grays when asked', grayIgnore.ok === true,
+      JSON.stringify(grayIgnore.offenders));
+
+    const fBrand = brandMod.fontIsBrand('Inter, system-ui, sans-serif', brand, { role: 'sans' });
+    check('fontIsBrand recognizes the brand sans', fBrand.ok === true, JSON.stringify(fBrand));
+    const fWrong = brandMod.fontIsBrand('Comic Sans MS, cursive', brand, { role: 'sans' });
+    check('fontIsBrand flags a non-brand family', fWrong.ok === false);
+
+    const highRatio = brandMod.contrastRatio('#000000', '#FFFFFF');
+    check('contrastRatio black/white ≈ 21', Math.round(highRatio) === 21, `got ${highRatio}`);
+    const cPairs = brandMod.contrastPassesAll(
+      [{ label: 'body', fg: '#1A1D21', bg: '#FFFFFF' }, { label: 'faint', fg: '#D0D0D0', bg: '#FFFFFF' }],
+      brand,
+    );
+    check('contrastPassesAll flags only the failing pair',
+      cPairs.ok === false && cPairs.failures.length === 1 && cPairs.failures[0].label === 'faint',
+      JSON.stringify(cPairs.failures.map((f) => f.label)));
+
+    const spc = brandMod.spacingOnScale([4, 8, 12, 10], brand);
+    check('spacingOnScale flags 10 as off-scale',
+      spc.ok === false && spc.offenders.length === 1 && spc.offenders[0].value === 10,
+      JSON.stringify(spc.offenders));
+
+    const hex = brandMod.scanRawHex('color: #ff00ff; border: 1px solid #A94E46;', brand, { ignoreGrays: true });
+    check('scanRawHex flags off-palette raw hex',
+      hex.ok === false && hex.offenders.length === 1 && hex.offenders[0].hex === '#FF00FF',
+      JSON.stringify(hex.offenders));
+
+    // Validator: new assert types are known; unknown ones are flagged.
+    const checkDef = (assertSpec) => ({
+      schemaVersion: 2, id: 'x', graph: {
+        nodes: [
+          { id: 'a', kind: 'agent', spec: { prompt: 'p' } },
+          { id: 'c', kind: 'check', spec: { assert: { from: 'a', ...assertSpec } } },
+        ],
+        edges: [['a', 'c']],
+      },
+    });
+    check('validator accepts color-in-palette assert',
+      wfMod.validateDefinition(checkDef({ type: 'color-in-palette' })).length === 0);
+    check('validator accepts font-is-brand assert',
+      wfMod.validateDefinition(checkDef({ type: 'font-is-brand', role: 'sans' })).length === 0);
+    check('validator accepts contrast-min assert',
+      wfMod.validateDefinition(checkDef({ type: 'contrast-min', ratio: 4.5 })).length === 0);
+    const unknownAssert = wfMod.validateDefinition(checkDef({ type: 'wut' }));
+    check('validator flags unknown assert type',
+      unknownAssert.some((p) => /unknown assert type/i.test(p)), unknownAssert.join('; '));
+    const badRatio = wfMod.validateDefinition(checkDef({ type: 'contrast-min', ratio: -1 }));
+    check('validator flags negative contrast ratio',
+      badRatio.some((p) => /ratio/i.test(p)), badRatio.join('; '));
+
     // Scheduler: Decision routes via labeled edges. Build a workflow where
     // one of two branches is picked; only that branch should reach done,
     // the other should be marked skipped.
@@ -1024,6 +1091,546 @@ async function main() {
       needNode?.status === 'done' && needNode?.output?.pass === false,
       `${needNode?.status} / pass=${needNode?.output?.pass}`);
     try { fs.unlinkSync(gateSaved.file); } catch {}
+
+    // MCP kind + publish shorthands.
+    const mcpMod = await import('../src/core/mcp.mjs');
+    check('resolveTool returns string template',
+      mcpMod.resolveTool({ foo: { bar: 'echo {{x}}' } }, 'foo', 'bar') === 'echo {{x}}');
+    check('resolveTool returns object.command form',
+      mcpMod.resolveTool({ foo: { bar: { command: 'echo {{x}}' } } }, 'foo', 'bar') === 'echo {{x}}');
+    check('resolveTool returns null when missing',
+      mcpMod.resolveTool({}, 'foo', 'bar') === null);
+    check('interpolate substitutes and shell-quotes',
+      mcpMod.interpolate('echo {{t}} to {{team}}', { t: 'hello world', team: 'ENG' })
+        === `echo 'hello world' to ENG`);
+    check('interpolate blanks missing keys',
+      mcpMod.interpolate('{{missing}}:done', {}) === ':done');
+
+    const mcpValidator = wfMod.validateDefinition({
+      schemaVersion: 2, id: 'x', graph: {
+        nodes: [{ id: 'm', kind: 'mcp', spec: {} }],
+        edges: [],
+      },
+    });
+    check('validator flags mcp without server+tool',
+      mcpValidator.filter((p) => /spec\.(server|tool)/.test(p)).length === 2, mcpValidator.join('; '));
+    const pubBad = wfMod.validateDefinition({
+      schemaVersion: 2, id: 'x', graph: {
+        nodes: [{ id: 'p', kind: 'publish', spec: { target: 'slack-dm' } }],
+        edges: [],
+      },
+    });
+    check('validator flags unknown publish target',
+      pubBad.some((p) => /unknown publish target/.test(p)), pubBad.join('; '));
+    const pubGood = wfMod.validateDefinition({
+      schemaVersion: 2, id: 'x', graph: {
+        nodes: [{ id: 'p', kind: 'publish', spec: { target: 'linear-issue' } }],
+        edges: [],
+      },
+    });
+    check('validator accepts linear-issue publish target',
+      pubGood.length === 0, pubGood.join('; '));
+
+    // End-to-end: an mcp call with a configured command runs and returns stdout.
+    const repoRootForMcp = fileURLToPath(new URL('../', import.meta.url));
+    const mcpFile = path.join(repoRootForMcp, '.claude', 'mcp.json');
+    const hadMcp = fs.existsSync(mcpFile);
+    const priorMcp = hadMcp ? fs.readFileSync(mcpFile, 'utf8') : null;
+    fs.writeFileSync(mcpFile, JSON.stringify({
+      test: { echo: 'echo tool={{tool}} name={{name}}' },
+    }, null, 2));
+    const mcpRunDef = {
+      schemaVersion: 2, id: 'smoke-mcp', title: 'MCP',
+      graph: {
+        nodes: [{ id: 'call', title: 'Call', kind: 'mcp', col: 1, row: 0,
+          spec: { server: 'test', tool: 'echo', args: { tool: 'echo', name: 'smoke' } } }],
+        edges: [],
+      },
+    };
+    const mcpSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: mcpRunDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const mcpStart = await fetch(`${base}/api/workflows/smoke-mcp/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    let mcpDone = null;
+    const mcpBudget = Date.now() + 4000;
+    while (Date.now() < mcpBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${mcpStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { mcpDone = r; break; }
+    }
+    check('mcp run finishes done', mcpDone?.status === 'done', mcpDone?.status);
+    const mcpOut = mcpDone?.graph.nodes.find((n) => n.id === 'call')?.output;
+    check('mcp invokes the configured command',
+      mcpOut?.ok === true && /tool=echo name=smoke/.test(mcpOut?.out || ''),
+      JSON.stringify(mcpOut).slice(0, 200));
+    // Clean up mcp.json fixture.
+    if (priorMcp) fs.writeFileSync(mcpFile, priorMcp);
+    else try { fs.unlinkSync(mcpFile); } catch {}
+    try { fs.unlinkSync(mcpSaved.file); } catch {}
+
+    // Unconfigured mcp call returns ok:false with a reason, not a crash.
+    const mcpMissingDef = {
+      schemaVersion: 2, id: 'smoke-mcp-missing', title: 'MCP missing',
+      graph: {
+        nodes: [{ id: 'call', title: 'Call', kind: 'mcp', col: 1, row: 0,
+          spec: { server: 'nope', tool: 'nothing', args: {} } }],
+        edges: [],
+      },
+    };
+    const mmSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: mcpMissingDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const mmStart = await fetch(`${base}/api/workflows/smoke-mcp-missing/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    let mmDone = null;
+    const mmBudget = Date.now() + 3000;
+    while (Date.now() < mmBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${mmStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { mmDone = r; break; }
+    }
+    const mmOut = mmDone?.graph.nodes.find((n) => n.id === 'call')?.output;
+    check('unconfigured mcp returns ok:false with reason',
+      mmOut?.ok === false && /not configured/.test(mmOut?.reason || ''),
+      JSON.stringify(mmOut));
+    try { fs.unlinkSync(mmSaved.file); } catch {}
+
+    // Suggester: tokenize + score are pure, test directly.
+    const suggMod = await import('../src/core/workflow-suggest.mjs');
+    check('tokenize strips stop words and short tokens',
+      JSON.stringify(suggMod.tokenize('redesign the hero page')) === JSON.stringify(['redesign', 'hero', 'page']));
+    check('tokenize handles punctuation and case',
+      JSON.stringify(suggMod.tokenize('Redesign-the-Hero,Page!')) === JSON.stringify(['redesign', 'hero', 'page']));
+
+    const sampleDefs = [
+      { id: 'redesign-page', title: 'Redesign a page',
+        whenToUse: 'User wants to try visual variations for a specific route.',
+        tags: ['design', 'visual', 'iterate'] },
+      { id: 'visual-regression', title: 'Visual regression',
+        whenToUse: 'Compare before/after captures for a diff.',
+        tags: ['visual', 'check'] },
+      { id: 'ship-pr', title: 'Ship a PR',
+        whenToUse: 'Run tests, draft the body, open the PR.',
+        tags: ['ship', 'review'] },
+    ];
+    const sug1 = suggMod.suggestWorkflows({ query: 'redesign the pricing page', defs: sampleDefs });
+    check('suggestWorkflows picks redesign-page first',
+      sug1[0]?.id === 'redesign-page', JSON.stringify(sug1.map((s) => s.id)));
+    const sug2 = suggMod.suggestWorkflows({ query: 'open a pull request', defs: sampleDefs });
+    check('suggestWorkflows includes ship-pr for "pull request"',
+      sug2.some((s) => s.id === 'ship-pr'), JSON.stringify(sug2.map((s) => s.id)));
+    const sug3 = suggMod.suggestWorkflows({ query: 'cucumber', defs: sampleDefs });
+    check('suggestWorkflows returns empty when nothing matches',
+      sug3.length === 0, JSON.stringify(sug3));
+
+    // Validator: tags[] and whenToUse accepted.
+    const defWithMeta = {
+      schemaVersion: 2, id: 'x', title: 'X',
+      tags: ['one', 'two'],
+      whenToUse: 'When you need an x.',
+      graph: { nodes: [{ id: 'a', kind: 'agent', spec: { prompt: 'p' } }], edges: [] },
+    };
+    check('validator accepts tags + whenToUse',
+      wfMod.validateDefinition(defWithMeta).length === 0,
+      wfMod.validateDefinition(defWithMeta).join('; '));
+    const badTags = wfMod.validateDefinition({ ...defWithMeta, tags: [1, 2] });
+    check('validator flags non-string tags',
+      badTags.some((p) => /tags/.test(p)), badTags.join('; '));
+
+    // API: POST /api/workflows/suggest returns ranked matches.
+    const sugResp = await fetch(`${base}/api/workflows/suggest`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ q: 'ship a pr' }),
+    }).then((r) => r.json());
+    check('POST /api/workflows/suggest returns matches',
+      Array.isArray(sugResp.matches), JSON.stringify(sugResp).slice(0, 100));
+    const sugEmpty = await fetch(`${base}/api/workflows/suggest`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ q: '' }),
+    }).then((r) => r.json());
+    check('empty query returns empty matches',
+      Array.isArray(sugEmpty.matches) && sugEmpty.matches.length === 0,
+      JSON.stringify(sugEmpty));
+
+    // fanOut: validator accepts/rejects spec, runs scripts in parallel, joins.
+    const fanGoodDef = {
+      schemaVersion: 2, id: 'x', graph: {
+        nodes: [{ id: 'f', kind: 'fanOut', spec: { over: 'inputs.items', action: 'script', body: { cmd: 'echo {{item}}' }, concurrency: 2 } }],
+        edges: [],
+      },
+    };
+    check('validator accepts fanOut script',
+      wfMod.validateDefinition(fanGoodDef).length === 0,
+      wfMod.validateDefinition(fanGoodDef).join('; '));
+    const fanBadJoin = wfMod.validateDefinition({
+      schemaVersion: 2, id: 'x', graph: {
+        nodes: [{ id: 'f', kind: 'fanOut', spec: { over: 'inputs.items', body: { cmd: 'echo' }, join: 'first' } }],
+        edges: [],
+      },
+    });
+    check('validator flags unknown fanOut join',
+      fanBadJoin.some((p) => /join must be/.test(p)), fanBadJoin.join('; '));
+    const fanNoBody = wfMod.validateDefinition({
+      schemaVersion: 2, id: 'x', graph: {
+        nodes: [{ id: 'f', kind: 'fanOut', spec: { over: 'inputs.items' } }],
+        edges: [],
+      },
+    });
+    check('validator flags fanOut without action',
+      fanNoBody.some((p) => /action/.test(p)), fanNoBody.join('; '));
+    const fanBadConc = wfMod.validateDefinition({
+      schemaVersion: 2, id: 'x', graph: {
+        nodes: [{ id: 'f', kind: 'fanOut', spec: { over: 'inputs.items', body: { cmd: 'echo' }, concurrency: 0 } }],
+        edges: [],
+      },
+    });
+    check('validator flags non-positive concurrency',
+      fanBadConc.some((p) => /concurrency/.test(p)), fanBadConc.join('; '));
+
+    // fanOut end-to-end: three items run concurrently and collect outputs.
+    const fanDef = {
+      schemaVersion: 2, id: 'smoke-fanout', title: 'Fan',
+      graph: {
+        nodes: [
+          { id: 'fan', title: 'Fan', kind: 'fanOut', col: 1, row: 0,
+            spec: { over: 'inputs.items', action: 'script', body: { cmd: 'echo item={{item}}' }, concurrency: 3 } },
+        ],
+        edges: [],
+      },
+    };
+    const fanSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: fanDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const fanStart = await fetch(`${base}/api/workflows/smoke-fanout/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ inputs: { items: 'a,b,c' } }),
+    }).then((r) => r.json());
+    let fanDone = null;
+    const fanBudget = Date.now() + 5000;
+    while (Date.now() < fanBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${fanStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { fanDone = r; break; }
+    }
+    check('fanOut run finishes done', fanDone?.status === 'done', fanDone?.status);
+    const fanOut = fanDone?.graph.nodes.find((n) => n.id === 'fan')?.output;
+    check('fanOut returns results for every item',
+      fanOut?.count === 3 && fanOut?.results?.length === 3,
+      `count=${fanOut?.count}`);
+    check('fanOut per-item output has echoed item',
+      fanOut?.results?.every((r) => /item=/.test(r?.out || '')),
+      JSON.stringify(fanOut?.results?.map((r) => r.out)));
+    try { fs.unlinkSync(fanSaved.file); } catch {}
+
+    // Worktree sandbox: validator accepts/rejects runtime block.
+    const defWithRuntime = {
+      schemaVersion: 2, id: 'smoke-rt', title: 'Rt',
+      runtime: { sandbox: 'worktree', keepOnFail: true, baseBranch: 'main' },
+      graph: { nodes: [{ id: 'a', kind: 'agent', spec: { prompt: 'p' } }], edges: [] },
+    };
+    check('validator accepts runtime block',
+      wfMod.validateDefinition(defWithRuntime).length === 0,
+      wfMod.validateDefinition(defWithRuntime).join('; '));
+    const badSandbox = wfMod.validateDefinition({ ...defWithRuntime, runtime: { sandbox: 'docker' } });
+    check('validator flags unknown sandbox',
+      badSandbox.some((p) => /sandbox must be one of/.test(p)), badSandbox.join('; '));
+    const badKeep = wfMod.validateDefinition({ ...defWithRuntime, runtime: { sandbox: 'worktree', keepOnFail: 'yes' } });
+    check('validator flags non-boolean keepOnFail',
+      badKeep.some((p) => /keepOnFail/.test(p)), badKeep.join('; '));
+
+    // Worktree helper: round-trip create+remove.
+    const { createWorktree, removeWorktree } = await import('../src/core/worktree.mjs');
+    const repoRoot = fileURLToPath(new URL('../', import.meta.url));
+    const wt = createWorktree({ repoRoot, name: `smoke-${Date.now()}` });
+    check('worktree directory exists after create',
+      fs.existsSync(wt.path) && fs.statSync(wt.path).isDirectory(), wt.path);
+    check('worktree is a real checkout',
+      fs.existsSync(path.join(wt.path, 'package.json')), 'no package.json');
+    removeWorktree(wt.path, repoRoot);
+    check('worktree gone after remove', !fs.existsSync(wt.path));
+
+    // End-to-end: a script run with sandbox: worktree executes inside the worktree.
+    const wtRunDef = {
+      schemaVersion: 2, id: 'smoke-worktree-run', title: 'Worktree run',
+      runtime: { sandbox: 'worktree' },
+      graph: {
+        nodes: [{ id: 'where', title: 'Where', kind: 'script', col: 1, row: 0, spec: { cmd: 'pwd' } }],
+        edges: [],
+      },
+    };
+    const wtRunSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: wtRunDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const wtRunStart = await fetch(`${base}/api/workflows/smoke-worktree-run/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    let wtRunDone = null;
+    const wtRunBudget = Date.now() + 8000;
+    while (Date.now() < wtRunBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${wtRunStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { wtRunDone = r; break; }
+    }
+    check('worktree run finishes done', wtRunDone?.status === 'done', wtRunDone?.status);
+    const whereOut = wtRunDone?.graph.nodes.find((n) => n.id === 'where')?.output?.out || '';
+    check('script executed inside the worktree',
+      /\.claude\/worktrees\/run-/.test(whereOut), whereOut.trim().slice(0, 120));
+    check('sandbox cleaned up after success',
+      wtRunDone?.sandboxPath == null, String(wtRunDone?.sandboxPath));
+    try { fs.unlinkSync(wtRunSaved.file); } catch {}
+
+    // Lessons: validator accepts a well-formed lessons[], rejects a malformed one.
+    const defWithLessons = {
+      schemaVersion: 2, id: 'smoke-lessons', title: 'With lessons',
+      lessons: [
+        { id: 'ls_1', node: 'draft', note: 'Avoid raw hex.', rating: 'down', pin: false, at: '2026-10-29T10:00:00Z' },
+      ],
+      graph: {
+        nodes: [{ id: 'draft', title: 'Draft', kind: 'agent', col: 1, row: 0,
+          spec: { prompt: 'write x', output: 'markdown' } }],
+        edges: [],
+      },
+    };
+    check('validator accepts lessons[]',
+      wfMod.validateDefinition(defWithLessons).length === 0,
+      wfMod.validateDefinition(defWithLessons).join('; '));
+    const defBadLesson = { ...defWithLessons, lessons: [{ rating: 'maybe' }] };
+    const badLessonProblems = wfMod.validateDefinition(defBadLesson);
+    check('validator flags lesson without note',
+      badLessonProblems.some((p) => /note is required/.test(p)), badLessonProblems.join('; '));
+    check('validator flags unknown lesson rating',
+      badLessonProblems.some((p) => /rating must be up\|down/.test(p)), badLessonProblems.join('; '));
+
+    // Lessons injection: a down-rated lesson on a node prepends to its prompt.
+    const injDef = {
+      schemaVersion: 2, id: 'smoke-lesson-inject', title: 'Lesson inject',
+      lessons: [
+        { id: 'ls_a', node: 'draft', note: 'Always start with H1.', rating: 'down', at: '2026-10-29T10:00:00Z' },
+      ],
+      graph: {
+        nodes: [{ id: 'draft', title: 'Draft', kind: 'agent', col: 1, row: 0,
+          spec: { prompt: 'write something', output: 'markdown' } }],
+        edges: [],
+      },
+    };
+    const injSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: injDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const injStart = await fetch(`${base}/api/workflows/smoke-lesson-inject/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    const injRun = (await get(`/api/runs/${injStart.run.runId}`)).run;
+    const draftNode = injRun?.graph.nodes.find((n) => n.id === 'draft');
+    check('lesson prepended to node prompt',
+      /Prior lessons[\s\S]*Always start with H1/.test(draftNode?.spec?.prompt || ''),
+      draftNode?.spec?.prompt?.slice(0, 80));
+    check('lessonsApplied recorded on the node',
+      Array.isArray(draftNode?.lessonsApplied) && draftNode.lessonsApplied.includes('ls_a'),
+      JSON.stringify(draftNode?.lessonsApplied));
+    try { fs.unlinkSync(injSaved.file); } catch {}
+
+    // Lessons API: addLesson appends to project def; builtin is rejected.
+    const anchorDef = {
+      schemaVersion: 2, id: 'smoke-lesson-add', title: 'Lesson add',
+      graph: {
+        nodes: [{ id: 'draft', title: 'Draft', kind: 'agent', col: 1, row: 0,
+          spec: { prompt: 'write', output: 'markdown' } }],
+        edges: [],
+      },
+    };
+    const anchorSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: anchorDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const addResp = await fetch(`${base}/api/workflows/smoke-lesson-add/lessons`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ lesson: { node: 'draft', note: 'Return only Markdown.', rating: 'down', pin: true } }),
+    }).then((r) => r.json());
+    check('addLesson returns a lesson with an id',
+      typeof addResp.lesson?.id === 'string' && addResp.lesson.id.length > 2, JSON.stringify(addResp));
+    // Reload the def and confirm it has the lesson.
+    const defAfter = (await get('/api/workflows/smoke-lesson-add')).workflow;
+    check('appended lesson persisted on disk',
+      Array.isArray(defAfter.lessons) && defAfter.lessons.length === 1 &&
+      defAfter.lessons[0].note === 'Return only Markdown.',
+      JSON.stringify(defAfter.lessons));
+    const builtinReject = await fetch(`${base}/api/workflows/ship-pr/lessons`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ lesson: { note: 'nope' } }),
+    });
+    check('addLesson rejects builtin workflow',
+      builtinReject.status === 400,
+      String(builtinReject.status));
+    try { fs.unlinkSync(anchorSaved.file); } catch {}
+
+    // PATCH /api/runs/:id writes rating + retro.
+    const retroDef = {
+      schemaVersion: 2, id: 'smoke-retro', title: 'Retro', graph: {
+        nodes: [{ id: 'cmd', title: 'Cmd', kind: 'script', col: 1, row: 0, spec: { cmd: 'echo ok' } }],
+        edges: [],
+      },
+    };
+    const retroSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: retroDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const retroStart = await fetch(`${base}/api/workflows/smoke-retro/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    let retroDone = null;
+    const retroBudget = Date.now() + 3000;
+    while (Date.now() < retroBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${retroStart.run.runId}`)).run;
+      if (r?.status === 'done') { retroDone = r; break; }
+    }
+    check('retro run finishes', retroDone?.status === 'done', retroDone?.status);
+    const patched = await fetch(`${base}/api/runs/${retroStart.run.runId}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ rating: 'up', retro: 'Worked first try.' }),
+    }).then((r) => r.json());
+    check('PATCH /api/runs/:id writes rating + retro',
+      patched.run?.rating === 'up' && patched.run?.retro === 'Worked first try.',
+      `${patched.run?.rating} / ${patched.run?.retro}`);
+    try { fs.unlinkSync(retroSaved.file); } catch {}
+
+    // Agent spec.verify: validator rejects malformed verify blocks.
+    const badVerifyEmpty = wfMod.validateDefinition({
+      schemaVersion: 2, id: 'x', graph: {
+        nodes: [{ id: 'a', kind: 'agent', spec: { prompt: 'p', verify: { asserts: [] } } }],
+        edges: [],
+      },
+    });
+    check('validator flags empty verify.asserts',
+      badVerifyEmpty.some((p) => /asserts/i.test(p)), badVerifyEmpty.join('; '));
+    const badVerifyType = wfMod.validateDefinition({
+      schemaVersion: 2, id: 'x', graph: {
+        nodes: [{ id: 'a', kind: 'agent', spec: { prompt: 'p', verify: { asserts: [{ type: 'wut' }] } } }],
+        edges: [],
+      },
+    });
+    check('validator flags unknown verify assert type',
+      badVerifyType.some((p) => /unknown verify assert type/i.test(p)), badVerifyType.join('; '));
+    const badVerifyRetries = wfMod.validateDefinition({
+      schemaVersion: 2, id: 'x', graph: {
+        nodes: [{ id: 'a', kind: 'agent', spec: { prompt: 'p', verify: { asserts: [{ type: 'no-raw-hex' }], maxRetries: -1 } } }],
+        edges: [],
+      },
+    });
+    check('validator flags negative maxRetries',
+      badVerifyRetries.some((p) => /maxRetries/i.test(p)), badVerifyRetries.join('; '));
+
+    // Agent spec.verify: happy path — mock agent output is clean, no-raw-hex passes.
+    const verifyPassDef = {
+      schemaVersion: 2, id: 'smoke-verify-pass', title: 'Verify pass',
+      graph: {
+        nodes: [
+          { id: 'draft', title: 'Draft', kind: 'agent', col: 1, row: 0,
+            spec: { prompt: 'draft something', output: 'markdown',
+              verify: { asserts: [{ type: 'no-raw-hex' }], maxRetries: 0 } } },
+        ],
+        edges: [],
+      },
+    };
+    const vpSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: verifyPassDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const vpStart = await fetch(`${base}/api/workflows/smoke-verify-pass/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    let vpDone = null;
+    const vpBudget = Date.now() + 5000;
+    while (Date.now() < vpBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${vpStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { vpDone = r; break; }
+    }
+    check('verify pass: run finishes done', vpDone?.status === 'done', vpDone?.status);
+    const vpOut = vpDone?.graph.nodes.find((n) => n.id === 'draft')?.output;
+    check('verify pass: output.verify.pass === true',
+      vpOut?.verify?.pass === true, JSON.stringify(vpOut?.verify));
+    try { fs.unlinkSync(vpSaved.file); } catch {}
+
+    // Agent spec.verify: fail path with onFail:skip — retries exhaust and the
+    // run finishes done with pass:false recorded.
+    const verifyFailDef = {
+      schemaVersion: 2, id: 'smoke-verify-fail', title: 'Verify fail',
+      graph: {
+        nodes: [
+          { id: 'draft', title: 'Draft', kind: 'agent', col: 1, row: 0,
+            spec: { prompt: 'draft', output: 'markdown',
+              verify: {
+                asserts: [{ type: 'color-in-palette', colors: ['#FF00FF'], ignoreGrays: false, tolerance: 2 }],
+                maxRetries: 2, onFail: 'skip',
+              } } },
+        ],
+        edges: [],
+      },
+    };
+    const vfSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: verifyFailDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const vfStart = await fetch(`${base}/api/workflows/smoke-verify-fail/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    let vfDone = null;
+    const vfBudget = Date.now() + 5000;
+    while (Date.now() < vfBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${vfStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { vfDone = r; break; }
+    }
+    check('verify fail (skip): run finishes done', vfDone?.status === 'done', vfDone?.status);
+    const vfOut = vfDone?.graph.nodes.find((n) => n.id === 'draft')?.output;
+    check('verify fail: pass is false after retries',
+      vfOut?.verify?.pass === false, JSON.stringify(vfOut?.verify?.pass));
+    check('verify fail: attempts === maxRetries + 1',
+      vfOut?.verify?.attempts?.length === 3,
+      `attempts=${vfOut?.verify?.attempts?.length}`);
+    try { fs.unlinkSync(vfSaved.file); } catch {}
+
+    // Agent spec.verify: fail path with onFail:stop (default) — run fails.
+    const verifyStopDef = {
+      schemaVersion: 2, id: 'smoke-verify-stop', title: 'Verify stop',
+      graph: {
+        nodes: [
+          { id: 'draft', title: 'Draft', kind: 'agent', col: 1, row: 0,
+            spec: { prompt: 'draft', output: 'markdown',
+              verify: {
+                asserts: [{ type: 'color-in-palette', colors: ['#FF00FF'], ignoreGrays: false, tolerance: 2 }],
+                maxRetries: 0,
+              } } },
+        ],
+        edges: [],
+      },
+    };
+    const vsSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: verifyStopDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const vsStart = await fetch(`${base}/api/workflows/smoke-verify-stop/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    let vsDone = null;
+    const vsBudget = Date.now() + 5000;
+    while (Date.now() < vsBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${vsStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { vsDone = r; break; }
+    }
+    check('verify fail (stop): run status is failed',
+      vsDone?.status === 'failed', vsDone?.status);
+    try { fs.unlinkSync(vsSaved.file); } catch {}
 
     // Control-flow kinds: Loop (map over an inputs array), Delay (short),
     // Approve (user clicks approve → run finishes done).

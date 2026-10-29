@@ -22,8 +22,9 @@ import {
   listDefinitions, getDefinition, startRun, readRun, listRuns, runsForSession, deleteRun, rerunRun,
   scaffoldWorkflow, writeWorkflow, validateDefinition, lintDefinition, deleteWorkflow, duplicateWorkflow,
   stripRuntime, freeId, reconcileRuns, prepareResume, openQuestion, recordAnswer, writeRun, RESUMABLE,
-  registerRoot,
+  registerRoot, addLesson, updateRun,
 } from '../core/workflows.mjs';
+import { suggestWorkflows } from '../core/workflow-suggest.mjs';
 import { Scheduler } from '../core/workflow-runner.mjs';
 import { resolveText, referenceFields } from '../core/refs.mjs';
 import { readSettings, writeSettings, runSpend } from '../core/settings.mjs';
@@ -650,6 +651,17 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         return send(200, { workflows: listDefinitions({ repoRoot: liveCwd }) });
       }
 
+      // Suggest which workflow fits a free-text ask. Pure token overlap; no
+      // model call. Returns ranked matches with per-match score + reason.
+      if (url.pathname === '/api/workflows/suggest' && req.method === 'POST') {
+        const body = await readBody(req);
+        const query = String(body.q || '').trim();
+        if (!query) return send(200, { matches: [] });
+        const defs = listDefinitions({ repoRoot: liveCwd });
+        const matches = suggestWorkflows({ query, defs, limit: Number(body.limit) || 5 });
+        return send(200, { matches });
+      }
+
       // Create a workflow — three starter kinds plus a validator for the
       // in-browser editor's "check" button.
       if (url.pathname === '/api/workflows/scaffold' && req.method === 'GET') {
@@ -1095,6 +1107,28 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
           live: schedulers.has(run.runId),
           ownedElsewhere: ownedElsewhere(run),
         });
+      }
+      // Rate a run and leave a one-line retrospective. Used by the end-of-run
+      // prompt in the UI; also the input for addLesson.
+      if (runMatch && req.method === 'PATCH') {
+        const body = await readBody(req);
+        const patch = {};
+        if (body.rating === 'up' || body.rating === 'down' || body.rating === null) patch.rating = body.rating;
+        if (typeof body.retro === 'string') patch.retro = body.retro.slice(0, 500);
+        try {
+          const run = updateRun(runMatch[1], { repoRoot: liveCwd, patch });
+          return send(200, { run });
+        } catch (e) { return send(404, { error: e.message }); }
+      }
+      // Append a lesson to a workflow definition. Target def must be project
+      // or user scope; builtins are read-only.
+      const lessonMatch = url.pathname.match(/^\/api\/workflows\/([^/]+)\/lessons$/);
+      if (lessonMatch && req.method === 'POST') {
+        const body = await readBody(req);
+        try {
+          const result = addLesson(lessonMatch[1], body.lesson || body, { repoRoot: liveCwd });
+          return send(200, result);
+        } catch (e) { return send(400, { error: e.message }); }
       }
 
       if (url.pathname === '/api/blob') {

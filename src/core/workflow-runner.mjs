@@ -24,6 +24,7 @@ import { EventEmitter } from 'node:events';
 import { getHandler } from './workflow-handlers.mjs';
 import { writeRun, markInterrupted, recordAnswer } from './workflows.mjs';
 import { runSpend } from './settings.mjs';
+import { removeWorktree } from './worktree.mjs';
 
 export class Scheduler extends EventEmitter {
   constructor(run) {
@@ -65,6 +66,7 @@ export class Scheduler extends EventEmitter {
     this.run.status = 'stopped';
     this.run.endedAt = at;
     writeRun(this.run);
+    this.cleanupSandbox('stopped');
     this.silenced = true;
     this.emit('update', { runId: this.run.runId });
     this.emit('finish', { runId: this.run.runId, status: 'stopped' });
@@ -334,12 +336,25 @@ export class Scheduler extends EventEmitter {
   finish(status, extra = {}) {
     const { status: _ignored, ...fields } = extra;
     this.patch({ ...fields, status, endedAt: new Date().toISOString() });
+    this.cleanupSandbox(status);
     this.emit('finish', { runId: this.run.runId, status });
   }
 
   failRun(err) {
     if (!terminal(this.run.status)) this.finish('failed', { error: err?.message || String(err) });
     this.emit('fail', { runId: this.run.runId, error: err?.message || String(err) });
+  }
+
+  /** Remove the per-run worktree once a run is terminal, unless the def set
+   *  keepOnFail and the run didn't succeed. */
+  cleanupSandbox(status) {
+    const p = this.run.sandboxPath;
+    if (!p) return;
+    const keep = this.run.runtime?.keepOnFail && status !== 'done';
+    if (keep) return;
+    try { removeWorktree(p, this.run.repoRoot); } catch { /* best-effort */ }
+    this.run.sandboxPath = null;
+    writeRun(this.run);
   }
 }
 
