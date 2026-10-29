@@ -438,12 +438,33 @@ function runFromPreview() {
   location.href = `/workflows.html?open=${encodeURIComponent(run.workflowId)}${runRef()}#workflows`;
 }
 
+// One repeat at a time: a second click while the first is starting would
+// start a second copy of the run.
+let repeating = false;
 async function rerunFromCanvas(fromNodeId) {
+  if (repeating) return;
+  repeating = true;
+  const buttons = [...document.querySelectorAll('#drRerun, [data-act="rerun"], [data-act="rerun-from"]')];
+  const labels = buttons.map((b) => b.textContent);
+  for (const b of buttons) { b.disabled = true; b.textContent = 'Starting…'; }
   const r = await post(`/api/runs/${encodeURIComponent(run.runId)}/rerun`, { fromNodeId });
+  // Only the part after # changes, which a browser does not reload for; the
+  // hashchange listener below loads the new run.
   if (r.run?.runId) { location.href = `/workflows-run.html#${r.run.runId}`; return; }
+  repeating = false;
+  buttons.forEach((b, i) => { b.disabled = false; b.textContent = labels[i]; });
+  // Say why next to the button pressed, which may be in the step drawer
+  // rather than the bar.
+  const why = r.error || 'Could not repeat it.';
   const el = document.getElementById('actStatus');
-  if (el) { el.textContent = r.error || 'Could not repeat it.'; el.classList.add('bad'); }
+  if (el) { el.textContent = why; el.classList.add('bad'); }
+  const drawerBtn = document.getElementById('drRerun');
+  if (drawerBtn) drawerBtn.insertAdjacentHTML('afterend', `<span class="need-status bad"> ${esc(why)}</span>`);
 }
+
+// The page reads its run from the address once, when it loads. A new run
+// id after # (a repeat, or back and forward) means a different run: load it.
+window.addEventListener('hashchange', () => location.reload());
 
 function renderPlanRail() {
   const mount = document.getElementById('rail');

@@ -791,6 +791,21 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     check('the run page shows a timeline and offers Resume', r.timeline && r.resume, JSON.stringify(r));
     check('the run page raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
+
+    // Repeat from a step: two quick clicks start one run, and the page moves
+    // to it. Only the part after # changes, which a browser does not reload for.
+    p = await open(`/workflows-run.html#${failId}`);
+    await p.ev(`document.querySelector('.card[data-id="t"]').click(); ${tick}
+      window.oldPage = true;
+      const b = document.getElementById('drRerun'); b.click(); b.click();`);
+    await sleep(1500);
+    const repeats = (await api('/api/runs')).runs.filter((x) => x.rerunOf === failId || x.trigger === `rerun of ${failId.slice(0, 8)}`);
+    // A page that only changed its address still has the old run's state.
+    r = await p.ev(`return { hash: location.hash.slice(1), reloaded: !window.oldPage, cards: document.querySelectorAll('.card').length };`);
+    check('two quick clicks on Repeat from this step start one run', repeats.length === 1, `${repeats.length} runs`);
+    check('Repeat from this step opens the new run', repeats.length > 0 && r.hash === repeats[0].runId && r.reloaded && r.cards > 0, JSON.stringify(r));
+    check('repeating raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
   } finally {
     try { cdp?.close?.(); } catch { /* gone */ }
     proc.kill();
