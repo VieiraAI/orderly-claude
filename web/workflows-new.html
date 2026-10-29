@@ -107,18 +107,6 @@
     </div>
 
     <div class="block">
-      <label>id</label>
-      <input id="wfId" placeholder="hyphenated-id" spellcheck="false" value="untitled">
-      <label>title</label>
-      <input id="wfTitle" placeholder="Human-readable title">
-      <label>scope</label>
-      <select id="wfScope">
-        <option value="project">project</option>
-        <option value="user">user</option>
-      </select>
-    </div>
-
-    <div class="block">
       <h3>Add node</h3>
       <label>kind</label>
       <select id="newKind">
@@ -180,6 +168,19 @@
         <button class="run-btn" id="btnConnect" title="Click a target node after this to draw an edge">↝ connect to…</button>
         <button class="run-btn danger" id="btnDelete">✕ delete</button>
       </div>
+    </div>
+
+    <div class="block">
+      <h3>Workflow</h3>
+      <label>id</label>
+      <input id="wfId" placeholder="hyphenated-id" spellcheck="false" value="untitled">
+      <label>title</label>
+      <input id="wfTitle" placeholder="Human-readable title">
+      <label>scope</label>
+      <select id="wfScope">
+        <option value="project">project</option>
+        <option value="user">user</option>
+      </select>
     </div>
 
     <div class="block">

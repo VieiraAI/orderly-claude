@@ -171,15 +171,19 @@ function addNode() {
   render();
 }
 
-/** Fill the after/before pickers with current node ids. */
+/** Fill the after/before pickers with current node ids. Preserves selection. */
 function refreshAddPickers() {
   const nodes = state.def.graph.nodes;
   const opts = ['<option value="">— none —</option>']
     .concat(nodes.map((n) => `<option value="${escapeAttr(n.id)}">${escapeHtml(n.id)} · ${escapeHtml(n.title || '')}</option>`));
-  const afterSel  = $('newAfter');
-  const beforeSel = $('newBefore');
-  if (afterSel)  { const v = afterSel.value;  afterSel.innerHTML  = opts.join(''); afterSel.value  = v; }
-  if (beforeSel) { const v = beforeSel.value; beforeSel.innerHTML = opts.join(''); beforeSel.value = v; }
+  for (const id of ['newAfter', 'newBefore']) {
+    const sel = $(id);
+    if (!sel) continue;
+    const v = sel.value;
+    sel.innerHTML = opts.join('');
+    // Only keep the previous value if the node still exists.
+    sel.value = nodes.some((n) => n.id === v) ? v : '';
+  }
 }
 
 function deleteSelected() {
@@ -331,10 +335,6 @@ function render() {
   $('wfId').value = state.def.id || '';
   $('wfTitle').value = state.def.title || '';
   refreshAddPickers();
-  // Preselect "after" to the currently selected node so clicking + add node
-  // feels like "add a step after this one". The user can clear it to drop
-  // a disconnected node.
-  if (state.selectedId && $('newAfter')) $('newAfter').value = state.selectedId;
   renderCanvas();
   renderSelected();
   if (state.mode === 'json') $('jsonArea').value = JSON.stringify(state.def, null, 2);
