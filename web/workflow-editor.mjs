@@ -377,6 +377,15 @@ function renderCanvas() {
   for (const n of state.def.graph.nodes) {
     inner.append(nodeCard(n));
   }
+  // Grow the inner container to contain every absolutely-positioned card.
+  // Without this, cards past col 6 land outside .ed-canvas-inner's bounds,
+  // the SVG stays width:100% of the (narrower) inner, and edges to those
+  // nodes draw outside the SVG viewport and get clipped — invisible.
+  const nodes = state.def.graph.nodes;
+  const maxX = nodes.reduce((m, n) => Math.max(m, GUTTER + (n.col || 0) * COL_W + 220), 1600);
+  const maxY = nodes.reduce((m, n) => Math.max(m, GUTTER + (n.row || 0) * ROW_H + 120), 900);
+  inner.style.width  = `${maxX + GUTTER}px`;
+  inner.style.height = `${maxY + GUTTER}px`;
   renderEdges();
 }
 
@@ -447,8 +456,15 @@ function renderEdges() {
   // Without explicit width/height attributes, Firefox and some Chrome paths
   // can lose geometry outside the natural SVG viewport.
   const innerBox = inner.getBoundingClientRect();
-  svg.setAttribute('width', Math.max(inner.scrollWidth, Math.floor(innerBox.width)));
-  svg.setAttribute('height', Math.max(inner.scrollHeight, Math.floor(innerBox.height)));
+  // Size the SVG to the inner container's full extent (which renderCanvas
+  // just stretched to contain every card). Both attribute and inline style
+  // so paths outside the natural viewport are not clipped by the renderer.
+  const w = Math.max(inner.scrollWidth, Math.floor(innerBox.width));
+  const h = Math.max(inner.scrollHeight, Math.floor(innerBox.height));
+  svg.setAttribute('width',  w);
+  svg.setAttribute('height', h);
+  svg.style.width  = `${w}px`;
+  svg.style.height = `${h}px`;
   svg.setAttribute('pointer-events', 'all');
   // Read each card's real position via its data-id attribute. Falling back
   // to the col/row math breaks the instant the user drags a node, so we
