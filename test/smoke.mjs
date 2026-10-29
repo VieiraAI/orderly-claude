@@ -748,11 +748,14 @@ async function main() {
     check('every node reached done', !!finished
       && finished.graph.nodes.every((n) => n.status === 'done'),
       finished?.graph.nodes.map((n) => `${n.id}=${n.status}`).join(' '));
-    check('terminal node produced real stdout',
-      !!finished?.graph.nodes.find((n) => n.kind === 'terminal')?.output?.out,
-      finished?.graph.nodes.find((n) => n.kind === 'terminal')?.output?.out?.slice(0, 40));
-    check('shots-set node captured a per-route grid',
-      !!finished?.graph.nodes.find((n) => n.kind === 'shots-set')?.output?.pairs?.length);
+    check('script node produced real stdout',
+      !!finished?.graph.nodes.find((n) => n.id === 'server')?.output?.out,
+      finished?.graph.nodes.find((n) => n.id === 'server')?.output?.out?.slice(0, 40));
+    check('capture-shots script produced a per-route grid',
+      !!finished?.graph.nodes.find((n) => n.id === 'shots')?.output?.pairs?.length);
+    check('check node reported a pass/fail',
+      typeof finished?.graph.nodes.find((n) => n.id === 'ok')?.output?.pass === 'boolean',
+      finished?.graph.nodes.find((n) => n.id === 'ok')?.output?.reason);
 
     // POST /stop on a finished run is a no-op; use it just to assert the route is wired.
     const stopResp = await fetch(`${base}/api/runs/${started.run.runId}/stop`, {
@@ -884,6 +887,263 @@ async function main() {
       edges: [['a', 'b'], ['b', 'a']],
     } });
     check('validator flags cycles', cyclic.some((p) => /cycle/i.test(p)), cyclic.join('; '));
+
+    // v2 validator — accept the migrated starters and the scaffold; reject
+    // unknown kinds, missing per-kind spec, and decision/edge-label drift.
+    const v2Good = { schemaVersion: 2, id: 'v2', graph: {
+      nodes: [
+        { id: 'a', kind: 'agent',   spec: { prompt: 'write' } },
+        { id: 'b', kind: 'publish', spec: { target: 'pr' } },
+      ],
+      edges: [['a', 'b']],
+    } };
+    check('v2 validator accepts a good def',
+      wfMod.validateDefinition(v2Good).length === 0,
+      wfMod.validateDefinition(v2Good).join('; '));
+    const v2BadKind = wfMod.validateDefinition({ schemaVersion: 2, id: 'x', graph: {
+      nodes: [{ id: 'a', kind: 'frobnicate', spec: {} }], edges: [],
+    } });
+    check('v2 validator flags unknown kind',
+      v2BadKind.some((p) => /unknown kind/i.test(p)), v2BadKind.join('; '));
+    const v2NoPrompt = wfMod.validateDefinition({ schemaVersion: 2, id: 'x', graph: {
+      nodes: [{ id: 'a', kind: 'agent', spec: {} }], edges: [],
+    } });
+    check('v2 validator flags agent without a prompt',
+      v2NoPrompt.some((p) => /prompt/i.test(p)), v2NoPrompt.join('; '));
+    const v2EdgeDrift = wfMod.validateDefinition({ schemaVersion: 2, id: 'x', graph: {
+      nodes: [
+        { id: 'p', kind: 'decision', spec: { question: 'q', options: [
+          { label: 'A', edgeLabel: 'a' }, { label: 'B', edgeLabel: 'b' },
+        ] } },
+        { id: 'x', kind: 'agent', spec: { prompt: 'ok' } },
+      ],
+      edges: [['p', 'x', 'c']],
+    } });
+    check('v2 validator flags edge label not in decision.options',
+      v2EdgeDrift.some((p) => /edge label/i.test(p)), v2EdgeDrift.join('; '));
+    // Migrated starters all validate.
+    const starters = (await get('/api/workflows')).workflows.filter((w) => w.scope === 'builtin');
+    const starterProblems = starters.flatMap((w) => wfMod.validateDefinition(w).map((p) => `${w.id}: ${p}`));
+    check('migrated starters pass v2 validation',
+      starterProblems.length === 0, starterProblems.join(' | '));
+
+    // Scheduler: Decision routes via labeled edges. Build a workflow where
+    // one of two branches is picked; only that branch should reach done,
+    // the other should be marked skipped.
+    const routeDef = {
+      schemaVersion: 2, id: 'smoke-route', title: 'Route smoke',
+      graph: {
+        nodes: [
+          { id: 'pick', title: 'Pick', kind: 'decision', col: 1, row: 0,
+            spec: { question: 'go?', options: [
+              { label: 'yes', edgeLabel: 'y' }, { label: 'no', edgeLabel: 'n' },
+            ] } },
+          { id: 'y',    title: 'Yes branch', kind: 'script', col: 2, row: 0,
+            spec: { cmd: 'echo yes' } },
+          { id: 'n',    title: 'No branch',  kind: 'script', col: 2, row: 1,
+            spec: { cmd: 'echo no' } },
+        ],
+        edges: [['pick', 'y', 'y'], ['pick', 'n', 'n']],
+      },
+    };
+    const routeSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: routeDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    check('route-smoke def saved', routeSaved.saved === true, routeSaved.error);
+    const routeStart = await fetch(`${base}/api/workflows/smoke-route/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    // Wait for the Decision to open, then answer with 'yes'.
+    let askReady = null;
+    const askBudget = Date.now() + 5000;
+    while (Date.now() < askBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${routeStart.run.runId}`)).run;
+      if (r?.status === 'awaiting-answer') { askReady = r; break; }
+    }
+    check('decision opens an awaiting-answer slot', !!askReady, askReady?.status);
+    await fetch(`${base}/api/runs/${routeStart.run.runId}/answer`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ nodeId: 'pick', answer: 'yes' }),
+    });
+    let routed = null;
+    const routedBudget = Date.now() + 5000;
+    while (Date.now() < routedBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${routeStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { routed = r; break; }
+    }
+    check('routed run finishes done', routed?.status === 'done',
+      routed?.graph.nodes.map((n) => `${n.id}=${n.status}`).join(' '));
+    const yes = routed?.graph.nodes.find((n) => n.id === 'y');
+    const no  = routed?.graph.nodes.find((n) => n.id === 'n');
+    check('picked branch ran', yes?.status === 'done', yes?.status);
+    check('unpicked branch was skipped', no?.status === 'skipped', no?.status);
+    try { fs.unlinkSync(routeSaved.file); } catch {}
+
+    // Scheduler: Check gating stops the run with status failed by default.
+    const gateDef = {
+      schemaVersion: 2, id: 'smoke-gate', title: 'Gate smoke',
+      graph: {
+        nodes: [
+          { id: 'cmd',  title: 'Cmd',   kind: 'script', col: 1, row: 0, spec: { cmd: 'echo nope' } },
+          { id: 'need', title: 'Need?', kind: 'check',  col: 2, row: 0,
+            spec: { assert: { type: 'contains', from: 'cmd', needle: 'IMPOSSIBLE' } } },
+          { id: 'tail', title: 'Tail',  kind: 'script', col: 3, row: 0, spec: { cmd: 'echo tail' } },
+        ],
+        edges: [['cmd', 'need'], ['need', 'tail']],
+      },
+    };
+    const gateSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: gateDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const gateStart = await fetch(`${base}/api/workflows/smoke-gate/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    let gated = null;
+    const gateBudget = Date.now() + 5000;
+    while (Date.now() < gateBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${gateStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { gated = r; break; }
+    }
+    check('failing check stops the run as failed', gated?.status === 'failed',
+      gated?.status || 'timed out');
+    const needNode = gated?.graph.nodes.find((n) => n.id === 'need');
+    check('the check node itself finished (pass: false)',
+      needNode?.status === 'done' && needNode?.output?.pass === false,
+      `${needNode?.status} / pass=${needNode?.output?.pass}`);
+    try { fs.unlinkSync(gateSaved.file); } catch {}
+
+    // Control-flow kinds: Loop (map over an inputs array), Delay (short),
+    // Approve (user clicks approve → run finishes done).
+    const loopDef = {
+      schemaVersion: 2, id: 'smoke-loop', title: 'Loop smoke',
+      graph: {
+        nodes: [
+          { id: 'map', title: 'Map', kind: 'loop', col: 1, row: 0,
+            spec: { over: 'inputs.items', action: 'script', cmd: 'echo item={{item}}' } },
+        ],
+        edges: [],
+      },
+    };
+    const loopSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: loopDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    check('loop def saved', loopSaved.saved === true, loopSaved.error);
+    const loopStart = await fetch(`${base}/api/workflows/smoke-loop/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ inputs: { items: 'a,b,c' } }),
+    }).then((r) => r.json());
+    let looped = null;
+    const loopBudget = Date.now() + 8000;
+    while (Date.now() < loopBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${loopStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { looped = r; break; }
+    }
+    check('loop run finishes done', looped?.status === 'done', looped?.status);
+    const mapOut = looped?.graph.nodes.find((n) => n.id === 'map')?.output;
+    check('loop ran once per item', mapOut?.count === 3 && mapOut?.results?.length === 3,
+      `count=${mapOut?.count} len=${mapOut?.results?.length}`);
+    check('loop results carry per-item output',
+      /item=a/.test(mapOut?.results?.[0]?.out || ''),
+      mapOut?.results?.[0]?.out);
+    try { fs.unlinkSync(loopSaved.file); } catch {}
+
+    // Delay: 100ms wait finishes done without blocking the test too long.
+    const delayDef = {
+      schemaVersion: 2, id: 'smoke-delay', title: 'Delay smoke',
+      graph: {
+        nodes: [{ id: 'wait', title: 'Wait', kind: 'delay', col: 1, row: 0,
+                 spec: { wait: '100ms' } }],
+        edges: [],
+      },
+    };
+    const delaySaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: delayDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const delayStart = await fetch(`${base}/api/workflows/smoke-delay/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    let delayed = null;
+    const delayBudget = Date.now() + 3000;
+    while (Date.now() < delayBudget) {
+      await sleep(50);
+      const r = (await get(`/api/runs/${delayStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { delayed = r; break; }
+    }
+    check('delay run finishes done', delayed?.status === 'done', delayed?.status);
+    const waitOut = delayed?.graph.nodes.find((n) => n.id === 'wait')?.output;
+    check('delay recorded its wait', waitOut?.ms >= 90 && typeof waitOut?.waited === 'string',
+      `ms=${waitOut?.ms} waited=${waitOut?.waited}`);
+    try { fs.unlinkSync(delaySaved.file); } catch {}
+
+    // Approve: open-ended wait → user clicks approve → done.
+    const approveDef = {
+      schemaVersion: 2, id: 'smoke-approve', title: 'Approve smoke',
+      graph: {
+        nodes: [{ id: 'ok', title: 'OK?', kind: 'approve', col: 1, row: 0,
+                 spec: { question: 'Approve smoke?' } }],
+        edges: [],
+      },
+    };
+    const approveSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: approveDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const approveStart = await fetch(`${base}/api/workflows/smoke-approve/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    // Wait for the approve to open.
+    let approveReady = null;
+    const approveBudget = Date.now() + 3000;
+    while (Date.now() < approveBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${approveStart.run.runId}`)).run;
+      if (r?.status === 'awaiting-answer') { approveReady = r; break; }
+    }
+    check('approve opens awaiting-answer', !!approveReady, approveReady?.status);
+    await fetch(`${base}/api/runs/${approveStart.run.runId}/answer`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ nodeId: 'ok', answer: 'approve' }),
+    });
+    let approved = null;
+    const settledBudget = Date.now() + 3000;
+    while (Date.now() < settledBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${approveStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { approved = r; break; }
+    }
+    check('approve finishes done when the user approves',
+      approved?.status === 'done' && approved?.graph.nodes[0]?.output?.approved === true,
+      `${approved?.status} / approved=${approved?.graph.nodes[0]?.output?.approved}`);
+    try { fs.unlinkSync(approveSaved.file); } catch {}
+
+    // Legacy compat: a workflow without schemaVersion still runs; the resulting
+    // run records schemaVersion: 1 so the canvas can badge it.
+    const legacyDef = {
+      id: 'smoke-legacy', title: 'Legacy smoke',
+      graph: {
+        nodes: [{ id: 'go', title: 'Go', kind: 'terminal', col: 1, row: 0, command: 'echo legacy' }],
+        edges: [],
+      },
+    };
+    const legacySaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: legacyDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const legacyStart = await fetch(`${base}/api/workflows/smoke-legacy/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    check('legacy run records schemaVersion: 1',
+      legacyStart.run?.schemaVersion === 1,
+      `schemaVersion=${legacyStart.run?.schemaVersion}`);
+    try { fs.unlinkSync(legacySaved.file); } catch {}
 
     // Rerun & delete.
     const rerunResp = await fetch(`${base}/api/runs/${started.run.runId}/rerun`, {

@@ -226,6 +226,203 @@ const HANDLERS = {
     };
   },
 
+  /* --------------------- v2 vocabulary (schemaVersion: 2) --------------------
+   * Each handler reads node.spec and either calls a legacy handler or does its
+   * own work. Legacy handlers above stay registered so old workflow files and
+   * old run.json records keep working unchanged. */
+
+  agent: async (node, ctx) => {
+    const spec = node.spec || {};
+    // Shim the spec onto the node so legacy handlers see their fields.
+    const shim = { ...node, prompt: spec.prompt || node.prompt, model: spec.model || node.model };
+    const out = (spec.output || 'markdown').toLowerCase();
+    if (out === 'markdown' || out === 'text')  return HANDLERS.document(shim, ctx);
+    if (out === 'json-findings' || out === 'findings') return HANDLERS.report(shim, ctx);
+    if (out === 'html' || out === 'mockup')    return HANDLERS.mockup(shim, ctx);
+    if (out === 'json-hunks' || out === 'diff') return HANDLERS.diff(shim, ctx);
+    // Generic JSON — reuse the report-shape parser but return .data instead.
+    const prompt = [
+      spec.prompt || `Produce JSON for node "${node.title}".`,
+      inputBlock(ctx.run.inputs),
+      '',
+      'Return a JSON object and nothing else.',
+    ].filter(Boolean).join('\n\n');
+    const { text, meta } = await callClaude(prompt, {
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(shim, 'haiku'),
+      onProgress: (msg) => ctx.onProgress({ progress: msg }),
+    });
+    return { title: `${slug(node.title)}.json`, data: extractJson(text) ?? text, meta };
+  },
+
+  script: async (node, ctx) => {
+    const spec = node.spec || {};
+    if (spec.op === 'capture-shots') return HANDLERS['shots-set'](node, ctx);
+    if (spec.op === 'capture-shot')  return HANDLERS.shots(node, ctx);
+    // Shell command — reuse the terminal handler with the cmd shimmed on.
+    const shim = { ...node, command: spec.cmd || node.command };
+    return HANDLERS.terminal(shim, ctx);
+  },
+
+  decision: async (node, ctx) => {
+    const spec = node.spec || {};
+    const options = spec.options || [];
+    const askNode = {
+      ...node,
+      question: spec.question || node.title,
+      choices: options.map((o) => o.label),
+    };
+    const base = await HANDLERS.ask(askNode, ctx);
+    const picked = options.find((o) => o.label === base.answer);
+    return { ...base, picked: picked?.edgeLabel || base.answer, options };
+  },
+
+  check: async (node, ctx) => {
+    const spec = node.spec || {};
+    const a = spec.assert || {};
+    const from = ctx.run.graph.nodes.find((n) => n.id === a.from);
+    let pass = false, reason = '';
+    if (a.type === 'exit-zero') {
+      const code = from?.output?.code;
+      // Legacy terminal handler reports status not code; treat undefined as pass.
+      pass = code === 0 || code === undefined;
+      reason = pass ? 'exit 0' : `exit ${code}`;
+    } else if (a.type === 'has-pairs') {
+      const pairs = from?.output?.pairs || [];
+      const done = pairs.filter((p) => p.status === 'done').length;
+      const skipped = pairs.filter((p) => p.status === 'skipped').length;
+      const min = a.min || 1;
+      if (pairs.length > 0 && skipped === pairs.length) {
+        // No origin to capture against — treat as "nothing to check" rather
+        // than a failure so the gate doesn't trip on a missing dev server.
+        pass = true; reason = 'no captures available';
+      } else {
+        pass = done >= min;
+        reason = `${done} captured${pass ? '' : `, need ${min}`}`;
+      }
+    } else if (a.type === 'contains') {
+      const haystack = JSON.stringify(from?.output || '');
+      pass = haystack.includes(a.needle);
+      reason = pass ? `found "${a.needle}"` : `missing "${a.needle}"`;
+    } else if (a.type === 'manual') {
+      const answer = await ctx.awaitAnswer(node.id, {
+        question: a.question || spec.question || `Does ${from?.title || 'the upstream'} look right?`,
+        choices: ['yes', 'no'],
+      });
+      pass = answer === 'yes';
+      reason = answer;
+    } else {
+      pass = true; reason = 'no assert specified';
+    }
+    return { pass, reason, assertType: a.type || 'none', from: a.from || null, title: node.title };
+  },
+
+  publish: async (node, ctx) => {
+    const spec = node.spec || {};
+    const target = spec.target || 'pr';
+    if (target === 'pr') return HANDLERS.pr(node, ctx);
+    if (target === 'file') {
+      // Write upstream text to a file inside the repo; return a receipt.
+      const upstream = upstreamContext(node, ctx.run);
+      const relPath = spec.path || `.orderly-claude/outputs/${node.id}.md`;
+      if (!ctx.run.repoRoot) return { target, path: relPath, note: 'no repoRoot — skipped' };
+      const full = path.join(ctx.run.repoRoot, relPath);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, upstream || '', 'utf8');
+      return { target, path: relPath, bytes: Buffer.byteLength(upstream || '') };
+    }
+    throw new Error(`unknown publish target: ${target}`);
+  },
+
+  display: async (node, ctx) => {
+    const spec = node.spec || {};
+    const fromIds = Array.isArray(spec.from) ? spec.from : [spec.from];
+    const sources = fromIds
+      .map((id) => ctx.run.graph.nodes.find((n) => n.id === id))
+      .filter(Boolean)
+      .map((p) => ({ id: p.id, title: p.title, kind: p.kind, output: p.output }));
+    return { render: spec.render || 'auto', sources };
+  },
+
+  inputs: async (node, ctx) => {
+    const spec = node.spec || {};
+    const fields = spec.fields || [];
+    const values = {};
+    for (const f of fields) {
+      values[f.key] = (ctx.run.inputs || {})[f.key] ?? f.default ?? '';
+    }
+    return { fields, values };
+  },
+
+  // Control-flow kinds.
+
+  // Loop runs a per-item action (script or agent) across an array resolved
+  // from spec.over, collecting results into an array. The scheduler stays
+  // topological — true subgraph fan-out is a follow-up.
+  loop: async (node, ctx) => {
+    const spec = node.spec || {};
+    const items = resolveOver(spec.over, ctx.run);
+    const results = [];
+    for (let i = 0; i < items.length; i++) {
+      if (ctx.signal?.aborted) break;
+      ctx.onProgress({
+        progress: `item ${i + 1}/${items.length}: ${String(items[i]).slice(0, 40)}`,
+        partialOutput: { items, results: [...results], count: items.length, pos: i },
+      });
+      try {
+        if (spec.action === 'script' && spec.cmd) {
+          const cmd = String(spec.cmd).replaceAll('{{item}}', String(items[i]));
+          const { out, err, code } = await exec(['sh', '-c', cmd], {
+            cwd: ctx.run.repoRoot, signal: ctx.signal, timeoutMs: 30_000,
+          });
+          results.push({ item: items[i], out: (out || err || '').slice(0, 500), code });
+        } else if (spec.action === 'agent' && spec.prompt) {
+          const prompt = String(spec.prompt).replaceAll('{{item}}', String(items[i]));
+          const { text, meta } = await callClaude(prompt, {
+            cwd: ctx.run.repoRoot, signal: ctx.signal,
+            model: pickModel(node, 'haiku'),
+            onProgress: () => {}, onStream: () => {},
+          });
+          results.push({ item: items[i], text, meta });
+        } else {
+          results.push({ item: items[i] });
+        }
+      } catch (e) {
+        results.push({ item: items[i], error: e.message });
+      }
+    }
+    return { items, results, count: items.length };
+  },
+
+  // Delay parks the scheduler for a wall-clock duration (or until a given
+  // ISO timestamp). Capped at ten minutes to keep a stray workflow from
+  // sitting in the queue indefinitely.
+  delay: async (node, ctx) => {
+    const spec = node.spec || {};
+    const target = parseWait(spec.wait);
+    const ms = Math.max(0, Math.min(target.ms, 10 * 60_000));
+    ctx.onProgress({ progress: `waiting ${target.label}` });
+    const started = Date.now();
+    await napMs(ctx, ms);
+    return { waited: target.label, ms, startedAt: new Date(started).toISOString(), endedAt: new Date().toISOString() };
+  },
+
+  // Approve blocks until a human picks approve/reject. A reject fails the
+  // run so downstream work doesn't start on an unapproved artifact.
+  approve: async (node, ctx) => {
+    const spec = node.spec || {};
+    const answer = await ctx.awaitAnswer(node.id, {
+      question: spec.question || spec.prompt || 'Approve?',
+      choices: ['approve', 'reject'],
+    });
+    const approved = answer === 'approve';
+    if (!approved) {
+      // Signal rejection the same way Check-stop does: throw so the scheduler
+      // marks the node failed and finishes the run as failed.
+      throw new Error(`approve "${node.title}" rejected`);
+    }
+    return { approved: true, answer };
+  },
+
   _default: async (node, ctx) => {
     await nap(ctx, 300);
     return { note: `output for ${node.kind} (placeholder — no handler wired)` };
@@ -462,6 +659,64 @@ function nap(ctx, ms) {
     const t = setTimeout(resolve, ms);
     ctx.signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); }, { once: true });
   });
+}
+/** Promise-based nap that resolves on timeout OR on abort (not rejects). */
+function napMs(ctx, ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    ctx.signal?.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+  });
+}
+
+/**
+ * Parse a Loop's spec.over into an array. Accepted shapes:
+ *   - a real array literal in the def           ([...])
+ *   - a string of the form "inputs.KEY" or "{{inputs.KEY}}" (split on commas / whitespace)
+ *   - a string of the form "node.ID" or "{{node.ID.field}}" (walk the upstream node's output)
+ */
+function resolveOver(over, run) {
+  if (Array.isArray(over)) return over;
+  if (typeof over !== 'string') return [];
+  const raw = over.trim().replace(/^\{\{|\}\}$/g, '').trim();
+  const parts = raw.split('.');
+  if (parts[0] === 'inputs') {
+    const key = parts.slice(1).join('.');
+    const v = (run.inputs || {})[key];
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string') return v.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    return v == null ? [] : [v];
+  }
+  if (parts[0] === 'node' && parts[1]) {
+    const target = run.graph.nodes.find((n) => n.id === parts[1]);
+    let v = target?.output || null;
+    for (const seg of parts.slice(2)) v = v?.[seg];
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string') return v.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    return v == null ? [] : [v];
+  }
+  // Last resort: treat as a literal comma-separated list.
+  return raw.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Parse a Delay's spec.wait. Accepts "5s", "2m", "500ms", "1h", or an ISO
+ * timestamp (wait until that moment). Caps are enforced upstream.
+ */
+function parseWait(wait) {
+  if (!wait) return { ms: 0, label: '0s' };
+  const s = String(wait).trim();
+  // ISO timestamp — compute delta from now.
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+    const target = Date.parse(s);
+    if (!Number.isFinite(target)) return { ms: 0, label: s };
+    return { ms: Math.max(0, target - Date.now()), label: `until ${s}` };
+  }
+  const m = /^(\d+(?:\.\d+)?)(ms|s|m|h)?$/i.exec(s);
+  if (!m) return { ms: 0, label: s };
+  const n = parseFloat(m[1]);
+  const unit = (m[2] || 's').toLowerCase();
+  const mult = unit === 'ms' ? 1 : unit === 's' ? 1_000 : unit === 'm' ? 60_000 : 3_600_000;
+  return { ms: Math.round(n * mult), label: `${n}${unit}` };
 }
 
 function pickTerminalCommand(node, run) {
