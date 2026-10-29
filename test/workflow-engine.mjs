@@ -222,6 +222,53 @@ export async function runWorkflowEngineChecks({ check, session }) {
     const img = sha ? await fetch(`${base}/api/blob?sha=${sha}`) : null;
     check('a shown picture is kept, and served as an image', img?.status === 200 && img.headers.get('content-type') === 'image/png');
 
+    /* ------------------------------ verify retries ---------------------------- */
+    console.log('\nWorkflows: verify retries\n');
+
+    // Call the agent handler directly so every prompt it sends is kept; the
+    // run record only holds the last one. The mock judge fails any rubric
+    // with MOCK_FAIL in it, so each of the three attempts fails.
+    const handlers = await import('../src/core/workflow-handlers.mjs');
+    const sent = [];
+    const draftNode = { id: 'd', title: 'Draft', kind: 'agent', spec: { prompt: 'Write the story.', output: 'markdown',
+      verify: { asserts: [{ type: 'llm-judge', rubric: 'MOCK_FAIL reads well' }], maxRetries: 2, onFail: 'skip' } } };
+    const vOut = await handlers.getHandler('agent')(draftNode, {
+      run: { workflowTitle: 'Verify', cwd: repo, inputs: {}, graph: { nodes: [draftNode], edges: [] } },
+      onProgress: () => {}, recordSent: (t) => sent.push(String(t)),
+    });
+    const drafts = sent.filter((t) => /Draft a focused Markdown document/.test(t));
+    const third = drafts[2] || '';
+    check('every verify attempt is still recorded', vOut?.verify?.attempts?.length === 3, vOut?.verify?.attempts?.length);
+    check('a retry sends back the previous draft', /## Your previous draft[\s\S]*A stub body produced/.test(third), third.slice(-600));
+    check('a retry lists only the latest failures, not every earlier one',
+      (third.match(/mock judge failed it/g) || []).length === 1 && /change nothing else that works/.test(third), third.slice(-600));
+    check('the first attempt is not asked to revise anything', drafts[0] && !/previous draft/.test(drafts[0]));
+
+    // A verify that fails with onFail "stop" fails the step but keeps its draft.
+    await save({ id: 'vstop', title: 'Vstop', graph: { nodes: [
+      { id: 'd', title: 'Draft', kind: 'agent', spec: { prompt: 'Write the story.', output: 'markdown',
+        verify: { asserts: [{ type: 'llm-judge', rubric: 'MOCK_FAIL reads well' }], maxRetries: 1 } } },
+    ], edges: [] } });
+    r = await until((await start('vstop')).run.runId, settled);
+    const stopped = node(r, 'd');
+    check('a step that fails verify keeps its last draft and verdicts',
+      r.status === 'failed' && stopped?.status === 'failed' && /verify failed/.test(stopped?.output?.error || '')
+      && /A stub body produced/.test(stopped?.output?.body || '')
+      && stopped?.output?.verify?.pass === false && stopped.output.verify.attempts?.length === 2
+      && stopped.output.verify.results?.some((x) => x.type === 'llm-judge'),
+      JSON.stringify(stopped?.output).slice(0, 300));
+    const onDisk = wf.readRun(r.runId, { repoRoot: repo });
+    check('…and run.json has it too', /A stub body produced/.test(onDisk?.graph?.nodes?.find((n) => n.id === 'd')?.output?.body || ''));
+
+    // A judge that broke its JSON and then corrected itself.
+    const selfCorrected = '{"pass": false, "reason": "Page 3 contradicts page 1" "and the ending is rushed"}\n\n'
+      + 'Correction: valid JSON output:\n\n{"pass": true, "reason": "The story is consistent and reads {well}."}';
+    const verdict = handlers.extractJson(selfCorrected, { want: (o) => typeof o.pass === 'boolean', last: true });
+    check("the judge's corrected verdict is the one read", verdict?.pass === true && /reads \{well\}/.test(verdict?.reason || ''),
+      JSON.stringify(verdict));
+    check('plain JSON parsing still takes the first object',
+      handlers.extractJson('Here: {"a": 1} and later {"a": 2}')?.a === 1);
+
     /* --------------------------- versions, reruns --------------------------- */
     console.log('\nWorkflows: versions\n');
 

@@ -288,15 +288,19 @@ const HANDLERS = {
     const attempts = [];
     let output;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const prevFailures = attempts.flatMap((a) => a.failures);
-      output = await runAgentOnce(node, ctx, prevFailures);
+      // A retry revises the last draft against the last verdict only. Older
+      // complaints were about drafts that no longer exist.
+      const last = attempts[attempts.length - 1];
+      const revise = last ? { draft: draftText(output), failures: last.failures } : null;
+      output = await runAgentOnce(node, ctx, revise);
       if (!verify) return output;
       const result = await runVerify(node, output, ctx);
       attempts.push({ attempt, pass: result.pass, failures: result.failures });
       if (result.pass || attempt === maxRetries) {
         output.verify = { pass: result.pass, attempts, results: result.results };
         if (!result.pass && (verify.onFail || 'stop') === 'stop') {
-          throw final(`verify failed: ${result.failures.map((f) => f.reason).join('; ')}`);
+          // The step fails, but its last draft and verdicts stay on it to read.
+          throw Object.assign(final(`verify failed: ${result.failures.map((f) => f.reason).join('; ')}`), { output });
         }
         return output;
       }
@@ -883,9 +887,17 @@ function stripFences(text) {
 /**
  * Pull a JSON object out of a response. Models sometimes wrap JSON in a code
  * fence or add commentary around it, so look for the outer braces first.
+ *
+ * `want` keeps only objects that pass a test; `last` takes the last such
+ * object instead of the first. Both read every top-level `{...}` in the text,
+ * so a broken object followed by a fixed one still yields the fixed one.
  */
-function extractJson(text) {
+export function extractJson(text, { want = null, last = false } = {}) {
   const t = String(text || '').trim();
+  if (want || last) {
+    const found = jsonObjectsIn(t).filter((o) => !want || want(o));
+    return (last ? found[found.length - 1] : found[0]) ?? null;
+  }
   const direct = tryParse(t);
   if (direct) return direct;
   const fenced = t.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -899,9 +911,44 @@ function extractJson(text) {
     const parsed = tryParse(slice);
     if (parsed) return parsed;
   }
-  return null;
+  return jsonObjectsIn(t)[0] ?? null;
 }
 function tryParse(s) { try { return JSON.parse(s); } catch { return null; } }
+
+/**
+ * Every top-level `{...}` in the text that parses, in order. Braces inside
+ * strings do not count. An object that does not parse is skipped whole; one
+ * that never closes is skipped one character on, so a later object is found.
+ */
+function jsonObjectsIn(text) {
+  const out = [];
+  let i = text.indexOf('{');
+  // A guard against pathological input: plenty for any real reply.
+  for (let tries = 0; i >= 0 && tries < 200; tries++) {
+    const end = closingBrace(text, i);
+    if (end < 0) { i = text.indexOf('{', i + 1); continue; }
+    const parsed = tryParse(text.slice(i, end + 1));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) out.push(parsed);
+    i = text.indexOf('{', end + 1);
+  }
+  return out;
+}
+
+/** Index of the brace that closes the one at `start`, or -1. */
+function closingBrace(text, start) {
+  let depth = 0, inString = false, escaped = false;
+  for (let j = start; j < text.length; j++) {
+    const c = text[j];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return j;
+  }
+  return -1;
+}
 
 /**
  * Pick an origin to capture against: explicit `inputs.devUrl` wins; otherwise
@@ -1002,19 +1049,18 @@ function joinResults(join, ran) {
 }
 
 /**
- * One Agent pass. Called per attempt; `extraFailures` from prior rounds get
- * appended to the prompt as "fix these on this pass" lines.
+ * One Agent pass. Called per attempt. On a retry, `revise` carries the last
+ * draft and what the checks found wrong with it, so the model corrects that
+ * draft instead of writing a new one with new flaws.
  */
-async function runAgentOnce(node, ctx, extraFailures = []) {
+async function runAgentOnce(node, ctx, revise = null) {
   const spec = node.spec || {};
   const authored = spec.prompt || node.prompt || '';
   let prompt = resolveOrFail(authored, ctx, node);
   // Skills are named, not forced: the CLI decides whether one applies.
   const uses = (spec.uses || []).filter(Boolean);
   if (uses.length) prompt += `\n\nUse ${uses.length === 1 ? 'this skill' : 'these skills'} where ${uses.length === 1 ? 'it applies' : 'they apply'}: ${uses.join(', ')}.`;
-  if (extraFailures.length) {
-    prompt += `\n\n## Fix these on this pass\n${extraFailures.map((f) => `- ${f.type}: ${f.reason}`).join('\n')}`;
-  }
+  if (revise) prompt += revisionBlock(revise);
   // Shim the spec onto the node so legacy handlers see their fields. A
   // prompt that names its own references gets those and nothing else.
   const shim = { ...node, prompt, model: spec.model || node.model, explicit: isExplicit(authored) };
@@ -1037,6 +1083,39 @@ async function runAgentOnce(node, ctx, extraFailures = []) {
     onProgress: (msg) => ctx.onProgress({ progress: msg }),
   });
   return { title: `${slug(node.title)}.json`, data: extractJson(text) ?? text, meta };
+}
+
+// Long drafts are cut so a retry prompt stays a sensible size.
+const DRAFT_MAX_CHARS = 20_000;
+
+/** The retry section: the last draft, its problems, and what to send back. */
+function revisionBlock({ draft, failures }) {
+  let text = String(draft || '');
+  const cut = text.length > DRAFT_MAX_CHARS;
+  if (cut) text = text.slice(0, DRAFT_MAX_CHARS);
+  return [
+    '',
+    '## Your previous draft',
+    cut ? `(Cut at ${DRAFT_MAX_CHARS} characters; the full draft was longer.)` : null,
+    text,
+    '## Reviewers found these problems',
+    (failures || []).map((f) => `- ${f.type}: ${f.reason}`).join('\n') || '- (no details given)',
+    '## What to return',
+    'Return the full corrected work in the same format as before. Fix only these problems and change nothing else that works.',
+  ].filter((x) => x !== null).join('\n\n');
+}
+
+/**
+ * The draft as the model should see it again: the text it wrote, without the
+ * bookkeeping (cost, render data) the engine added. JSON kinds come back as
+ * JSON, so the model sees the shape it has to return.
+ */
+function draftText(output) {
+  if (!output || typeof output !== 'object') return pickOutputText(output);
+  if (typeof output.body === 'string' || typeof output.html === 'string') return pickOutputText(output);
+  const { meta, render, verify, title, ...rest } = output;
+  const shown = 'data' in rest ? rest.data : rest;
+  return typeof shown === 'string' ? shown : JSON.stringify(shown, null, 2);
 }
 
 /**
@@ -1137,12 +1216,15 @@ async function runOneAssert(a, output, brand, ctx) {
       `## Rubric\n${a.rubric}`,
       `## The work\n${pickOutputText(output).slice(0, 12000)}`,
       'Return a JSON verdict object and nothing else: {"pass": true|false, "reason": "<one sentence>"}',
+      'Your reply must be exactly one JSON object, with no corrections or text after it.',
     ].join('\n\n');
     const { text } = await callClaude(prompt, {
       ctx, cwd: cwdOf(ctx.run), signal: ctx.signal, model: a.model || 'haiku',
       onProgress: (msg) => ctx.onProgress({ progress: `judging · ${msg}` }),
     });
-    const verdict = extractJson(text);
+    // A judge that corrects itself sends more than one object; its last
+    // verdict is the one it means.
+    const verdict = extractJson(text, { want: (o) => typeof o.pass === 'boolean', last: true });
     if (!verdict || typeof verdict.pass !== 'boolean') return { type: t, pass: false, reason: 'the judge gave no clear verdict' };
     return { type: t, pass: verdict.pass, reason: String(verdict.reason || (verdict.pass ? 'meets the rubric' : 'misses the rubric')) };
   }
