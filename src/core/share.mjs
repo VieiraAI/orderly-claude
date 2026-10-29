@@ -6,9 +6,11 @@
  * stored at ~/.orderly-claude/share.key (generated on first use).
  *
  * The signed URL opens a static, self-contained HTML export of the session:
- * every turn, every tool step, every screenshot inlined as base64 so the
- * page needs no fetches. The export never touches the live server once
- * generated, so a shared link survives the server going down.
+ * every turn, every tool step, every screenshot inlined as base64. Once the
+ * page has loaded it makes no further requests, images included, so it keeps
+ * rendering offline and survives being saved to a file. The link itself is
+ * served by this process, though — the export is built per request, so the
+ * URL stops resolving when the server stops.
  */
 import fs from 'node:fs';
 import path from 'node:path';

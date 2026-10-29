@@ -16,8 +16,9 @@
     <span id="sessionCwd" class="cwd"></span>
   </div>
   <div class="actions">
-    <button id="devUrl" class="pill" title="What the before/after screenshots point at">—</button>
-    <input id="devUrlInput" class="pill-input hidden" placeholder="http://localhost:3000" spellcheck="false">
+    <button id="devUrl" class="pill" title="Which running app the before/after screenshots are taken of">—</button>
+    <input id="devUrlInput" class="pill-input hidden" placeholder="Screenshot which app? http://localhost:3000"
+           title="The address of the running app to screenshot before and after each change" spellcheck="false">
     <button id="updateHint" class="btn update-hint hidden" title="The interface changed on disk">Update ready — reload</button>
     <button id="shareBtn" class="btn ghost" title="Create a shareable link to this session">◎ Share</button>
     <button id="themeBtn" class="btn ghost" title="Light / dark">◐</button>
@@ -26,7 +27,7 @@
 </header>
 <script type="module">
   import { mountAppMenu } from '/app-menu.mjs';
-  mountAppMenu(document.getElementById('appMenu'), { here: 'viewer' });
+  mountAppMenu(document.getElementById('appMenu'), { here: 'sessions' });
 </script>
 
 <div id="connBanner" class="conn-banner hidden" role="status">

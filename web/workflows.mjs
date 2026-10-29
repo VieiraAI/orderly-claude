@@ -340,8 +340,8 @@ function renderDecisions() {
   if (!filtered.length) {
     mount.innerHTML = chips + `<div class="empty">
       ${scope === 'session'
-        ? 'No decisions in this session yet. Mark a step with ⚑ in the viewer, or let a workflow ask-node resolve.'
-        : 'Decisions show up here once a workflow asks a question and gets an answer, or once a step is marked as a decision in the viewer.'}
+        ? 'No decisions in this session yet. Mark a step with ⚑ in Sessions, or let a workflow ask-node resolve.'
+        : 'Decisions show up here once a workflow asks a question and gets an answer, or once a step is marked as a decision in Sessions.'}
     </div>`;
     bindChips();
     return;
@@ -659,33 +659,33 @@ function shortenPath(p) {
 
 const TAB_COPY = {
   workflows: {
-    eyebrow: 'Workflows · available in this project',
+    eyebrow: 'Workflows · a job you run the same way every time',
     title:   'Pick a workflow.',
-    desc:    'Every tile is a graph of typed-output cards. Click one to open it in the editor; hit ◆ Run on the tile to send it with its inputs.',
+    desc:    'A workflow is a set of steps you would otherwise type out one prompt at a time. Press one button and watch each step finish on the canvas, instead of scrolling a terminal to work out what happened.',
     newHref: '/workflow-editor.html',
     newLabel: '+ New workflow',
   },
   runs: {
-    eyebrow: 'Runs · every invocation, linked to its session',
+    eyebrow: 'Runs · the receipt for every workflow you have run',
     title:   'What ran. Where.',
-    desc:    'When a workflow fires, that run shows up here, tied to the session it happened in. Click a row to open the canvas scoped to it.',
+    desc:    'Each time a workflow fires it leaves a run here, tied to the session it happened in, holding what every step produced. This is where you answer "what did that actually do?" a week later.',
   },
   skills: {
-    eyebrow: 'Skills · the pieces workflows draw on',
+    eyebrow: 'Skills · what Claude knows how to do on this machine',
     title:   'What Claude knows how to do.',
-    desc:    'Read from the two .claude/skills roots. A workflow node can call a skill by name; this is where you see what is on the shelf.',
+    desc:    'Every skill installed across your projects, plus your global library, in one list. Worth a look before writing a workflow — the step you need may already exist.',
   },
   prompts: {
-    eyebrow: 'Prompts · named templates you can send into a session',
+    eyebrow: 'Prompts · one saved message, with blanks to fill in',
     title:   'Pick a prompt.',
-    desc:    'Each prompt is one .md file with frontmatter and a body. Fill the inputs, hit Send, and it lands in the active Claude Code session.',
+    desc:    'A prompt is a message you keep instead of retyping it. Fill in the blanks, hit Send, and it goes into the session you are watching. A workflow is many steps; a prompt is one message.',
     newHref: '/prompts-new.html',
     newLabel: '+ New prompt',
   },
   decisions: {
-    eyebrow: 'Decisions · the moments you committed to a direction',
+    eyebrow: 'Decisions · every time you chose a direction',
     title:   'What you decided, and why.',
-    desc:    'Auto-collected from workflow ask-nodes and from steps you mark as decisions in the viewer. Click a row to open where it happened.',
+    desc:    'Every question a workflow put to you and what you answered, plus any step you flagged yourself in Sessions. The answer to "why is it built this way?" once you have forgotten.',
   },
 };
 

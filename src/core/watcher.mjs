@@ -53,7 +53,7 @@ export class SessionWatcher extends EventEmitter {
   async start() {
     this.read();
     if (this.capture) {
-      this.devUrl = await detectDevServer(this.projectDir);
+      this.devUrl = await detectDevServer(this.projectDir, { selfPort: this.selfPort });
       if (this.devUrl) {
         this.emit('log', `watching ${this.devUrl} for visual before/after`);
         this.lastShot = await captureFor(this.sessionId, 'baseline', 'after', this.devUrl);
@@ -92,7 +92,7 @@ export class SessionWatcher extends EventEmitter {
   async setCapture(on) {
     this.capture = on;
     if (!on) { this.devUrl = null; return; }
-    if (!this.devUrl) this.devUrl = this.pinnedUrl || await detectDevServer(this.projectDir);
+    if (!this.devUrl) this.devUrl = this.pinnedUrl || await detectDevServer(this.projectDir, { selfPort: this.selfPort });
   }
 
   /** Point captures at a chosen URL, and stop rescanning away from it. */
@@ -109,7 +109,7 @@ export class SessionWatcher extends EventEmitter {
    */
   async rescanDev() {
     if (this.pinnedUrl) return;
-    const found = await detectDevServer(this.projectDir);
+    const found = await detectDevServer(this.projectDir, { selfPort: this.selfPort });
     if (found === this.devUrl) return;
 
     if (this.devUrl && !found) {

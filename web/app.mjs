@@ -1197,9 +1197,24 @@ async function refresh() {
   $('composer').classList.toggle('hidden', !data.live);
   const dev = $('devUrl');
   dev.classList.toggle('hidden', !data.live);
-  dev.textContent = data.devUrl
-    ? `capturing ${data.devUrl.replace('http://', '')}`
-    : 'set capture target';
+  /*
+   * This pill reads as a status line but is really a setting, which is why
+   * "capturing localhost:5173" taught nobody anything. Name the feature it
+   * feeds — the before/after shots — and show it is editable.
+   */
+  if (data.devUrl) {
+    const where = data.devUrl.replace(/^https?:\/\//, '');
+    dev.innerHTML = `<span class="pill-k">before/after of</span> ${esc(where)}<span class="pill-pen">✎</span>`;
+    dev.title = `Your app, as Orderly sees it: every change is screenshotted at ${where} `
+      + 'before and after, so you can look at what moved instead of reading about it.'
+      + '\nClick to point it at a different app.';
+  } else {
+    dev.innerHTML = '<span class="pill-k">before/after</span> no app found'
+      + '<span class="pill-pen">✎</span>';
+    dev.title = 'Before/after screenshots need a running app to photograph. Orderly looks for a '
+      + 'dev server started inside this project and found none.'
+      + '\nClick to type its address yourself, e.g. http://localhost:3000';
+  }
   state.devUrl = data.devUrl || null;
   await loadRuns();
   await loadMarks();
