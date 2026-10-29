@@ -1,4 +1,5 @@
 {
+  "schemaVersion": 2,
   "id": "ship-pr",
   "title": "Ship a PR",
   "category": "ship",
@@ -10,15 +11,22 @@
   ],
   "graph": {
     "nodes": [
-      { "id": "tests",  "title": "Tests",      "kind": "terminal", "col": 1, "row": 0, "cost": 1 },
-      { "id": "review", "title": "Self-review", "kind": "report",  "col": 2, "row": 0, "cost": 2 },
-      { "id": "body",   "title": "PR body",    "kind": "document", "col": 3, "row": 0, "cost": 1 },
-      { "id": "pr",     "title": "Pull request", "kind": "pr",     "col": 4, "row": 0, "cost": 1 }
+      { "id": "tests",  "title": "Tests",       "kind": "script",   "col": 1, "row": 0, "cost": 1,
+        "spec": { "cmd": "echo \"167 passed · placeholder\"" } },
+      { "id": "green",  "title": "Tests green?", "kind": "check",   "col": 2, "row": 0, "cost": 0,
+        "spec": { "assert": { "type": "exit-zero", "from": "tests" } } },
+      { "id": "review", "title": "Self-review", "kind": "agent",    "col": 3, "row": 0, "cost": 2,
+        "spec": { "model": "sonnet", "output": "json-findings", "prompt": "Review the diff for correctness, readability, architecture, security, performance." } },
+      { "id": "body",   "title": "PR body",     "kind": "agent",    "col": 4, "row": 0, "cost": 1,
+        "spec": { "model": "haiku", "output": "markdown",       "prompt": "Draft a short GitHub PR body." } },
+      { "id": "pr",     "title": "Pull request", "kind": "publish", "col": 5, "row": 0, "cost": 1,
+        "spec": { "target": "pr" } }
     ],
     "edges": [
-      ["tests", "review"],
+      ["tests",  "green"],
+      ["green",  "review"],
       ["review", "body"],
-      ["body", "pr"]
+      ["body",   "pr"]
     ]
   }
 }

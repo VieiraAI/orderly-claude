@@ -75,36 +75,116 @@ function readDir(dir) {
  * (empty means OK). Catches the handful of things the scheduler assumes:
  *   - id is a non-empty string
  *   - graph.nodes is a non-empty array of unique-id objects with a kind
- *   - graph.edges is an array of [from, to] pairs with both ids present
+ *   - graph.edges is an array of [from, to] (or [from, to, label]) pairs
+ *     with both ids present
  *   - the graph is a DAG (no cycles reachable from any root)
+ *
+ * When `schemaVersion: 2` is set, each kind must be one of the v2 vocabulary
+ * (agent, script, decision, check, publish, display, inputs, loop, delay,
+ * approve) and the per-kind spec is lightly checked. Legacy definitions
+ * (no schemaVersion) accept any string kind, preserving old files on disk.
  */
+export const V2_KINDS = new Set([
+  'agent', 'script', 'decision', 'check', 'publish', 'display',
+  'inputs', 'loop', 'delay', 'approve',
+]);
+
 export function validateDefinition(d) {
   const problems = [];
   if (!d || typeof d !== 'object') return ['not an object'];
   if (typeof d.id !== 'string' || !d.id.trim()) problems.push('missing id');
+  const v2 = d.schemaVersion === 2;
   const nodes = d.graph?.nodes;
   if (!Array.isArray(nodes) || nodes.length === 0) {
     problems.push('graph.nodes is empty');
     return problems; // nothing else to check
   }
   const ids = new Set();
+  const byId = {};
   for (const n of nodes) {
     if (!n || typeof n.id !== 'string') { problems.push('a node has no id'); continue; }
     if (ids.has(n.id))         problems.push(`duplicate node id: ${n.id}`);
     if (!n.kind)               problems.push(`node ${n.id}: missing kind`);
+    if (v2 && n.kind && !V2_KINDS.has(n.kind)) {
+      problems.push(`node ${n.id}: unknown kind "${n.kind}" (v2 kinds: ${[...V2_KINDS].join(', ')})`);
+    }
+    if (v2) {
+      const kindProblems = validateV2Node(n);
+      for (const p of kindProblems) problems.push(`node ${n.id}: ${p}`);
+    }
     ids.add(n.id);
+    byId[n.id] = n;
   }
   const edges = d.graph?.edges;
   if (!Array.isArray(edges)) {
     problems.push('graph.edges is not an array');
   } else {
     for (const e of edges) {
-      if (!Array.isArray(e) || e.length !== 2) { problems.push(`bad edge: ${JSON.stringify(e)}`); continue; }
+      if (!Array.isArray(e) || e.length < 2 || e.length > 3) {
+        problems.push(`bad edge: ${JSON.stringify(e)}`); continue;
+      }
       const [from, to] = e;
       if (!ids.has(from)) problems.push(`edge from unknown node: ${from}`);
       if (!ids.has(to))   problems.push(`edge to unknown node: ${to}`);
     }
     if (hasCycle(ids, edges)) problems.push('graph has a cycle');
+    if (v2) {
+      // Decision options must match the labels on its outgoing edges.
+      for (const n of nodes) {
+        if (n.kind !== 'decision') continue;
+        const outgoing = edges.filter((e) => e?.[0] === n.id);
+        const labelsOnEdges = new Set(outgoing.map((e) => e[2]).filter(Boolean));
+        const labelsInSpec  = new Set((n.spec?.options || []).map((o) => o.edgeLabel).filter(Boolean));
+        for (const l of labelsOnEdges) {
+          if (!labelsInSpec.has(l)) problems.push(`node ${n.id}: edge label "${l}" is not in spec.options`);
+        }
+      }
+    }
+  }
+  return problems;
+}
+
+/** Lightweight per-kind spec check for v2. One line per missing requirement. */
+function validateV2Node(n) {
+  const problems = [];
+  const spec = n.spec || {};
+  switch (n.kind) {
+    case 'agent':
+      if (!spec.prompt && !spec.promptTemplate) problems.push('spec.prompt is required');
+      break;
+    case 'script':
+      if (!spec.cmd && !spec.op) problems.push('spec.cmd or spec.op is required');
+      break;
+    case 'decision':
+      if (!spec.question) problems.push('spec.question is required');
+      if (!Array.isArray(spec.options) || spec.options.length === 0) {
+        problems.push('spec.options must be a non-empty array');
+      }
+      break;
+    case 'check':
+      if (!spec.assert || !spec.assert.type) problems.push('spec.assert.type is required');
+      break;
+    case 'publish':
+      if (!spec.target) problems.push('spec.target is required');
+      break;
+    case 'display':
+      if (!spec.render) problems.push('spec.render is required');
+      if (!spec.from)   problems.push('spec.from (upstream node id or ids) is required');
+      break;
+    case 'inputs':
+      if (!Array.isArray(spec.fields) || spec.fields.length === 0) {
+        problems.push('spec.fields must be a non-empty array');
+      }
+      break;
+    case 'loop':
+      if (!spec.over) problems.push('spec.over (upstream iterable) is required');
+      break;
+    case 'delay':
+      if (!spec.wait) problems.push('spec.wait is required');
+      break;
+    case 'approve':
+      if (!spec.question && !spec.prompt) problems.push('spec.question or spec.prompt is required');
+      break;
   }
   return problems;
 }
@@ -141,6 +221,10 @@ export function startRun({ workflowId, inputs = {}, repoRoot, sessionId = null, 
   const nodes = (def.graph?.nodes || []).map((n) => ({
     id: n.id, title: n.title, kind: n.kind,
     col: n.col, row: n.row, cost: n.cost,
+    // Carry per-kind config through to the run copy so handlers can read it.
+    spec: n.spec,
+    model: n.model, prompt: n.prompt, command: n.command,
+    question: n.question, choices: n.choices, route: n.route,
     status: 'pending', waitsFor: null, output: null,
     startedAt: null, endedAt: null,
   }));
@@ -226,6 +310,7 @@ export function runsForSession(sessionId) {
  */
 export function scaffoldWorkflow(id, { title, category = 'build', estimate = '~1 min' } = {}) {
   return {
+    schemaVersion: 2,
     id,
     title: title || id.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
     category,
@@ -234,9 +319,12 @@ export function scaffoldWorkflow(id, { title, category = 'build', estimate = '~1
     inputs: [],
     graph: {
       nodes: [
-        { id: 'brief',   title: 'Brief',   kind: 'document', col: 0, row: 0, cost: 1 },
-        { id: 'review',  title: 'Review',  kind: 'report',   col: 1, row: 0, cost: 2 },
-        { id: 'ship',    title: 'Ship',    kind: 'pr',       col: 2, row: 0, cost: 1 },
+        { id: 'brief',  title: 'Brief',  kind: 'agent',   col: 1, row: 0, cost: 1,
+          spec: { model: 'haiku', output: 'markdown', prompt: 'Draft a brief for this workflow in Markdown.' } },
+        { id: 'review', title: 'Review', kind: 'agent',   col: 2, row: 0, cost: 2,
+          spec: { model: 'sonnet', output: 'json-findings', prompt: 'Review the brief for correctness, readability, architecture, security, performance.' } },
+        { id: 'ship',   title: 'Ship',   kind: 'publish', col: 3, row: 0, cost: 1,
+          spec: { target: 'pr' } },
       ],
       edges: [['brief', 'review'], ['review', 'ship']],
     },
@@ -297,6 +385,9 @@ export function rerunRun(runId, { fromNodeId = null } = {}) {
     return {
       id: n.id, title: n.title, kind: n.kind,
       col: n.col, row: n.row, cost: n.cost,
+      spec: n.spec,
+      model: n.model, prompt: n.prompt, command: n.command,
+      question: n.question, choices: n.choices, route: n.route,
       status: keep ? 'done' : 'pending',
       waitsFor: null,
       output: keep ? prev.output : null,

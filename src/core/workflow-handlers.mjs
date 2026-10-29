@@ -226,6 +226,137 @@ const HANDLERS = {
     };
   },
 
+  /* --------------------- v2 vocabulary (schemaVersion: 2) --------------------
+   * Each handler reads node.spec and either calls a legacy handler or does its
+   * own work. Legacy handlers above stay registered so old workflow files and
+   * old run.json records keep working unchanged. */
+
+  agent: async (node, ctx) => {
+    const spec = node.spec || {};
+    // Shim the spec onto the node so legacy handlers see their fields.
+    const shim = { ...node, prompt: spec.prompt || node.prompt, model: spec.model || node.model };
+    const out = (spec.output || 'markdown').toLowerCase();
+    if (out === 'markdown' || out === 'text')  return HANDLERS.document(shim, ctx);
+    if (out === 'json-findings' || out === 'findings') return HANDLERS.report(shim, ctx);
+    if (out === 'html' || out === 'mockup')    return HANDLERS.mockup(shim, ctx);
+    if (out === 'json-hunks' || out === 'diff') return HANDLERS.diff(shim, ctx);
+    // Generic JSON — reuse the report-shape parser but return .data instead.
+    const prompt = [
+      spec.prompt || `Produce JSON for node "${node.title}".`,
+      inputBlock(ctx.run.inputs),
+      '',
+      'Return a JSON object and nothing else.',
+    ].filter(Boolean).join('\n\n');
+    const { text, meta } = await callClaude(prompt, {
+      cwd: ctx.run.repoRoot, signal: ctx.signal, model: pickModel(shim, 'haiku'),
+      onProgress: (msg) => ctx.onProgress({ progress: msg }),
+    });
+    return { title: `${slug(node.title)}.json`, data: extractJson(text) ?? text, meta };
+  },
+
+  script: async (node, ctx) => {
+    const spec = node.spec || {};
+    if (spec.op === 'capture-shots') return HANDLERS['shots-set'](node, ctx);
+    if (spec.op === 'capture-shot')  return HANDLERS.shots(node, ctx);
+    // Shell command — reuse the terminal handler with the cmd shimmed on.
+    const shim = { ...node, command: spec.cmd || node.command };
+    return HANDLERS.terminal(shim, ctx);
+  },
+
+  decision: async (node, ctx) => {
+    const spec = node.spec || {};
+    const options = spec.options || [];
+    const askNode = {
+      ...node,
+      question: spec.question || node.title,
+      choices: options.map((o) => o.label),
+    };
+    const base = await HANDLERS.ask(askNode, ctx);
+    const picked = options.find((o) => o.label === base.answer);
+    return { ...base, picked: picked?.edgeLabel || base.answer, options };
+  },
+
+  check: async (node, ctx) => {
+    const spec = node.spec || {};
+    const a = spec.assert || {};
+    const from = ctx.run.graph.nodes.find((n) => n.id === a.from);
+    let pass = false, reason = '';
+    if (a.type === 'exit-zero') {
+      const code = from?.output?.code;
+      // Legacy terminal handler reports status not code; treat undefined as pass.
+      pass = code === 0 || code === undefined;
+      reason = pass ? 'exit 0' : `exit ${code}`;
+    } else if (a.type === 'has-pairs') {
+      const n = (from?.output?.pairs || []).filter((p) => p.status === 'done').length;
+      const min = a.min || 1;
+      pass = n >= min;
+      reason = `${n} captured${pass ? '' : `, need ${min}`}`;
+    } else if (a.type === 'contains') {
+      const haystack = JSON.stringify(from?.output || '');
+      pass = haystack.includes(a.needle);
+      reason = pass ? `found "${a.needle}"` : `missing "${a.needle}"`;
+    } else if (a.type === 'manual') {
+      const answer = await ctx.awaitAnswer(node.id, {
+        question: a.question || spec.question || `Does ${from?.title || 'the upstream'} look right?`,
+        choices: ['yes', 'no'],
+      });
+      pass = answer === 'yes';
+      reason = answer;
+    } else {
+      pass = true; reason = 'no assert specified';
+    }
+    return { pass, reason, assertType: a.type || 'none', from: a.from || null, title: node.title };
+  },
+
+  publish: async (node, ctx) => {
+    const spec = node.spec || {};
+    const target = spec.target || 'pr';
+    if (target === 'pr') return HANDLERS.pr(node, ctx);
+    if (target === 'file') {
+      // Write upstream text to a file inside the repo; return a receipt.
+      const upstream = upstreamContext(node, ctx.run);
+      const relPath = spec.path || `.orderly-claude/outputs/${node.id}.md`;
+      if (!ctx.run.repoRoot) return { target, path: relPath, note: 'no repoRoot — skipped' };
+      const full = path.join(ctx.run.repoRoot, relPath);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, upstream || '', 'utf8');
+      return { target, path: relPath, bytes: Buffer.byteLength(upstream || '') };
+    }
+    throw new Error(`unknown publish target: ${target}`);
+  },
+
+  display: async (node, ctx) => {
+    const spec = node.spec || {};
+    const fromIds = Array.isArray(spec.from) ? spec.from : [spec.from];
+    const sources = fromIds
+      .map((id) => ctx.run.graph.nodes.find((n) => n.id === id))
+      .filter(Boolean)
+      .map((p) => ({ id: p.id, title: p.title, kind: p.kind, output: p.output }));
+    return { render: spec.render || 'auto', sources };
+  },
+
+  inputs: async (node, ctx) => {
+    const spec = node.spec || {};
+    const fields = spec.fields || [];
+    const values = {};
+    for (const f of fields) {
+      values[f.key] = (ctx.run.inputs || {})[f.key] ?? f.default ?? '';
+    }
+    return { fields, values };
+  },
+
+  // Control-flow kinds — behavior lands in #36. Placeholders keep them visible.
+  loop:    async (node) => ({ note: `loop over ${node.spec?.over || '…'} — pending (#36)`, placeholder: true }),
+  delay:   async (node) => ({ note: `delay ${node.spec?.wait || '…'} — pending (#36)`, placeholder: true }),
+  approve: async (node, ctx) => {
+    const spec = node.spec || {};
+    const answer = await ctx.awaitAnswer(node.id, {
+      question: spec.question || spec.prompt || 'Approve?',
+      choices: ['approve', 'reject'],
+    });
+    return { approved: answer === 'approve', answer };
+  },
+
   _default: async (node, ctx) => {
     await nap(ctx, 300);
     return { note: `output for ${node.kind} (placeholder — no handler wired)` };

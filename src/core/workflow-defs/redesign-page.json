@@ -1,4 +1,5 @@
 {
+  "schemaVersion": 2,
   "id": "redesign-page",
   "title": "Redesign a page",
   "category": "design",
@@ -10,22 +11,35 @@
   ],
   "graph": {
     "nodes": [
-      { "id": "brief",   "title": "Brief",      "kind": "document", "col": 1, "row": 0, "cost": 1 },
-      { "id": "audit",   "title": "Audit",      "kind": "report",   "col": 2, "row": 0, "cost": 2 },
-      { "id": "dir-a",   "title": "Direction 1", "kind": "mockup",  "col": 3, "row": 0, "cost": 3 },
-      { "id": "dir-b",   "title": "Direction 2", "kind": "mockup",  "col": 3, "row": 1, "cost": 3 },
-      { "id": "dir-c",   "title": "Direction 3", "kind": "mockup",  "col": 3, "row": 2, "cost": 3 },
-      { "id": "gallery", "title": "Gallery",    "kind": "shots",    "col": 4, "row": 1, "cost": 1 },
-      { "id": "pick",    "title": "Pick one",   "kind": "ask",      "col": 5, "row": 1, "cost": 0 },
-      { "id": "apply",   "title": "Apply",      "kind": "diff",     "col": 6, "row": 1, "cost": 2 },
-      { "id": "verify",  "title": "Before/after", "kind": "shots",  "col": 7, "row": 1, "cost": 1 }
+      { "id": "brief",   "title": "Brief",       "kind": "agent",    "col": 1, "row": 0, "cost": 1,
+        "spec": { "model": "haiku",  "output": "markdown",      "prompt": "Draft a brief for a page redesign." } },
+      { "id": "audit",   "title": "Audit",       "kind": "agent",    "col": 2, "row": 0, "cost": 2,
+        "spec": { "model": "sonnet", "output": "json-findings", "prompt": "Review the page as-is for correctness, readability, architecture, security, performance." } },
+      { "id": "dir-a",   "title": "Direction 1", "kind": "agent",    "col": 3, "row": 0, "cost": 3,
+        "spec": { "model": "sonnet", "output": "html",          "prompt": "Produce a mockup. Direction A: tighten and classic." } },
+      { "id": "dir-b",   "title": "Direction 2", "kind": "agent",    "col": 3, "row": 1, "cost": 3,
+        "spec": { "model": "sonnet", "output": "html",          "prompt": "Produce a mockup. Direction B: dense and data-forward." } },
+      { "id": "dir-c",   "title": "Direction 3", "kind": "agent",    "col": 3, "row": 2, "cost": 3,
+        "spec": { "model": "sonnet", "output": "html",          "prompt": "Produce a mockup. Direction C: editorial, large type." } },
+      { "id": "gallery", "title": "Gallery",     "kind": "display",  "col": 4, "row": 1, "cost": 1,
+        "spec": { "render": "mockups-grid", "from": ["dir-a", "dir-b", "dir-c"] } },
+      { "id": "pick",    "title": "Pick one",    "kind": "decision", "col": 5, "row": 1, "cost": 0,
+        "spec": { "question": "Which direction wins?", "options": [
+          { "label": "Direction 1", "edgeLabel": "a" },
+          { "label": "Direction 2", "edgeLabel": "b" },
+          { "label": "Direction 3", "edgeLabel": "c" }
+        ] } },
+      { "id": "apply",   "title": "Apply",       "kind": "agent",    "col": 6, "row": 1, "cost": 2,
+        "spec": { "model": "sonnet", "output": "json-hunks",    "prompt": "Propose a small code change to apply the chosen direction." } },
+      { "id": "verify",  "title": "Before/after", "kind": "script", "col": 7, "row": 1, "cost": 1,
+        "spec": { "op": "capture-shot" } }
     ],
     "edges": [
       ["brief", "audit"],
       ["audit", "dir-a"], ["audit", "dir-b"], ["audit", "dir-c"],
       ["dir-a", "gallery"], ["dir-b", "gallery"], ["dir-c", "gallery"],
       ["gallery", "pick"],
-      ["pick", "apply"],
+      ["pick", "apply", "a"], ["pick", "apply", "b"], ["pick", "apply", "c"],
       ["apply", "verify"]
     ]
   }

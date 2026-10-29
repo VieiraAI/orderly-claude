@@ -748,11 +748,14 @@ async function main() {
     check('every node reached done', !!finished
       && finished.graph.nodes.every((n) => n.status === 'done'),
       finished?.graph.nodes.map((n) => `${n.id}=${n.status}`).join(' '));
-    check('terminal node produced real stdout',
-      !!finished?.graph.nodes.find((n) => n.kind === 'terminal')?.output?.out,
-      finished?.graph.nodes.find((n) => n.kind === 'terminal')?.output?.out?.slice(0, 40));
-    check('shots-set node captured a per-route grid',
-      !!finished?.graph.nodes.find((n) => n.kind === 'shots-set')?.output?.pairs?.length);
+    check('script node produced real stdout',
+      !!finished?.graph.nodes.find((n) => n.id === 'server')?.output?.out,
+      finished?.graph.nodes.find((n) => n.id === 'server')?.output?.out?.slice(0, 40));
+    check('capture-shots script produced a per-route grid',
+      !!finished?.graph.nodes.find((n) => n.id === 'shots')?.output?.pairs?.length);
+    check('check node reported a pass/fail',
+      typeof finished?.graph.nodes.find((n) => n.id === 'ok')?.output?.pass === 'boolean',
+      finished?.graph.nodes.find((n) => n.id === 'ok')?.output?.reason);
 
     // POST /stop on a finished run is a no-op; use it just to assert the route is wired.
     const stopResp = await fetch(`${base}/api/runs/${started.run.runId}/stop`, {
@@ -884,6 +887,45 @@ async function main() {
       edges: [['a', 'b'], ['b', 'a']],
     } });
     check('validator flags cycles', cyclic.some((p) => /cycle/i.test(p)), cyclic.join('; '));
+
+    // v2 validator — accept the migrated starters and the scaffold; reject
+    // unknown kinds, missing per-kind spec, and decision/edge-label drift.
+    const v2Good = { schemaVersion: 2, id: 'v2', graph: {
+      nodes: [
+        { id: 'a', kind: 'agent',   spec: { prompt: 'write' } },
+        { id: 'b', kind: 'publish', spec: { target: 'pr' } },
+      ],
+      edges: [['a', 'b']],
+    } };
+    check('v2 validator accepts a good def',
+      wfMod.validateDefinition(v2Good).length === 0,
+      wfMod.validateDefinition(v2Good).join('; '));
+    const v2BadKind = wfMod.validateDefinition({ schemaVersion: 2, id: 'x', graph: {
+      nodes: [{ id: 'a', kind: 'frobnicate', spec: {} }], edges: [],
+    } });
+    check('v2 validator flags unknown kind',
+      v2BadKind.some((p) => /unknown kind/i.test(p)), v2BadKind.join('; '));
+    const v2NoPrompt = wfMod.validateDefinition({ schemaVersion: 2, id: 'x', graph: {
+      nodes: [{ id: 'a', kind: 'agent', spec: {} }], edges: [],
+    } });
+    check('v2 validator flags agent without a prompt',
+      v2NoPrompt.some((p) => /prompt/i.test(p)), v2NoPrompt.join('; '));
+    const v2EdgeDrift = wfMod.validateDefinition({ schemaVersion: 2, id: 'x', graph: {
+      nodes: [
+        { id: 'p', kind: 'decision', spec: { question: 'q', options: [
+          { label: 'A', edgeLabel: 'a' }, { label: 'B', edgeLabel: 'b' },
+        ] } },
+        { id: 'x', kind: 'agent', spec: { prompt: 'ok' } },
+      ],
+      edges: [['p', 'x', 'c']],
+    } });
+    check('v2 validator flags edge label not in decision.options',
+      v2EdgeDrift.some((p) => /edge label/i.test(p)), v2EdgeDrift.join('; '));
+    // Migrated starters all validate.
+    const starters = (await get('/api/workflows')).workflows.filter((w) => w.scope === 'builtin');
+    const starterProblems = starters.flatMap((w) => wfMod.validateDefinition(w).map((p) => `${w.id}: ${p}`));
+    check('migrated starters pass v2 validation',
+      starterProblems.length === 0, starterProblems.join(' | '));
 
     // Rerun & delete.
     const rerunResp = await fetch(`${base}/api/runs/${started.run.runId}/rerun`, {

@@ -17,6 +17,17 @@ const ICON = {
   terminal: svg('<rect x="1" y="2" width="12" height="10" rx="1"/><path d="M3.5 6 L5.5 7.5 L3.5 9"/><line x1="6.5" y1="9.5" x2="10" y2="9.5"/>'),
   ask:      svg('<circle cx="7" cy="7" r="5.5"/><path d="M5.5 5.5 C5.5 4 8.5 4 8.5 5.8 C8.5 6.9 7 7 7 8.2"/><circle cx="7" cy="10.5" r="0.6" fill="currentColor"/>'),
   pr:       svg('<circle cx="3.5" cy="3.5" r="1.5"/><circle cx="3.5" cy="10.5" r="1.5"/><circle cx="10.5" cy="10.5" r="1.5"/><line x1="3.5" y1="5" x2="3.5" y2="9"/><path d="M3.5 5 C3.5 8 10.5 7 10.5 9"/>'),
+  // v2 vocabulary — pick an icon that reads at a glance.
+  agent:    svg('<circle cx="7" cy="7" r="5.5"/><circle cx="5" cy="6" r="0.7" fill="currentColor"/><circle cx="9" cy="6" r="0.7" fill="currentColor"/><path d="M4.5 9.5 Q7 11 9.5 9.5"/>'),
+  script:   svg('<rect x="1" y="2" width="12" height="10" rx="1"/><path d="M3.5 6 L5.5 7.5 L3.5 9"/><line x1="6.5" y1="9.5" x2="10" y2="9.5"/>'),
+  decision: svg('<circle cx="7" cy="7" r="5.5"/><path d="M5.5 5.5 C5.5 4 8.5 4 8.5 5.8 C8.5 6.9 7 7 7 8.2"/><circle cx="7" cy="10.5" r="0.6" fill="currentColor"/>'),
+  check:    svg('<circle cx="7" cy="7" r="5.5"/><path d="M4 7.5 L6 9.5 L10 5"/>'),
+  publish:  svg('<circle cx="3.5" cy="3.5" r="1.5"/><circle cx="3.5" cy="10.5" r="1.5"/><circle cx="10.5" cy="10.5" r="1.5"/><line x1="3.5" y1="5" x2="3.5" y2="9"/><path d="M3.5 5 C3.5 8 10.5 7 10.5 9"/>'),
+  display:  svg('<rect x="1.5" y="3" width="11" height="8" rx="1"/><line x1="4" y1="6" x2="10" y2="6"/><line x1="4" y1="8" x2="8" y2="8"/>'),
+  inputs:   svg('<rect x="2" y="2.5" width="10" height="2.5" rx="0.5"/><rect x="2" y="6" width="10" height="2.5" rx="0.5"/><rect x="2" y="9.5" width="6" height="2" rx="0.5"/>'),
+  loop:     svg('<path d="M3 7 A4 4 0 0 1 11 7"/><path d="M11 7 A4 4 0 0 1 3 7"/><path d="M11 4 L11 7 L8 7"/>'),
+  delay:    svg('<circle cx="7" cy="7.5" r="4.5"/><path d="M7 5 L7 7.5 L9 8.5"/>'),
+  approve:  svg('<path d="M3.5 7 L6 9.5 L10.5 4.5"/>'),
 };
 function svg(inner) {
   return `<svg viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5">${inner}</svg>`;
@@ -26,13 +37,50 @@ const KIND_LABEL = {
   document: 'Document', report: 'Report', mockup: 'Mockup', diff: 'Diff',
   shots: 'Screenshots', 'shots-set': 'Screenshots', terminal: 'Terminal',
   ask: 'Decision', pr: 'Pull request',
+  agent: 'Agent', script: 'Script', decision: 'Decision', check: 'Check',
+  publish: 'Publish', display: 'Display', inputs: 'Inputs',
+  loop: 'Loop', delay: 'Delay', approve: 'Approve',
 };
 const KIND_MODEL = {
   document: 'claude · opus-4-7', report: 'claude · opus-4-7',
   mockup: 'skill · frontend-design', diff: 'claude · acceptEdits',
   shots: 'orderly · capture', 'shots-set': 'orderly · capture',
   terminal: 'bash', ask: 'you', pr: 'github',
+  agent: 'claude · cli', script: 'bash', decision: 'you', check: 'orderly',
+  publish: 'github', display: 'orderly', inputs: 'you',
+  loop: 'orderly', delay: 'orderly', approve: 'you',
 };
+
+/** Map a v2 kind + output shape onto the legacy render case so the body stays
+ *  compact. New kinds (check/display/inputs) get their own cases below. */
+function effectiveRender(n) {
+  const o = n.output || {};
+  if (n.kind === 'agent') {
+    if (o.findings) return 'report';
+    if (o.hunks)    return 'diff';
+    if (o.html)     return 'mockup';
+    return 'document';
+  }
+  if (n.kind === 'script') {
+    if (o.pairs) return 'shots-set';
+    if (o.shot || o.after) return 'shots';
+    return 'terminal';
+  }
+  if (n.kind === 'decision') return 'ask';
+  if (n.kind === 'publish') {
+    const target = (n.spec?.target) || 'pr';
+    if (target === 'pr') return 'pr';
+    return 'publish';
+  }
+  if (n.kind === 'display') {
+    // Mockups-grid of upstream agent outputs is the common case.
+    const first = (o.sources || [])[0];
+    if (first?.kind === 'agent' && first.output?.html) return 'mockup';
+    if (first?.output?.pairs) return 'shots-set';
+    return 'display';
+  }
+  return n.kind;
+}
 
 const runId = (location.hash || '').replace('#', '').trim();
 if (!runId) {
@@ -149,7 +197,7 @@ function renderPlanRail() {
   for (const n of run.graph.nodes) {
     const kls = n.status === 'done' ? 'done'
       : n.status === 'running' ? 'running'
-      : n.kind === 'ask' ? 'ask'
+      : (n.kind === 'ask' || n.kind === 'decision' || n.kind === 'approve') ? 'ask'
       : 'waits';
     const state = n.status === 'done' ? 'Done'
       : n.status === 'running' ? (n.progress || 'Making…')
@@ -187,7 +235,8 @@ function layoutCanvas() {
 }
 
 function makeCard(n, pos, parent) {
-  const kls = ['card', `k-${n.kind}`, n.status].join(' ') + (n.kind === 'ask' ? ' ask' : '');
+  const askish = n.kind === 'ask' || n.kind === 'decision' || n.kind === 'approve';
+  const kls = ['card', `k-${n.kind}`, n.status].join(' ') + (askish ? ' ask' : '');
   const card = document.createElement('div');
   card.className = kls;
   card.style.cssText = `left:${pos.left}px;top:${pos.top}px;width:${pos.width}px`;
@@ -236,7 +285,9 @@ function cardBody(n) {
   // `selfProgress` kinds render their own in-progress UI (grids filling, text
   // streaming); the generic running-note short-circuits for everyone else.
   const selfProgress = n.kind === 'shots-set'
-    || (n.kind === 'document' && !!n.output?.body);
+    || (n.kind === 'script' && !!n.output?.pairs)
+    || (n.kind === 'document' && !!n.output?.body)
+    || (n.kind === 'agent' && !!n.output?.body);
   if (n.status === 'waits')   return `<div class="wait-note">Waits for ${esc(n.waitsFor || 'upstream nodes')}</div>`;
   if (n.status === 'pending') return `<div class="wait-note">Pending</div>`;
   if (n.status === 'running' && !selfProgress) {
@@ -250,7 +301,24 @@ function cardBody(n) {
     return `<div class="wait-note">Stopped before it finished.</div>`;
   }
   const o = n.output || {};
-  switch (n.kind) {
+  // v2 kinds that aren't covered by the legacy render switch — handle first.
+  if (n.kind === 'check' && typeof o.pass === 'boolean') {
+    const cls = o.pass ? 'ok' : 'bad';
+    const label = o.pass ? 'pass' : 'fail';
+    return `<div class="check-row ${cls}"><span class="check-pill ${cls}">${label}</span><span class="check-reason">${esc(o.reason || '')}</span></div>`;
+  }
+  if (n.kind === 'inputs' && o.values) {
+    const rows = Object.entries(o.values).slice(0, 6)
+      .map(([k, v]) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(String(v).slice(0, 48))}</span></div>`).join('');
+    return `<div class="doc-h">${esc(o.title || 'Inputs')}</div><div class="kvs">${rows || '<div class="doc-b">(no values)</div>'}</div>`;
+  }
+  // Loop/Delay/Approve placeholders — show their note.
+  if ((n.kind === 'loop' || n.kind === 'delay') && o.note) {
+    return `<div class="wait-note">${esc(o.note)}</div>`;
+  }
+  // Everything else: fall through the legacy switch, dispatching new kinds
+  // (agent/script/decision/publish/display) by output shape.
+  switch (effectiveRender(n)) {
     case 'document': {
       const body = (o.body || '').split('\n').filter(Boolean).slice(0, 6)
         .map((l) => esc(l).replace(/^## (.*)$/, '<span style="color:var(--text);font-weight:500;">$1</span>'))

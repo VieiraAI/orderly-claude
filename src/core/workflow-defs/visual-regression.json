@@ -1,4 +1,5 @@
 {
+  "schemaVersion": 2,
   "id": "visual-regression",
   "title": "Hunt a visual regression",
   "category": "review",
@@ -10,15 +11,22 @@
   ],
   "graph": {
     "nodes": [
-      { "id": "server", "title": "Dev server", "kind": "terminal", "col": 1, "row": 0, "cost": 1 },
-      { "id": "routes", "title": "Routes",     "kind": "document", "col": 2, "row": 0, "cost": 1 },
-      { "id": "shots",  "title": "Screenshots", "kind": "shots-set", "col": 3, "row": 0, "cost": 2 },
-      { "id": "moved",  "title": "What moved", "kind": "report",   "col": 4, "row": 0, "cost": 1 }
+      { "id": "server", "title": "Dev server",   "kind": "script",   "col": 1, "row": 0, "cost": 1,
+        "spec": { "cmd": "node -e \"console.log('placeholder dev server ready on :5173')\"" } },
+      { "id": "routes", "title": "Routes",       "kind": "inputs",   "col": 2, "row": 0, "cost": 1,
+        "spec": { "fields": [{ "key": "routes", "label": "Routes to capture", "type": "textarea" }] } },
+      { "id": "shots",  "title": "Screenshots",  "kind": "script",   "col": 3, "row": 0, "cost": 2,
+        "spec": { "op": "capture-shots" } },
+      { "id": "ok",     "title": "Captures ok?", "kind": "check",    "col": 4, "row": 0, "cost": 0,
+        "spec": { "assert": { "type": "has-pairs", "from": "shots", "min": 1 } } },
+      { "id": "moved",  "title": "What moved",   "kind": "agent",    "col": 5, "row": 0, "cost": 1,
+        "spec": { "model": "sonnet", "output": "markdown", "prompt": "Describe what moved between before and after shots." } }
     ],
     "edges": [
       ["server", "routes"],
       ["routes", "shots"],
-      ["shots", "moved"]
+      ["shots",  "ok"],
+      ["ok",     "moved"]
     ]
   }
 }

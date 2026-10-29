@@ -488,3 +488,19 @@ main { max-width: 1280px; margin: 0 auto; padding: 0 56px 96px; }
 /* Stop-all is a danger chip. */
 .chip.stop-all { color: var(--ship); border-color: color-mix(in oklab, var(--ship) 40%, transparent); }
 .chip.stop-all:hover { background: color-mix(in oklab, var(--ship) 12%, transparent); border-color: var(--ship); }
+
+/* ----------------------- v2 kinds: check / inputs ------------------------ */
+/* Check cards: a pill + a plain-language reason, nothing else. */
+.check-row { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; }
+.check-pill { align-self: flex-start; font: 10px var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 2px 8px; border-radius: 999px; border: 1px solid; }
+.check-pill.ok  { color: var(--acc); border-color: color-mix(in oklab, var(--acc) 60%, transparent);
+  background: color-mix(in oklab, var(--acc) 10%, transparent); }
+.check-pill.bad { color: var(--ship); border-color: color-mix(in oklab, var(--ship) 60%, transparent);
+  background: color-mix(in oklab, var(--ship) 10%, transparent); }
+.check-reason { color: var(--faint); font: 11px var(--f-mono); }
+/* Inputs cards: key / value rows, one per field. */
+.kvs { display: flex; flex-direction: column; gap: 4px; padding: 4px 0 2px; }
+.kv  { display: flex; gap: 10px; font: 11px var(--f-mono); }
+.kv .k { color: var(--faint); min-width: 60px; }
+.kv .v { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
