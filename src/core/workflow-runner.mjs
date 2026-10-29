@@ -61,13 +61,16 @@ export class Scheduler extends EventEmitter {
 
   async tick() {
     while (!terminal(this.run.status) && !this.aborted) {
+      // After a Decision picks a branch (or a Check with onFail: 'skip' fails),
+      // some pending nodes are now unreachable. Mark them skipped so they
+      // don't block the run from finishing.
+      this.pruneSkipped();
       const ready = this.readyNodes();
       if (!ready.length) {
         if (this.inFlight.size === 0) {
-          // Nothing running and nothing ready → done, assuming every node
-          // reached done. If any pending survives, it's a broken graph.
-          const allDone = this.run.graph.nodes.every((n) => n.status === 'done');
-          if (allDone) this.finish('done');
+          // Nothing running and nothing ready. Done, or stuck.
+          const allSettled = this.run.graph.nodes.every((n) => isTerminalNode(n.status));
+          if (allSettled) this.finish('done');
           else this.failRun(new Error('stuck: nodes unreachable from any root'));
           return;
         }
@@ -86,9 +89,50 @@ export class Scheduler extends EventEmitter {
     const byId = Object.fromEntries(this.run.graph.nodes.map((n) => [n.id, n]));
     return this.run.graph.nodes.filter((n) => {
       if (n.status !== 'pending') return false;
-      const parents = (this.run.graph.edges || []).filter(([, b]) => b === n.id).map(([a]) => byId[a]);
+      // Only consider parents reached via a *live* edge — a Decision that
+      // picked another branch doesn't gate its unpicked downstream.
+      const parents = (this.run.graph.edges || [])
+        .filter(([a, b, lbl]) => b === n.id && edgeIsLive(byId[a], lbl))
+        .map(([a]) => byId[a]);
+      if (parents.length === 0) {
+        // If every incoming edge is dead and the source is settled, this
+        // branch isn't going to run — pruneSkipped handled it. Otherwise
+        // it's a true root with no edges in: ready immediately.
+        const anyIncoming = (this.run.graph.edges || []).some(([, b]) => b === n.id);
+        return !anyIncoming;
+      }
       return parents.every((p) => p && p.status === 'done');
     });
+  }
+
+  /**
+   * Walk from roots forward along *live* edges to find reachable node ids.
+   * Any pending node not in the reachable set is marked `skipped`. Idempotent;
+   * safe to call every tick.
+   */
+  pruneSkipped() {
+    const nodes = this.run.graph.nodes;
+    const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
+    const edges = this.run.graph.edges || [];
+    const incoming = Object.fromEntries(nodes.map((n) => [n.id, []]));
+    for (const e of edges) incoming[e[1]]?.push(e);
+    const roots = nodes.filter((n) => !(incoming[n.id] || []).length);
+    const reachable = new Set();
+    const queue = roots.map((n) => n.id);
+    while (queue.length) {
+      const id = queue.shift();
+      if (reachable.has(id)) continue;
+      reachable.add(id);
+      for (const [a, b, lbl] of edges) {
+        if (a !== id) continue;
+        if (edgeIsLive(byId[a], lbl)) queue.push(b);
+      }
+    }
+    for (const n of nodes) {
+      if (n.status === 'pending' && !reachable.has(n.id)) {
+        this.updateNode(n.id, { status: 'skipped', endedAt: new Date().toISOString() });
+      }
+    }
   }
 
   runNode(node) {
@@ -120,6 +164,16 @@ export class Scheduler extends EventEmitter {
         this.updateNode(node.id, {
           status: 'done', output: output ?? node.output, endedAt: new Date().toISOString(), progress: undefined,
         });
+        // Check gating. When a Check reports pass: false, by default stop the
+        // run with status 'failed'; the author can opt into 'skip' instead so
+        // downstream nodes just skip and the run finishes cleanly.
+        if (node.kind === 'check' && output?.pass === false) {
+          const mode = node.spec?.onFail || 'stop';
+          if (mode === 'stop') {
+            this.failRun(new Error(`check "${node.title}" failed: ${output.reason || 'no reason'}`));
+          }
+          // 'skip' lets pruneSkipped take care of the downstream subtree.
+        }
       })
       .catch((e) => {
         if (this.aborted) {
@@ -162,4 +216,33 @@ export class Scheduler extends EventEmitter {
 
 function terminal(status) {
   return status === 'done' || status === 'failed' || status === 'stopped';
+}
+
+/** Node-level terminal — includes `skipped` which only applies to individual
+ *  nodes (never to the run as a whole). */
+function isTerminalNode(status) {
+  return status === 'done' || status === 'failed' || status === 'stopped' || status === 'skipped';
+}
+
+/**
+ * An edge is "live" when it should contribute to its target's readiness.
+ *   - Default: live.
+ *   - A Decision that is done gates each labeled outgoing edge: only the edge
+ *     whose label matches `output.picked` stays live. Unlabeled edges always
+ *     stay live (a Decision can mix labeled and default branches).
+ *   - A Check that is done with pass: false AND spec.onFail === 'skip' makes
+ *     every outgoing edge dead so the subtree is pruned.
+ */
+function edgeIsLive(source, label) {
+  if (!source) return true;
+  if (source.kind === 'decision' && source.status === 'done') {
+    const picked = source.output?.picked;
+    if (!label) return true;
+    return picked === label;
+  }
+  if (source.kind === 'check' && source.status === 'done'
+      && source.spec?.onFail === 'skip' && source.output?.pass === false) {
+    return false;
+  }
+  return true;
 }

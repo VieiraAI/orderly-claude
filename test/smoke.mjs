@@ -927,6 +927,96 @@ async function main() {
     check('migrated starters pass v2 validation',
       starterProblems.length === 0, starterProblems.join(' | '));
 
+    // Scheduler: Decision routes via labeled edges. Build a workflow where
+    // one of two branches is picked; only that branch should reach done,
+    // the other should be marked skipped.
+    const routeDef = {
+      schemaVersion: 2, id: 'smoke-route', title: 'Route smoke',
+      graph: {
+        nodes: [
+          { id: 'pick', title: 'Pick', kind: 'decision', col: 1, row: 0,
+            spec: { question: 'go?', options: [
+              { label: 'yes', edgeLabel: 'y' }, { label: 'no', edgeLabel: 'n' },
+            ] } },
+          { id: 'y',    title: 'Yes branch', kind: 'script', col: 2, row: 0,
+            spec: { cmd: 'echo yes' } },
+          { id: 'n',    title: 'No branch',  kind: 'script', col: 2, row: 1,
+            spec: { cmd: 'echo no' } },
+        ],
+        edges: [['pick', 'y', 'y'], ['pick', 'n', 'n']],
+      },
+    };
+    const routeSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: routeDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    check('route-smoke def saved', routeSaved.saved === true, routeSaved.error);
+    const routeStart = await fetch(`${base}/api/workflows/smoke-route/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    // Wait for the Decision to open, then answer with 'yes'.
+    let askReady = null;
+    const askBudget = Date.now() + 5000;
+    while (Date.now() < askBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${routeStart.run.runId}`)).run;
+      if (r?.status === 'awaiting-answer') { askReady = r; break; }
+    }
+    check('decision opens an awaiting-answer slot', !!askReady, askReady?.status);
+    await fetch(`${base}/api/runs/${routeStart.run.runId}/answer`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ nodeId: 'pick', answer: 'yes' }),
+    });
+    let routed = null;
+    const routedBudget = Date.now() + 5000;
+    while (Date.now() < routedBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${routeStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { routed = r; break; }
+    }
+    check('routed run finishes done', routed?.status === 'done',
+      routed?.graph.nodes.map((n) => `${n.id}=${n.status}`).join(' '));
+    const yes = routed?.graph.nodes.find((n) => n.id === 'y');
+    const no  = routed?.graph.nodes.find((n) => n.id === 'n');
+    check('picked branch ran', yes?.status === 'done', yes?.status);
+    check('unpicked branch was skipped', no?.status === 'skipped', no?.status);
+    try { fs.unlinkSync(routeSaved.file); } catch {}
+
+    // Scheduler: Check gating stops the run with status failed by default.
+    const gateDef = {
+      schemaVersion: 2, id: 'smoke-gate', title: 'Gate smoke',
+      graph: {
+        nodes: [
+          { id: 'cmd',  title: 'Cmd',   kind: 'script', col: 1, row: 0, spec: { cmd: 'echo nope' } },
+          { id: 'need', title: 'Need?', kind: 'check',  col: 2, row: 0,
+            spec: { assert: { type: 'contains', from: 'cmd', needle: 'IMPOSSIBLE' } } },
+          { id: 'tail', title: 'Tail',  kind: 'script', col: 3, row: 0, spec: { cmd: 'echo tail' } },
+        ],
+        edges: [['cmd', 'need'], ['need', 'tail']],
+      },
+    };
+    const gateSaved = await fetch(`${base}/api/workflows`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ def: gateDef, scope: 'project', overwrite: true }),
+    }).then((r) => r.json());
+    const gateStart = await fetch(`${base}/api/workflows/smoke-gate/run`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then((r) => r.json());
+    let gated = null;
+    const gateBudget = Date.now() + 5000;
+    while (Date.now() < gateBudget) {
+      await sleep(100);
+      const r = (await get(`/api/runs/${gateStart.run.runId}`)).run;
+      if (r && ['done', 'failed', 'stopped'].includes(r.status)) { gated = r; break; }
+    }
+    check('failing check stops the run as failed', gated?.status === 'failed',
+      gated?.status || 'timed out');
+    const needNode = gated?.graph.nodes.find((n) => n.id === 'need');
+    check('the check node itself finished (pass: false)',
+      needNode?.status === 'done' && needNode?.output?.pass === false,
+      `${needNode?.status} / pass=${needNode?.output?.pass}`);
+    try { fs.unlinkSync(gateSaved.file); } catch {}
+
     // Rerun & delete.
     const rerunResp = await fetch(`${base}/api/runs/${started.run.runId}/rerun`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
