@@ -231,6 +231,7 @@
     </div>
     <button class="run-btn" id="btnTidy" title="Line the steps up left to right, in the order they run">⤳ Tidy</button>
     <button class="run-btn" id="btnSettings" title="Description, inputs, spend limits, import and export">⚙ Settings</button>
+    <button class="run-btn" id="btnRuns" title="Every time this workflow has run">◷ Runs</button>
     <button class="run-btn" id="btnValidate" title="List anything that would stop it running">✓ Check</button>
     <button class="run-btn primary-btn" id="btnSave">Save</button>
     <button class="run-btn" id="btnRun" title="Save, then fill in its inputs and run it">▶ Run</button>
@@ -268,6 +269,14 @@
       <button id="modeJson">{ } JSON</button>
     </div>
 
+    <div class="block" id="runsBlock" style="display:none;">
+      <h3>Past runs <span class="count" id="runsCount"></span></h3>
+      <div id="runsList"></div>
+      <div class="btn-row runs-foot">
+        <a class="run-btn" id="runsAll" href="/workflows.html#runs">Open in Runs</a>
+        <button class="run-btn" id="btnCloseRuns">Done</button>
+      </div>
+    </div>
     <div class="block" id="settingsBlock" style="display:none;">
       <h3>Workflow</h3>
       <label for="wfDesc">What it's for</label>

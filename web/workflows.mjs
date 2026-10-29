@@ -32,6 +32,11 @@ async function loadCatalog() {
  * it has all cost. Filters change the list, never the counts above it.
  */
 const runsView = { status: '', workflow: '', since: 'week', armed: new Set(), choice: {}, scheduleFormFor: null, msgs: {} };
+// Arriving from a workflow's "Runs" button: that workflow's runs, all time.
+{
+  const wf = new URLSearchParams(location.search).get('workflow');
+  if (wf) { runsView.workflow = wf; runsView.since = 'all'; }
+}
 
 async function loadRuns() {
   const q = new URLSearchParams();

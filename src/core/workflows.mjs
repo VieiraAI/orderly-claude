@@ -786,11 +786,19 @@ function parse(file) {
  * repo not opened in Claude Code lately is simply not scanned, which keeps the
  * list bounded. */
 export function knownRepoRoots() {
-  const roots = new Set(extraRoots);
+  const all = new Set(extraRoots);
   for (const s of listSessions({ limit: 400 })) {
-    if (s.cwd) roots.add(s.cwd);
+    if (s.cwd) all.add(s.cwd);
   }
-  return [...roots];
+  // One folder can be known by two paths (/tmp and /private/tmp on macOS, or
+  // a symlink); read it once, or every run and prompt in it shows twice.
+  const byReal = new Map();
+  for (const root of all) {
+    let real = root;
+    try { real = fs.realpathSync(root); } catch { /* gone; keep the path as given */ }
+    if (!byReal.has(real)) byReal.set(real, root);
+  }
+  return [...byReal.values()];
 }
 
 /*

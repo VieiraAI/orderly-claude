@@ -117,6 +117,8 @@ async function boot() {
   fetch('/api/skills').then((x) => x.json()).then((r) => { state.skills = r.skills || []; if (state.selectedId) renderSelected(); }).catch(() => {});
   fillKindPickers();
   bindUi();
+  // ?panel=runs opens straight onto this workflow's past runs.
+  if (q.get('panel') === 'runs' && state.loaded) { state.side = 'runs'; loadPastRuns(); }
   render();
   // A graph wider than the screen opens fitted, so no step starts hidden.
   if (state.content && $('edInner').parentElement.clientWidth < state.content.w) fitZoom();
@@ -232,6 +234,12 @@ function bindUi() {
     render();
   });
   $('btnCloseSettings').addEventListener('click', () => { state.side = null; render(); });
+  $('btnRuns').addEventListener('click', () => {
+    state.side = state.side === 'runs' ? null : 'runs';
+    if (state.side) { state.selectedId = null; loadPastRuns(); }
+    render();
+  });
+  $('btnCloseRuns').addEventListener('click', () => { state.side = null; render(); });
   $('btnExport').addEventListener('click', () => { if (state.loaded) location.href = `/api/workflows/${encodeURIComponent(state.loaded.id)}/export`; });
   $('importFile').addEventListener('change', importFile);
   $('btnDeleteWf').addEventListener('click', deleteWorkflow);
@@ -766,6 +774,55 @@ function insertRef(text) {
 
 /* --------------------------------- render -------------------------------- */
 
+/* Past runs of this workflow, newest first, each opening its run page. */
+const RUN_WORD = { running: 'Running', 'awaiting-answer': 'Waiting for you', done: 'Done', failed: 'Failed', stopped: 'Stopped', interrupted: 'Cut short' };
+async function loadPastRuns() {
+  const id = state.loaded?.id;
+  if (!id) return;
+  $('runsAll').href = `/workflows.html?workflow=${encodeURIComponent(id)}#runs`;
+  $('runsList').innerHTML = '<div class="list-empty">Loading…</div>';
+  let runs = [];
+  try {
+    // No limit here: the server limits before it filters by workflow.
+    const r = await fetch(`/api/runs?workflow=${encodeURIComponent(id)}`).then((x) => x.json());
+    runs = (r.runs || []).filter((x) => x.workflowId === id);
+  } catch {
+    $('runsList').innerHTML = '<div class="list-empty">Could not load its runs.</div>';
+    return;
+  }
+  $('runsCount').textContent = runs.length ? `· ${runs.length}` : '';
+  if (!runs.length) {
+    $('runsList').innerHTML = '<div class="list-empty">No runs yet. Press ▶ Run to start one.</div>';
+    return;
+  }
+  const more = runs.length > 30 ? `<div class="list-empty">Showing the latest 30. Open in Runs for all ${runs.length}.</div>` : '';
+  runs = runs.slice(0, 30);
+  $('runsList').innerHTML = runs.map((r) => {
+    const when = new Date(r.startedAt);
+    const date = when.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const time = when.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    const took = r.endedAt ? tookText((Date.parse(r.endedAt) - Date.parse(r.startedAt)) / 1000) : '';
+    const cost = r.totalCost ? `$${r.totalCost < 0.01 ? r.totalCost.toFixed(4) : r.totalCost.toFixed(2)}` : '';
+    const live = r.status === 'running' || r.needsYou;
+    const word = r.needsYou ? 'Waiting for you' : RUN_WORD[r.status] || r.status;
+    const why = r.status === 'failed' && r.failedNode ? `“${r.failedNode.title}” failed` : '';
+    const rated = r.rating ? `<span class="rated ${r.rating}">${r.rating === 'up' ? 'good' : 'not good'}</span>` : '';
+    return `<a class="past-run" href="/workflows-run.html#${encodeURIComponent(r.runId)}">
+      <span class="pr-when">${escapeHtml(date)} · ${escapeHtml(time)}</span>
+      <span class="pr-state s-${live ? 'live' : escapeHtml(r.status)}">${escapeHtml(word)}</span>
+      <span class="pr-meta">${[took, cost, r.doneNodes != null ? `${r.doneNodes} of ${r.totalNodes} steps` : ''].filter(Boolean).map(escapeHtml).join(' · ')}${rated}</span>
+      ${why ? `<span class="pr-why">${escapeHtml(why)}</span>` : ''}
+    </a>`;
+  }).join('') + more;
+}
+
+function tookText(s) {
+  if (!Number.isFinite(s) || s < 0) return '';
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)} s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m} min ${Math.round(s % 60)} s` : `${Math.floor(m / 60)} h ${m % 60} min`;
+}
+
 function renderSandbox() {
   const rt = state.def.runtime || {};
   $('wfSandbox').value = rt.sandbox === 'worktree' ? 'worktree' : '';
@@ -825,9 +882,14 @@ function render() {
   renderSelected();
   // Sidebar collapses when nothing is selected — the canvas fills the width.
   const layout = $('edLayout');
-  if (layout) layout.classList.toggle('no-sel', !state.selectedId && state.side !== 'settings');
+  if (layout) layout.classList.toggle('no-sel', !state.selectedId && !state.side);
   $('settingsBlock').style.display = state.side === 'settings' ? '' : 'none';
   $('btnSettings').classList.toggle('on', state.side === 'settings');
+  $('runsBlock').style.display = state.side === 'runs' ? '' : 'none';
+  $('btnRuns').classList.toggle('on', state.side === 'runs');
+  // A workflow that has never been saved has no runs to show.
+  $('btnRuns').disabled = !state.loaded;
+  $('btnRuns').title = state.loaded ? 'Every time this workflow has run' : 'Save it first; then its runs are listed here';
   if (state.mode === 'json') $('jsonArea').value = JSON.stringify(state.def, null, 2);
 }
 

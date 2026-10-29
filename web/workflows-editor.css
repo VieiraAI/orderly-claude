@@ -132,3 +132,17 @@ header.wf-header { grid-template-columns: 1fr 200px 150px auto; }
   color: var(--text); font: 13px var(--f-ui); }
 .zoom-bar button:hover { background: var(--raised); }
 .zoom-bar span { min-width: 44px; text-align: center; font: 11px var(--f-mono); color: var(--mute); }
+
+/* Past runs panel. */
+.past-run { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 9px 2px; border-top: 1px solid var(--edge-tint);
+  color: var(--text); text-decoration: none; }
+.past-run:hover { background: var(--raised); }
+.past-run .pr-when { font: 12.5px var(--f-ui); }
+.past-run .pr-state { font: 11.5px var(--f-ui); color: var(--mute); text-align: right; }
+.past-run .pr-state.s-done { color: var(--ok); }
+.past-run .pr-state.s-failed { color: var(--ship); }
+.past-run .pr-state.s-live { color: var(--accent); }
+.past-run .pr-meta { grid-column: 1 / -1; font: 11px var(--f-mono); color: var(--faint); }
+.past-run .pr-why { grid-column: 1 / -1; font: 11.5px var(--f-ui); color: var(--ship); }
+.past-run .rated { margin-left: 6px; }
+.runs-foot { margin-top: 12px; }
