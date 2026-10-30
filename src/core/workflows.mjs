@@ -1094,6 +1094,65 @@ export function prepareResume(run, { choices = {}, budgetUsd } = {}) {
   return { run };
 }
 
+/*
+ * Redo one step of a run, in the same run.
+ *
+ *   alone   the step runs again. Later steps that finished keep what they
+ *           made (the run page says they are out of date); later steps that
+ *           had not finished wait for it again.
+ *   onward  the step and every step after it run again.
+ *
+ * Returns the ids reset to pending. Throws, changing nothing, when the step
+ * cannot be redone.
+ */
+export const REDO_MODES = new Set(['alone', 'onward']);
+
+export function resetForRedo(run, nodeId, mode) {
+  if (!REDO_MODES.has(mode)) throw new Error(`mode must be one of: ${[...REDO_MODES].join(', ')}`);
+  const nodes = run.graph?.nodes || [];
+  const target = nodes.find((n) => n.id === nodeId);
+  if (!target) throw new Error(`no step "${nodeId}" in this run`);
+  if (target.status === 'pending') throw new Error(`"${target.title || nodeId}" has not run yet`);
+  if (target.status === 'skipped') throw new Error(`"${target.title || nodeId}" was skipped: the run took another branch`);
+  const later = descendantsOf(run.graph, nodeId);
+  const reset = [nodeId, ...nodes
+    .filter((n) => later.has(n.id) && (mode === 'onward' || n.status !== 'done'))
+    .map((n) => n.id)];
+  for (const id of reset) {
+    const n = nodes.find((x) => x.id === id);
+    for (const k of ['progress', 'pendingAnswer', 'sent', 'lastError', 'durationMs']) delete n[k];
+    Object.assign(n, { status: 'pending', waitsFor: null, output: null, startedAt: null, endedAt: null, attempts: 0 });
+  }
+  return reset;
+}
+
+function descendantsOf(graph, nodeId) {
+  const seen = new Set();
+  const queue = [nodeId];
+  while (queue.length) {
+    const id = queue.shift();
+    for (const [a, b] of graph?.edges || []) if (a === id && !seen.has(b)) { seen.add(b); queue.push(b); }
+  }
+  return seen;
+}
+
+/**
+ * Redo a step of a run nothing is running: reset it as resetForRedo does,
+ * then carry on as a resume would. Works on a finished run too. Returns
+ * { run } or { needsChoice }, as prepareResume does, without touching `run`
+ * when it cannot go ahead.
+ */
+export function prepareRedo(run, nodeId, mode, { choices = {} } = {}) {
+  const copy = structuredClone(run);
+  resetForRedo(copy, nodeId, mode);
+  // A finished run has nothing left to resume; the reset gave it something.
+  if (!RESUMABLE.has(copy.status)) copy.status = 'stopped';
+  const prepared = prepareResume(copy, { choices });
+  if (prepared.needsChoice) return prepared;
+  prepared.run.redos = [...(run.redos || []), { nodeId, mode, at: new Date().toISOString() }];
+  return prepared;
+}
+
 /** The node currently waiting on a person, if any. */
 export function openQuestion(run) {
   const n = (run?.graph?.nodes || []).find((x) =>

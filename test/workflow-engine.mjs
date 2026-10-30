@@ -496,6 +496,52 @@ export async function runWorkflowEngineChecks({ check, session }) {
     check('a run says the workflow has moved on since', one.currentVersion === 2 && one.run.definitionVersion === 1,
       `${one.run.definitionVersion} → ${one.currentVersion}`);
 
+    /* ---------------------------- redo one step ----------------------------- */
+    console.log('\nWorkflows: redo a step in the same run\n');
+
+    const tally = (name) => path.join(tmp, `tally-${name}`);
+    const count = (name) => { try { return fs.readFileSync(tally(name), 'utf8').length; } catch { return 0; } };
+    const bump = (name) => `printf x >> '${tally(name)}'`;
+    await save({ id: 'redo', title: 'Redo', graph: { nodes: [
+      script('a', bump('a')), script('b', bump('b')),
+      { id: 'ok', title: 'Go on?', kind: 'approve', spec: { question: 'Go on?' } }, script('c', bump('c')),
+    ], edges: [['a', 'b'], ['b', 'ok'], ['ok', 'c']] } });
+    const redoRun = (await start('redo')).run.runId;
+    await until(redoRun, (x) => x.status === 'awaiting-answer');
+    res = await api(`/api/runs/${redoRun}/redo-step`, { body: { nodeId: 'a', mode: 'alone' } });
+    r = await until(redoRun, (x) => x.status === 'awaiting-answer' && node(x, 'a')?.status === 'done' && count('a') === 2);
+    check('redo alone, while live, runs the step again in the same run',
+      res.status === 200 && count('a') === 2 && r.runId === redoRun, `${res.status} ${res.error || ''} a=${count('a')}`);
+    check('…keeps later steps that finished', count('b') === 1 && node(r, 'b')?.status === 'done', `b=${count('b')}`);
+    check('…and asks a later question again', node(r, 'ok')?.waitsFor === 'you' && r.redos?.length === 1, states(r));
+    await api(`/api/runs/${redoRun}/answer`, { body: { nodeId: 'ok', answer: 'approve' } });
+    r = await until(redoRun, settled);
+    check('the run carries on to the end after a redo', r.status === 'done' && count('c') === 1, `${states(r)} c=${count('c')}`);
+
+    res = await api(`/api/runs/${redoRun}/redo-step`, { body: { nodeId: 'b', mode: 'onward' } });
+    r = await until(redoRun, (x) => x.status === 'awaiting-answer');
+    check('redo from a step on a finished run starts it again from that step',
+      res.status === 200 && count('a') === 2 && count('b') === 2 && node(r, 'c')?.status === 'pending', `${res.error || ''} ${states(r)}`);
+    await api(`/api/runs/${redoRun}/answer`, { body: { nodeId: 'ok', answer: 'approve' } });
+    r = await until(redoRun, settled);
+    check('…and every later step runs again', r.status === 'done' && count('c') === 2, `${states(r)} c=${count('c')}`);
+
+    res = await api(`/api/runs/${redoRun}/redo-step`, { body: { nodeId: 'a', mode: 'sideways' } });
+    check('an unknown redo mode is refused', res.status === 400 && /mode must be one of/.test(res.error || ''), res.error);
+
+    await save({ id: 'redo-busy', title: 'Redo busy', graph: { nodes: [
+      script('slow', `${bump('slow')}; sleep 2`), script('quick', `${bump('quick')}; sleep 1`), script('next', bump('next')),
+    ], edges: [['quick', 'next']] } });
+    const busyRun = (await start('redo-busy')).run.runId;
+    await until(busyRun, (x) => node(x, 'quick')?.status === 'running' && node(x, 'slow')?.status === 'running');
+    res = await api(`/api/runs/${busyRun}/redo-step`, { body: { nodeId: 'next', mode: 'alone' } });
+    check('a step that has not run yet cannot be redone', res.status === 400 && /has not run yet/.test(res.error || ''), res.error);
+    res = await api(`/api/runs/${busyRun}/redo-step`, { body: { nodeId: 'quick', mode: 'alone' } });
+    r = await until(busyRun, settled);
+    check('redoing a running step stops it and starts it again',
+      res.status === 200 && r.status === 'done' && count('quick') === 2 && count('next') === 1, `${res.error || ''} ${states(r)} quick=${count('quick')}`);
+    check('…while other running steps carry on untouched', count('slow') === 1 && node(r, 'slow')?.status === 'done', `slow=${count('slow')}`);
+
     /* ------------------------------ durability ------------------------------ */
     console.log('\nWorkflows: interruption and resume\n');
 
@@ -1061,14 +1107,29 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     p = await open(`/workflows-run.html#${failId}`);
     await p.ev(`document.querySelector('.card[data-id="t"]').click(); ${tick}
       window.oldPage = true;
-      const b = document.getElementById('drRerun'); b.click(); b.click();`);
+      const b = document.querySelector('[data-act="rerun-from"]'); b.click(); b.click();`);
     await sleep(1500);
     const repeats = (await api('/api/runs')).runs.filter((x) => x.rerunOf === failId || x.trigger === `rerun of ${failId.slice(0, 8)}`);
     // A page that only changed its address still has the old run's state.
     r = await p.ev(`return { hash: location.hash.slice(1), reloaded: !window.oldPage, cards: document.querySelectorAll('.card').length };`);
-    check('two quick clicks on Repeat from this step start one run', repeats.length === 1, `${repeats.length} runs`);
-    check('Repeat from this step opens the new run', repeats.length > 0 && r.hash === repeats[0].runId && r.reloaded && r.cards > 0, JSON.stringify(r));
+    check('two quick clicks on Repeat from a step start one run', repeats.length === 1, `${repeats.length} runs`);
+    check('Repeat from a step opens the new run', repeats.length > 0 && r.hash === repeats[0].runId && r.reloaded && r.cards > 0, JSON.stringify(r));
     check('repeating raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
+    // Redo a step: both choices are in the step's drawer, and two quick
+    // clicks redo it once, in the same run.
+    p = await open(`/workflows-run.html#${failId}`);
+    r = await p.ev(`document.querySelector('.card[data-id="t"]').click(); ${tick}
+      const modes = [...document.querySelectorAll('[data-redo-step]')].map((b) => b.dataset.redoStep).join();
+      const why = document.querySelector('.dr-redo-why')?.textContent || '';
+      const b = document.querySelector('[data-redo-step="alone"]'); b.click(); b.click();
+      return { modes, why };`);
+    await sleep(1500);
+    const again = (await api(`/api/runs/${failId}`)).run;
+    check('a step\'s drawer offers redo alone and redo from here', r.modes === 'alone,onward' && r.why.length > 0, JSON.stringify(r));
+    check('two quick clicks on Redo this step redo it once, in the same run', again.redos?.length === 1, JSON.stringify(again.redos));
+    check('redoing raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
   } finally {
     try { cdp?.close?.(); } catch { /* gone */ }

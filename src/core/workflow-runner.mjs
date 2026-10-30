@@ -22,7 +22,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { getHandler } from './workflow-handlers.mjs';
-import { writeRun, markInterrupted, recordAnswer } from './workflows.mjs';
+import { writeRun, markInterrupted, recordAnswer, resetForRedo } from './workflows.mjs';
 import { runSpend } from './settings.mjs';
 import { removeWorktree } from './worktree.mjs';
 
@@ -39,6 +39,11 @@ export class Scheduler extends EventEmitter {
     this.ac = new AbortController();
     this.inFlight = new Map();        // nodeId → promise
     this.pendingAnswers = new Map();  // nodeId → { resolve, reject }
+    // Bumped when a step is redone, so whatever its old attempt still sends
+    // back is dropped rather than written over the new one.
+    this.generation = new Map();      // nodeId → number
+    this.nodeAborts = new Map();      // nodeId → AbortController of its current attempt
+    this.wake = null;                 // resolves the tick loop's wait early
     this.concurrency = Math.max(1, Number(run.concurrency) || 4);
   }
 
@@ -107,6 +112,32 @@ export class Scheduler extends EventEmitter {
     return true;
   }
 
+  /**
+   * Redo a step while the run is live (see resetForRedo for the modes).
+   * Steps being reset are cancelled; every other step carries on.
+   * Returns the ids reset. Throws, changing nothing, if the step cannot be redone.
+   */
+  redo(nodeId, mode) {
+    if (terminal(this.run.status)) throw new Error(`the run is ${this.run.status}`);
+    const reset = resetForRedo(this.run, nodeId, mode);
+    for (const id of reset) {
+      this.generation.set(id, (this.generation.get(id) || 0) + 1);
+      this.nodeAborts.get(id)?.abort();
+      this.nodeAborts.delete(id);
+      this.inFlight.delete(id);
+      const slot = this.pendingAnswers.get(id);
+      if (slot) { this.pendingAnswers.delete(id); slot.reject(new Error('redone')); }
+    }
+    // A failure that was winding the run down is gone if its step is redone.
+    if (this.halting?.failedNode && reset.includes(this.halting.failedNode)) this.halting = null;
+    if (this.run.status === 'awaiting-answer' && !this.pendingAnswers.size) this.run.status = 'running';
+    this.run.redos = [...(this.run.redos || []), { nodeId, mode, at: new Date().toISOString() }];
+    writeRun(this.run);
+    this.emit('update', { runId: this.run.runId, nodeId });
+    this.wake?.();
+    return reset;
+  }
+
   /* ----------------------------- internals ----------------------------- */
 
   async tick() {
@@ -140,7 +171,8 @@ export class Scheduler extends EventEmitter {
         else this.failRun(new Error('stuck: some steps can never start, because a step they wait on cannot finish'));
         return;
       }
-      await Promise.race([...this.inFlight.values()]);
+      await Promise.race([...this.inFlight.values(), new Promise((r) => { this.wake = r; })]);
+      this.wake = null;
     }
   }
 
@@ -165,8 +197,21 @@ export class Scheduler extends EventEmitter {
         const anyIncoming = (this.run.graph.edges || []).some(([, b]) => b === n.id);
         return !anyIncoming;
       }
-      return parents.every((p) => p && p.status === 'done');
+      if (!parents.every((p) => p && p.status === 'done')) return false;
+      // A step redone alone is pending behind finished steps; what comes
+      // after those waits for it too.
+      return ![...this.ancestorsOf(n.id)].some((id) => ['pending', 'running'].includes(byId[id]?.status));
     });
+  }
+
+  ancestorsOf(nodeId) {
+    const seen = new Set();
+    const stack = [nodeId];
+    while (stack.length) {
+      const id = stack.pop();
+      for (const [a, b] of this.run.graph.edges || []) if (b === id && !seen.has(a)) { seen.add(a); stack.push(a); }
+    }
+    return seen;
   }
 
   /**
@@ -201,9 +246,12 @@ export class Scheduler extends EventEmitter {
 
   runNode(node) {
     const startedAt = new Date().toISOString();
+    const gen = this.generation.get(node.id) || 0;
+    const current = () => (this.generation.get(node.id) || 0) === gen;
     this.updateNode(node.id, { status: 'running', startedAt, waitsFor: null });
-    const p = this.attempt(node)
+    const p = this.attempt(node, current)
       .then((output) => {
+        if (!current()) return;
         this.updateNode(node.id, {
           status: 'done', output: output ?? node.output, endedAt: new Date().toISOString(),
           progress: undefined, waitsFor: null, pendingAnswer: undefined,
@@ -220,8 +268,8 @@ export class Scheduler extends EventEmitter {
         }
       })
       .catch((e) => {
-        // Stop and shutdown wrote the final state already.
-        if (this.silenced || this.aborted) return;
+        // Stop and shutdown wrote the final state already; a redo reset it.
+        if (this.silenced || this.aborted || !current()) return;
         this.updateNode(node.id, {
           status: 'failed', endedAt: new Date().toISOString(), progress: undefined,
           // A step that failed may still have produced something worth reading
@@ -231,7 +279,7 @@ export class Scheduler extends EventEmitter {
         });
         if (!this.halting) this.halting = { status: 'failed', error: e.message, failedNode: node.id };
       })
-      .finally(() => { this.inFlight.delete(node.id); });
+      .finally(() => { if (this.inFlight.get(node.id) === p) this.inFlight.delete(node.id); });
     this.inFlight.set(node.id, p);
   }
 
@@ -240,27 +288,29 @@ export class Scheduler extends EventEmitter {
    * Each attempt gets its own abort signal, so a node's timeout ends that
    * node's work without stopping its siblings.
    */
-  async attempt(node) {
+  async attempt(node, current = () => true) {
     const spec = node.spec || {};
     const retries = Math.max(0, Math.min(5, Number(spec.retry?.attempts) || 0));
     const backoff = Math.max(0, Number(spec.retry?.backoffMs ?? 2000));
     const timeoutMs = Number(spec.timeoutMs) > 0 ? Number(spec.timeoutMs) : null;
     const handler = getHandler(node.kind);
     for (let attempt = 1; ; attempt++) {
+      if (!current()) throw new Error('redone');
       this.updateNode(node.id, { attempts: attempt });
       const nodeAc = new AbortController();
+      this.nodeAborts.set(node.id, nodeAc);
       const onRunAbort = () => nodeAc.abort();
       this.ac.signal.addEventListener('abort', onRunAbort, { once: true });
       let timedOut = false;
       const timer = timeoutMs ? setTimeout(() => { timedOut = true; nodeAc.abort(); }, timeoutMs) : null;
       try {
-        const output = await handler(node, this.context(node, nodeAc.signal, timeoutMs));
+        const output = await handler(node, this.context(node, nodeAc.signal, timeoutMs, current));
         // Some handlers return what they had when their signal fired rather
         // than throwing. A step that ran out of time did not succeed.
         if (timedOut) throw new Error('timed out');
         return output;
       } catch (err) {
-        if (this.aborted) throw err;
+        if (this.aborted || !current()) throw err;
         const e = timedOut ? Object.assign(new Error(`timed out after ${Math.round(timeoutMs / 1000)} s`), { retryable: true }) : err;
         if (e.retryable === false || attempt > retries) {
           if (attempt > 1) e.message = `${e.message} (after ${attempt} attempts)`;
@@ -272,15 +322,18 @@ export class Scheduler extends EventEmitter {
           lastError: e.message,
         });
         await sleep(wait, this.ac.signal);
-        if (this.aborted) throw e;
+        if (this.aborted || !current()) throw e;
       } finally {
         if (timer) clearTimeout(timer);
         this.ac.signal.removeEventListener('abort', onRunAbort);
+        if (this.nodeAborts.get(node.id) === nodeAc) this.nodeAborts.delete(node.id);
       }
     }
   }
 
-  context(node, signal, timeoutMs) {
+  context(node, signal, timeoutMs, current = () => true) {
+    // An attempt cancelled by a redo may still report as it unwinds.
+    const updateNode = (id, patch) => { if (current()) this.updateNode(id, patch); };
     return {
       run: this.run,
       signal,
@@ -289,27 +342,28 @@ export class Scheduler extends EventEmitter {
         const patch = {};
         if (progress !== undefined) patch.progress = progress;
         if (partialOutput !== undefined) patch.output = { ...(node.output || {}), ...partialOutput };
-        if (Object.keys(patch).length) this.updateNode(node.id, patch);
+        if (Object.keys(patch).length) updateNode(node.id, patch);
       },
       // What was actually sent, references resolved, for the drill-down.
-      recordSent: (text) => this.updateNode(node.id, { sent: String(text ?? '').slice(0, 20_000) }),
+      recordSent: (text) => updateNode(node.id, { sent: String(text ?? '').slice(0, 20_000) }),
       awaitAnswer: (nodeId, question) => {
+        if (!current()) return Promise.reject(new Error('redone'));
         const n = this.run.graph.nodes.find((x) => x.id === nodeId);
         // Answered while the run was down — use it rather than asking again.
         if (n && n.pendingAnswer !== undefined) {
           const given = n.pendingAnswer;
-          this.updateNode(nodeId, { output: { ...question, answer: given }, waitsFor: null });
+          updateNode(nodeId, { output: { ...question, answer: given }, waitsFor: null });
           return Promise.resolve(given);
         }
-        this.updateNode(nodeId, { output: question, waitsFor: 'you' });
+        updateNode(nodeId, { output: question, waitsFor: 'you' });
         this.patch({ status: 'awaiting-answer' });
         return new Promise((resolve, reject) => {
           this.pendingAnswers.set(nodeId, { resolve, reject });
         }).then((answer) => {
-          this.updateNode(nodeId, { waitsFor: null });
+          updateNode(nodeId, { waitsFor: null });
           // Several questions can be open at once; the run is only back to
           // running when none is.
-          if (!this.pendingAnswers.size && !terminal(this.run.status)) this.patch({ status: 'running' });
+          if (current() && !this.pendingAnswers.size && !terminal(this.run.status)) this.patch({ status: 'running' });
           return answer;
         });
       },
