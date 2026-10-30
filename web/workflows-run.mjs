@@ -495,34 +495,57 @@ function renderPlanRail() {
   }
 }
 
+// Card sizes and gaps on the run canvas, in pixels.
+const PAD = 32, CARD_W = 220, WIDE_W = 470, COL_GAP = 40, ROW_H = 240, ROW_GAP = 40;
+
 function layoutCanvas() {
   const canvas = document.getElementById('canvas');
-  const edges  = document.getElementById('edges');
   canvas.querySelectorAll('.card').forEach((el) => el.remove());
   cards = {};
-  const PAD = 32, CARD_W = 220, COL_GAP = 40, ROW_H = 240;
   // Columns may start at 0 or 1 depending on who placed them; lay out from
   // whichever is leftmost so nothing lands off the canvas.
   const cols = run.graph.nodes.map((n) => n.col || 0);
   const minCol = Math.min(...cols);
-  for (const n of run.graph.nodes) {
-    const left = PAD + ((n.col || 0) - minCol) * (CARD_W + COL_GAP);
-    const top  = PAD + (n.row || 0) * ROW_H;
-    cards[n.id] = makeCard(n, { left, top, width: CARD_W }, canvas);
-  }
+  // A step with pages or pictures to preview gets a wider card, and its
+  // column widens with it so the next column moves over instead of under.
+  const widthOf = (n) => (hasPreview(n) ? WIDE_W : CARD_W);
+  const colW = {};
+  for (const n of run.graph.nodes) { const c = (n.col || 0) - minCol; colW[c] = Math.max(colW[c] || CARD_W, widthOf(n)); }
   const maxCol = Math.max(...cols) - minCol + 1;
-  // Each row is as tall as its tallest card, so a card full of screenshots
-  // pushes the next row down instead of covering it.
-  const rows = [...new Set(run.graph.nodes.map((n) => n.row || 0))].sort((a, b) => a - b);
-  const rowH = Object.fromEntries(rows.map((r) => [r, 0]));
-  for (const n of run.graph.nodes) rowH[n.row || 0] = Math.max(rowH[n.row || 0], cards[n.id].offsetHeight);
-  let y = PAD;
-  const rowTop = {};
-  for (const r of rows) { rowTop[r] = y; y += Math.max(ROW_H - 40, rowH[r]) + 40; }
-  for (const n of run.graph.nodes) cards[n.id].style.top = `${rowTop[n.row || 0]}px`;
-  canvas.style.width  = `${PAD * 2 + maxCol * (CARD_W + COL_GAP)}px`;
-  canvas.style.height = `${y + PAD}px`;
-  requestAnimationFrame(() => requestAnimationFrame(() => drawEdges(canvas, edges)));
+  const colLeft = {};
+  for (let c = 0, x = PAD; c < maxCol; c++) { colLeft[c] = x; x += (colW[c] || CARD_W) + COL_GAP; }
+  for (const n of run.graph.nodes) {
+    const left = colLeft[(n.col || 0) - minCol];
+    const top  = PAD + (n.row || 0) * ROW_H;
+    cards[n.id] = makeCard(n, { left, top, width: widthOf(n) }, canvas);
+  }
+  canvas.style.width  = `${colLeft[maxCol - 1] + (colW[maxCol - 1] || CARD_W) + PAD}px`;
+  stackCards();
+}
+
+/**
+ * Each card sits just below the card above it in its own column, and never
+ * higher than its row's usual place. A tall card pushes down only its own
+ * column, so the rest stay compact and rows line up where nothing is tall.
+ * Run again whenever a card changes height.
+ */
+function stackCards() {
+  const canvas = document.getElementById('canvas');
+  const byCol = {};
+  for (const n of run.graph.nodes) (byCol[n.col || 0] ||= []).push(n);
+  let bottom = PAD;
+  for (const list of Object.values(byCol)) {
+    list.sort((a, b) => (a.row || 0) - (b.row || 0));
+    let below = 0;
+    for (const n of list) {
+      const top = Math.max(PAD + (n.row || 0) * ROW_H, below);
+      cards[n.id].style.top = `${top}px`;
+      below = top + cards[n.id].offsetHeight + ROW_GAP;
+      bottom = Math.max(bottom, below - ROW_GAP);
+    }
+  }
+  canvas.style.height = `${bottom + PAD}px`;
+  requestAnimationFrame(() => requestAnimationFrame(() => drawEdges(canvas, document.getElementById('edges'))));
 }
 
 function makeCard(n, pos, parent) {
@@ -553,7 +576,15 @@ function makeCard(n, pos, parent) {
       <span>${esc(n.title)}</span>
       <span class="credit">${footMeta}</span>
     </div>`;
-  card.onclick = () => selectNode(n.id);
+  card.onclick = (e) => {
+    // A picture opens full size on its own; the pager turns the pictures
+    // over. Neither opens the step drawer.
+    if (e.target.closest('.pv-img')) return;
+    const turn = e.target.closest('[data-pv]');
+    if (turn) { turnPictures(n, Number(turn.dataset.pv)); return; }
+    if (e.target.closest('.pv-pager')) return;
+    selectNode(n.id);
+  };
   parent.append(card);
   return card;
 }
@@ -591,12 +622,15 @@ function cardBody(n) {
     return `<div class="ask-q">${esc(n.output?.question || 'Waiting for you.')}</div><div class="ask-cta">◆ Answer on the left</div>`;
   }
   if (n.status === 'pending') return `<div class="wait-note">Not started</div>`;
+  // A command step that is drawing pictures shows each one as it lands.
+  if (n.status === 'running' && hasPreview(n)) return previewHtml(n);
   if (n.status === 'running' && !selfProgress) {
-    return `<div class="running-note"><span class="dot-pulse"></span>${esc(n.progress || 'Making…')}</div>`;
+    return `<div class="running-note"><span class="dot-pulse"></span>${esc(n.progress || 'Making…')}</div>${lastLine(n)}`;
   }
   if (n.status === 'failed') {
     const msg = n.output?.error || 'Handler threw. Open the run.json for the full trace.';
-    return `<div class="fail-note"><span class="fail-tag">failed</span>${esc(msg)}</div>`;
+    // A step that failed its checks keeps what it made; show that under the reason.
+    return `<div class="fail-note"><span class="fail-tag">failed</span>${esc(msg)}</div>${hasPreview(n) ? previewHtml(n) : ''}`;
   }
   if (n.status === 'stopped') {
     return `<div class="wait-note">Stopped before it finished.</div>`;
@@ -609,6 +643,10 @@ function cardBody(n) {
   }
 
   const o = n.output || {};
+  if (n.kind === 'publish' && o.path) {
+    return `<div class="saved-row"><span class="check-pill ok">saved</span><span class="saved-name" title="${esc(o.path)}">${esc(o.path.split('/').pop())}</span></div>`;
+  }
+  if (hasPreview(n)) return previewHtml(n);
   // v2 kinds that aren't covered by the legacy render switch — handle first.
   if (n.kind === 'check' && typeof o.pass === 'boolean') {
     const cls = o.pass ? 'ok' : 'bad';
@@ -755,6 +793,86 @@ function cardBody(n) {
     }
     default: return `<div class="doc-b">${n.status === 'done' ? 'Done' : 'Not reached yet'}</div>`;
   }
+}
+
+/* ---- Step previews: pages as little book pages, pictures shown large ---- */
+
+/** Pages a step wrote: a list whose entries each carry a passage of text. */
+function pagesOf(n) {
+  const d = n.output?.data;
+  const list = Array.isArray(d) ? d : (d && typeof d === 'object' ? Object.values(d).find((v) => Array.isArray(v) && v.length > 1 && v.every((x) => x && typeof x === 'object')) : null);
+  if (!list) return null;
+  const key = ['text', 'body', 'content'].find((k) => list.every((x) => typeof x[k] === 'string'));
+  if (!key) return null;
+  return list.map((x, i) => ({ n: x.page ?? x.number ?? i + 1, text: x[key], note: x.scene || '' }));
+}
+function hasPreview(n) {
+  if (n.status === 'running') return !!n.output?.images?.length;
+  if (n.status !== 'done' && n.status !== 'failed') return false;
+  return !!(pagesOf(n) || n.output?.images?.length);
+}
+
+/** The last line a running command printed, if it printed anything yet. */
+function lastLine(n) {
+  const line = String(n.output?.out || '').trim().split('\n').pop();
+  return line ? `<div class="live-line" title="${esc(line)}">${esc(line)}</div>` : '';
+}
+
+// Pictures shown on a card at once, and which one each card starts at. The
+// cards are rebuilt on every update, so where each one was turned to is kept
+// here, by step id.
+const PICS_PER_PAGE = 6;
+const picsFrom = {};
+// How many pictures each card had when last drawn, so a card left on its
+// last page while pictures arrive moves on to show the new ones.
+const picsSeen = {};
+
+function previewHtml(n) {
+  const pages = pagesOf(n);
+  const title = n.output?.data?.title;
+  const imgs = n.output?.images || [];
+  const label = (m) => esc(String(m.name || '').split('/').pop().replace(/\.[a-z0-9]+$/i, ''));
+  let html = '';
+  if (pages) {
+    const head = `<div class="pv-head"><span class="pv-title">${esc(title || 'Pages')}</span><span class="pv-count">${pages.length} pages</span></div>`;
+    const tiles = pages.map((p) => `<div class="pv-page" title="${esc(p.text)}"><div class="pv-text">${esc(p.text)}</div><span class="pv-n">${esc(String(p.n))}</span></div>`).join('');
+    html += `${head}<div class="pv-pages">${tiles}</div>`;
+  }
+  if (imgs.length) {
+    const lastPage = (count) => Math.floor(Math.max(0, count - 1) / PICS_PER_PAGE) * PICS_PER_PAGE;
+    const live = n.status === 'running';
+    // While pictures arrive, follow them onto a new page unless the person
+    // turned back to an earlier one.
+    if (live && (picsFrom[n.id] === undefined || picsFrom[n.id] >= lastPage(picsSeen[n.id] || 0))) picsFrom[n.id] = lastPage(imgs.length);
+    picsSeen[n.id] = imgs.length;
+    const from = Math.min(picsFrom[n.id] || 0, lastPage(imgs.length));
+    const shown = imgs.slice(from, from + PICS_PER_PAGE);
+    const count = imgs.length > PICS_PER_PAGE
+      ? `<span class="pv-pager"><button type="button" data-pv="-1" title="Earlier pictures"${from === 0 ? ' disabled' : ''}>‹</button>`
+        + `<span class="pv-count">${from + 1}–${from + shown.length} of ${imgs.length}</span>`
+        + `<button type="button" data-pv="1" title="Later pictures"${from + PICS_PER_PAGE >= imgs.length ? ' disabled' : ''}>›</button></span>`
+      : '';
+    const head = live
+      ? `<span class="running-note"><span class="dot-pulse"></span>drawing… ${imgs.length} so far</span>`
+      : `<span class="pv-title">${imgs.length} ${imgs.length === 1 ? 'picture' : 'pictures'}</span>`;
+    html += `<div class="pv-head${pages ? ' pv-gap' : ''}">${head}${count}</div>${live ? lastLine(n) : ''}`;
+    html += `<div class="pv-imgs">${shown.map((m) => `<a class="pv-img" href="${blobUrl(m.ref)}" target="_blank" title="Open full size">${m.kind === 'video'
+      ? `<video src="${blobUrl(m.ref)}" muted loop autoplay playsinline></video>`
+      : `<img src="${blobUrl(m.ref)}" alt="${label(m)}" loading="lazy">`}<span class="pv-cap">${label(m)}</span></a>`).join('')}</div>`;
+  }
+  return html;
+}
+
+/** Turn a card's pictures one page on (1) or back (-1), in place. */
+function turnPictures(n, by) {
+  const total = n.output?.images?.length || 0;
+  const last = Math.floor(Math.max(0, total - 1) / PICS_PER_PAGE) * PICS_PER_PAGE;
+  picsFrom[n.id] = Math.max(0, Math.min(last, (picsFrom[n.id] || 0) + by * PICS_PER_PAGE));
+  const card = cards[n.id];
+  if (!card) return;
+  card.querySelector('.c-body').innerHTML = cardBody(n);
+  // The last page may hold fewer pictures, so the card can change height.
+  stackCards();
 }
 
 /** What a step made and asked to show — pictures, and clips that play. */

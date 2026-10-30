@@ -323,6 +323,39 @@ export async function runWorkflowEngineChecks({ check, session }) {
     const img = sha ? await fetch(`${base}/api/blob?sha=${sha}`) : null;
     check('a shown picture is kept, and served as an image', img?.status === 200 && img.headers.get('content-type') === 'image/png');
 
+    // Pictures show while the step still runs, each once it is finished. One
+    // was there before the step and is left alone; one is written in two
+    // parts, a second apart, and must only ever show whole.
+    fs.mkdirSync(path.join(repo, 'live'), { recursive: true });
+    fs.writeFileSync(path.join(repo, 'live-src.png'), Buffer.from(png, 'base64'));
+    fs.copyFileSync(path.join(repo, 'live-src.png'), path.join(repo, 'live', 'old.png'));
+    await save({ id: 'live', title: 'Live', graph: { nodes: [
+      script('draw', 'for i in 1 2 3; do sleep 1.5; cp live-src.png live/p$i.png; echo "  page $i: live/p$i.png"; done; '
+        + 'head -c 30 live-src.png > live/half.png; sleep 1; tail -c +31 live-src.png >> live/half.png; sleep 4.5',
+        { show: 'live/*.png' }),
+    ], edges: [] } });
+    const liveId = (await start('live')).run.runId;
+    const seen = [];
+    r = await until(liveId, (x) => {
+      const d = node(x, 'draw');
+      if (d?.status === 'running') seen.push({ images: d.output?.images || [], out: d.output?.out || '' });
+      return settled(x);
+    }, 20_000);
+    const named = (list, re) => list.filter((m) => re.test(m.name));
+    const counts = seen.map((x) => named(x.images, /\/p\d\.png$/).length);
+    check('a running step shows some of its pictures before it ends', counts.some((c) => c >= 1 && c < 3), JSON.stringify(counts));
+    const finalImgs = node(r, 'draw')?.output?.images || [];
+    check('…and all of them when it is done', node(r, 'draw')?.status === 'done' && named(finalImgs, /\/p\d\.png$/).length === 3,
+      JSON.stringify(finalImgs.map((m) => m.name)));
+    check('a picture there before the step, untouched, is not shown as new while it runs',
+      seen.length > 0 && !seen.some((x) => named(x.images, /old\.png$/).length) && named(finalImgs, /old\.png$/).length === 1);
+    const wholeRef = named(finalImgs, /half\.png$/)[0]?.ref;
+    const halfRefs = [...new Set(seen.flatMap((x) => named(x.images, /half\.png$/).map((m) => m.ref)))];
+    check('a picture still being written is not shown until it is whole',
+      !!wholeRef && halfRefs.length === 1 && halfRefs[0] === wholeRef, JSON.stringify({ halfRefs, wholeRef }));
+    check('a running step shows the last lines it printed', seen.some((x) => /page \d: live\/p\d\.png/.test(x.out)),
+      JSON.stringify(seen.map((x) => x.out).filter(Boolean).slice(-1)));
+
     /* ------------------------------ verify retries ---------------------------- */
     console.log('\nWorkflows: verify retries\n');
 
@@ -832,6 +865,58 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
       /Why it failed/.test(r.drawer) && /Set up to/.test(r.drawer) && /4 failed/.test(r.drawer), r.drawer.slice(0, 200));
     check('the run page shows a timeline and offers Resume', r.timeline && r.resume, JSON.stringify(r));
     check('the run page raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
+    // Previews on the run page: a story's pages, pictures turned over six at
+    // a time, a saved file, and a tall card that pushes only its own column.
+    // The last step sleeps so the page is still being updated when the
+    // pictures are turned over.
+    const shots = path.join(repo, 'pv-shots');
+    fs.mkdirSync(shots, { recursive: true });
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    for (let i = 1; i <= 8; i++) fs.writeFileSync(path.join(shots, `p${i}.png`), png);
+    await save({ id: 'ui-previews', title: 'UI previews', graph: { nodes: [
+      { id: 'pics', title: 'Pictures', kind: 'script', col: 0, row: 0, spec: { cmd: 'true', show: 'pv-shots/*.png' } },
+      { id: 'under', title: 'Under', kind: 'script', col: 0, row: 1, spec: { cmd: 'true' } },
+      { id: 'story', title: 'Story', kind: 'agent', col: 1, row: 0, spec: { prompt: 'Write it. MOCK_PAGES', output: 'json' } },
+      { id: 'keep', title: 'Keep', kind: 'publish', col: 2, row: 0, spec: { target: 'file', path: 'pv-out/story.json', content: 'x' } },
+      { id: 'next', title: 'Next', kind: 'script', col: 2, row: 1, spec: { cmd: 'sleep 3' } },
+    ], edges: [['pics', 'under'], ['story', 'keep'], ['keep', 'next']] } });
+    const pvId = (await start('ui-previews')).run.runId;
+    await until(pvId, (x) => node(x, 'pics')?.status === 'done' && node(x, 'keep')?.status === 'done');
+    p = await open(`/workflows-run.html#${pvId}`);
+    const caps = `[...document.querySelectorAll('.card[data-id="pics"] .pv-cap')].map((x) => x.textContent).join()`;
+    const count = `document.querySelector('.card[data-id="pics"] .pv-pager .pv-count')?.textContent`;
+    r = await p.ev(`
+      const first = { caps: ${caps}, count: ${count} };
+      const pics = document.querySelector('.card[data-id="pics"]');
+      pics.dataset.before = '1';
+      pics.querySelector('[data-pv="1"]').click(); ${tick}
+      return { first, second: { caps: ${caps}, count: ${count} }, drawerOn: document.getElementById('drawer').classList.contains('on') };`);
+    check('more than six pictures show six at a time, with a pager',
+      r.first.caps === 'p1,p2,p3,p4,p5,p6' && r.first.count === '1–6 of 8', JSON.stringify(r.first));
+    check('the pager turns to the rest without opening the step drawer',
+      r.second.caps === 'p7,p8' && r.second.count === '7–8 of 8' && !r.drawerOn, JSON.stringify(r));
+    await until(pvId, settled);
+    await sleep(800);
+    r = await p.ev(`
+      const card = (id) => document.querySelector('.card[data-id="' + id + '"]');
+      const box = (id) => ({ top: card(id).offsetTop, bottom: card(id).offsetTop + card(id).offsetHeight, width: card(id).offsetWidth });
+      const tiles = [...card('story').querySelectorAll('.pv-page')];
+      return { rebuilt: !card('pics').dataset.before, caps: ${caps}, tiles: tiles.length,
+        nums: tiles.map((t) => t.querySelector('.pv-n').textContent).join(),
+        serif: /Georgia|serif/.test(getComputedStyle(tiles[0]).fontFamily), font: parseFloat(getComputedStyle(tiles[0]).fontSize),
+        saved: card('keep').querySelector('.check-pill')?.textContent, savedName: card('keep').querySelector('.saved-name')?.textContent,
+        pics: box('pics'), under: box('under'), next: box('next'), story: box('story'),
+        canvas: document.getElementById('canvas').offsetHeight };`);
+    check('the pictures stay on the page they were turned to when the cards are rebuilt', r.rebuilt && r.caps === 'p7,p8', JSON.stringify([r.rebuilt, r.caps]));
+    check('a story an agent wrote shows each page as a little serif book page, numbered',
+      r.tiles === 5 && r.nums === '1,2,3,4,5' && r.serif && r.font >= 10 && r.story.width === 470, JSON.stringify(r));
+    check('a step that saved a file shows "saved" and the file name', r.saved === 'saved' && r.savedName === 'story.json', JSON.stringify([r.saved, r.savedName]));
+    check('a tall card pushes down only its own column',
+      r.pics.bottom > 272 && r.under.top === r.pics.bottom + 40 && r.next.top === 272 && r.canvas >= r.under.bottom,
+      JSON.stringify({ pics: r.pics, under: r.under, next: r.next, canvas: r.canvas }));
+    check('the previews raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
 
     // Repeat from a step: two quick clicks start one run, and the page moves
