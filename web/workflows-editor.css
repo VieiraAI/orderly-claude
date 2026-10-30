@@ -125,9 +125,10 @@ header.wf-header { grid-template-columns: 1fr 200px 150px auto; }
 .ed-empty-list a span { color: var(--faint); font: 11px var(--f-mono); }
 .ed-empty-sub { font-size: 12px; color: var(--faint); }
 
-.zoom-bar { position: fixed; right: 340px; bottom: 18px; z-index: 6; display: flex; align-items: center; gap: 2px;
+/* Left of the Ask Claude button, which keeps the corner (see assistant.css). */
+.zoom-bar { position: fixed; right: calc(340px + var(--fab-room, 0px)); bottom: 18px; z-index: 6; display: flex; align-items: center; gap: 2px;
   padding: 3px; background: var(--surface); border: 1px solid var(--edge-hi); border-radius: 8px; }
-.ed-layout.no-sel ~ .zoom-bar, .no-sel .zoom-bar { right: 18px; }
+.ed-layout.no-sel ~ .zoom-bar, .no-sel .zoom-bar { right: calc(18px + var(--fab-room, 0px)); }
 .zoom-bar button { min-width: 28px; height: 26px; padding: 0 8px; background: none; border: 0; border-radius: 6px;
   color: var(--text); font: 13px var(--f-ui); }
 .zoom-bar button:hover { background: var(--raised); }

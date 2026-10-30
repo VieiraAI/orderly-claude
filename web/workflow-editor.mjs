@@ -1608,7 +1608,6 @@ function mountClaude() {
     endPreview,
     apply: applyProposal,
     save,
-    docked: () => relayout(),
   });
   addEventListener('resize', relayout);
   $('pvStop').addEventListener('click', () => { endPreview(); state.assistant.renderProposal(); });

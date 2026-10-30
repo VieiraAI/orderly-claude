@@ -195,11 +195,18 @@ async function panelChecks({ check, base, repo }) {
     try { await cdp.once('Page.loadEventFired', sessionId, 9000); } catch { /* streams */ }
     await sleep(900);
 
-    let r = await ev(`document.getElementById('btnClaude').click(); await new Promise((r) => setTimeout(r, 700));
+    let r = await ev(`const b = document.getElementById('btnClaude').getBoundingClientRect(), z = document.querySelector('.zoom-bar').getBoundingClientRect();
+      return { inHeader: !!document.querySelector('.wf-header #btnClaude'), right: innerWidth - b.right, bottom: innerHeight - b.bottom, clear: z.right <= b.left };`);
+    check('Ask Claude sits in the bottom-right corner, clear of the zoom bar', !r.inHeader && r.right < 40 && r.bottom < 40 && r.clear, JSON.stringify(r));
+    r = await ev(`document.getElementById('btnClaude').click(); await new Promise((r) => setTimeout(r, 700));
       const a = document.querySelector('.oc-assist');
       return { open: a.classList.contains('open'), docked: document.body.classList.contains('assist-open'), title: a.querySelector('.oa-empty h3')?.textContent,
         ideas: a.querySelectorAll('.oa-suggest button').length, focus: document.activeElement?.id };`);
-    check('Ask Claude opens a docked panel and the editor makes room', r.open && r.docked && r.focus === 'oaInput', JSON.stringify(r));
+    check('Ask Claude opens the chat, ready to type', r.open && r.focus === 'oaInput', JSON.stringify(r));
+    const box = await ev(`const p = document.querySelector('.oc-assist').getBoundingClientRect(), b = document.getElementById('btnClaude').getBoundingClientRect();
+      return { w: Math.round(p.width), h: Math.round(p.height), above: p.bottom <= b.top, inView: p.top >= 0 && p.right <= innerWidth, pad: getComputedStyle(document.body).paddingRight,
+        scrolls: getComputedStyle(document.getElementById('oaScroll')).overflowY };`);
+    check('it pops up above the button, big enough to read, scrolling inside, the editor untouched', box.w >= 380 && box.h >= 480 && box.above && box.inView && box.pad === '0px' && box.scrolls === 'auto', JSON.stringify(box));
     check('it greets this workflow by name, with ideas for it', /Panel check/.test(r.title || '') && r.ideas >= 3, JSON.stringify(r));
 
     r = await ev(`const t = document.getElementById('oaInput'); t.value = 'slow add a step that tells the team';
@@ -213,6 +220,8 @@ async function panelChecks({ check, base, repo }) {
     r = await ev(`const a = document.querySelector('.oc-assist');
       return { steps: [...a.querySelectorAll('.steps .text')].map((x) => x.textContent), lines: [...a.querySelectorAll('.oa-p-lines li')].map((x) => x.textContent),
         ready: a.querySelector('.oa-p-ok')?.textContent, cards: document.querySelectorAll('.n-card').length };`);
+    const gap = await ev(`const s = document.getElementById('oaScroll'); return s.scrollHeight - s.scrollTop - s.clientHeight;`);
+    check('the chat stays at the newest reply when the proposal arrives', gap < 4, String(gap));
     check('the reply reads like Sessions, step by step', r.steps.includes('Read the workflow') && r.steps.includes('Checked the proposal'), r.steps.join(' | '));
     check('the change is a proposal, said in words; the canvas is untouched', r.lines.some((l) => /Added “Tell the team”/.test(l)) && r.ready === 'Ready to run' && r.cards === 2, JSON.stringify(r));
 
@@ -232,7 +241,7 @@ async function panelChecks({ check, base, repo }) {
     r = await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await new Promise((r) => setTimeout(r, 300));
       return { open: document.querySelector('.oc-assist').classList.contains('open'), docked: document.body.classList.contains('assist-open') };`);
-    check('Esc closes the panel and gives the editor its room back', !r.open && !r.docked, JSON.stringify(r));
+    check('Esc closes the chat', !r.open && !r.docked, JSON.stringify(r));
     check('the panel raised no errors or browser dialogs', errors.length === 0, errors.join(' | '));
     cdp.close?.();
   } finally {

@@ -15,16 +15,17 @@
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  /* Docked, full height: the editor moves over to make room, so nothing it
-     proposes can land underneath it. */
-  position: fixed; z-index: 70; top: 0; right: 0; bottom: 0;
-  width: var(--oa-w, 440px); max-width: 100vw;
+  /* A chat window that pops up above the Ask Claude button in the corner:
+     tall enough to follow a conversation, small enough to keep the canvas
+     in view. The conversation scrolls inside it. */
+  position: fixed; z-index: 70; right: 18px; bottom: 74px;
+  width: min(420px, calc(100vw - 32px)); height: min(660px, calc(100vh - 100px)); min-height: 360px;
   display: flex; flex-direction: column; overflow: hidden;
   background: var(--bg); color: var(--text); font: 14px/1.55 var(--sans); -webkit-font-smoothing: antialiased;
-  border-left: 1px solid var(--line);
-  box-shadow: -12px 0 40px rgba(0,0,0,.08);
-  transform: translateX(24px); opacity: 0; pointer-events: none; visibility: hidden;
-  transition: transform .26s cubic-bezier(.16,1,.3,1), opacity .2s ease, visibility 0s linear .26s;
+  border: 1px solid var(--line); border-radius: 16px;
+  box-shadow: 0 24px 64px rgba(0,0,0,.28), 0 4px 14px rgba(0,0,0,.10);
+  transform-origin: bottom right; transform: translateY(10px) scale(.97); opacity: 0; pointer-events: none; visibility: hidden;
+  transition: transform .22s cubic-bezier(.16,1,.3,1), opacity .18s ease, visibility 0s linear .22s;
 }
 /* Light, as the Sessions page is by default. */
 :root[data-theme="light"] .oc-assist {
@@ -37,7 +38,8 @@
   --added: #2F8A57; --changed: #B07A1E; --removed: #A94E46;
   --well: #FBFAF8;
 }
-.oc-assist.open { transform: none; opacity: 1; pointer-events: auto; visibility: visible; transition: transform .26s cubic-bezier(.16,1,.3,1), opacity .2s ease; }
+.oc-assist.open { transform: none; opacity: 1; pointer-events: auto; visibility: visible; transition: transform .22s cubic-bezier(.16,1,.3,1), opacity .18s ease; }
+:root[data-theme="light"] .oc-assist { box-shadow: 0 24px 64px rgba(21,24,27,.16), 0 4px 14px rgba(21,24,27,.06); }
 @media (prefers-reduced-motion: reduce) { .oc-assist { transition: none; } }
 .oc-assist * { box-sizing: border-box; }
 .oc-assist button { font: inherit; cursor: pointer; }
@@ -121,7 +123,7 @@
 .oa-p-ok { font-size: 11.5px; color: var(--added); display: flex; align-items: center; gap: 6px; }
 .oa-p-ok::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .oa-p-ok.bad { color: var(--removed); }
-.oa-p-lines { list-style: none; margin: 0; padding: 0 12px 8px; max-height: 150px; overflow-y: auto; font-size: 13px; }
+.oa-p-lines { list-style: none; margin: 0; padding: 0 12px 8px; max-height: 120px; overflow-y: auto; font-size: 13px; }
 .oa-p-lines li { display: grid; grid-template-columns: 14px 1fr; gap: 6px; padding: 2px 0; }
 .oa-p-lines .g { font: 600 12px var(--mono); }
 .oa-p-lines .added .g { color: var(--added); }
@@ -158,7 +160,7 @@
 .oa-send svg { width: 15px; height: 15px; }
 .oa-send.stop { background: var(--raised); color: var(--text); border: 1px solid var(--line); }
 
-/* The launcher in the editor header, and the canvas while previewing. */
+/* The launcher, and the canvas while previewing. */
 .claude-btn { display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px 4px 5px; border-radius: 999px;
   border: 1px solid color-mix(in srgb, #8FD3A8 35%, transparent); background: color-mix(in srgb, #1B3528 70%, transparent);
   color: #CDEBD8; font: 500 12.5px var(--f-ui, -apple-system, sans-serif); cursor: pointer; }
@@ -186,7 +188,7 @@
 .pv-banner .pv-key i { font-style: normal; }
 .pv-banner .pv-key i::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: 0; }
 .pv-banner .k-add::before { background: #6FC79A; } .pv-banner .k-chg::before { background: #E0A33C; } .pv-banner .k-rem::before { background: #D9776E; }
-body.previewing .wf-header .wf-actions > :not(.claude-btn), body.previewing .ed-side { opacity: .4; pointer-events: none; }
+body.previewing .wf-header .wf-actions, body.previewing .ed-side { opacity: .4; pointer-events: none; }
 body.previewing .ed-canvas { cursor: default; }
 
 @media (max-width: 640px) { .oc-assist { top: 0; right: 0; bottom: 0; width: 100vw; border-radius: 0; } }
@@ -194,11 +196,6 @@ body.previewing .ed-canvas { cursor: default; }
 .pv-banner button:hover { border-color: #8A99A7; }
 body.previewing .n-card { pointer-events: none; }
 
-/* The editor makes room while the panel is open. */
-body.assist-open { padding-right: var(--oa-w, 440px); }
-body.assist-open .pv-banner, body.assist-open .ed-toast, body.assist-open .ed-empty { left: calc((100vw - var(--oa-w, 440px)) / 2); }
-body.assist-open .wf-header { grid-template-columns: minmax(140px, 1fr) 150px 130px; row-gap: 10px; }
-body.assist-open .wf-actions { grid-column: 1 / -1; flex-wrap: wrap; }
 
 :root[data-theme="light"] .claude-btn { background: #EAF5EE; border-color: #B9DEC7; color: #24553A; }
 :root[data-theme="light"] .claude-btn:hover, :root[data-theme="light"] .claude-btn.on { border-color: #2F6B47; }
@@ -215,3 +212,22 @@ body.assist-open .wf-actions { grid-column: 1 / -1; flex-wrap: wrap; }
 :root[data-theme="light"] .pv-banner .k-add::before { background: #2F8A57; }
 :root[data-theme="light"] .pv-banner .k-chg::before { background: #B07A1E; }
 :root[data-theme="light"] .pv-banner .k-rem::before { background: #A94E46; }
+
+/*
+ * In the editor the launcher floats in the bottom-right corner of the canvas,
+ * beside the zoom bar, out of the header. It steps left of the step panel when
+ * one is open; while the chat is open it stays in the corner under it, as the
+ * way to close it.
+ */
+:root { --fab-room: 140px; }
+.claude-fab { position: fixed; right: 340px; bottom: 16px; z-index: 7;
+  padding: 6px 16px 6px 6px; gap: 9px; font-size: 13.5px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.28); transition: transform .15s ease, box-shadow .15s ease, opacity .2s ease; }
+.no-sel .claude-fab { right: 18px; }
+.claude-fab .disc { width: 26px; height: 26px; }
+.claude-fab .disc svg { width: 15px; height: 15px; }
+.claude-fab:hover { transform: translateY(-1px); box-shadow: 0 12px 30px rgba(0,0,0,.32); }
+.claude-fab .dot { position: absolute; top: 2px; right: 2px; width: 9px; height: 9px; box-shadow: 0 0 0 2px var(--bg, #fff); }
+:root[data-theme="light"] .claude-fab { background: #FFFFFF; box-shadow: 0 6px 20px rgba(21,24,27,.12); }
+:root[data-theme="light"] .claude-fab:hover { box-shadow: 0 10px 28px rgba(21,24,27,.16); }
+body.assist-open .claude-fab { right: 18px; }
