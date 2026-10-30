@@ -176,6 +176,9 @@ export function validateDefinition(d) {
   if (d.whenToUse != null && typeof d.whenToUse !== 'string') {
     problems.push('whenToUse must be a string');
   }
+  if (d.files != null && (typeof d.files !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(d.files))) {
+    problems.push('files must be a folder name: lower-case letters, digits and dashes');
+  }
   if (d.runtime != null) {
     if (typeof d.runtime !== 'object') problems.push('runtime must be an object');
     else {
@@ -316,6 +319,7 @@ export function lintDefinition(d) {
           warnings.push(`node ${n.id}: {{inputs.${r.key}}} is not one of the workflow's inputs, so it will be empty unless someone supplies it`);
         }
         if (r.kind === 'item' && n.kind !== 'loop') warnings.push(`node ${n.id}: {{item}} only means something inside a loop`);
+        if (r.kind === 'workflow' && !d.files) warnings.push(`node ${n.id}: {{workflow.files}} is empty unless the workflow names its files folder`);
       }
     }
     if (nodes.length > 1 && !edges.some((e) => e[0] === n.id || e[1] === n.id)) {
@@ -435,6 +439,18 @@ function hasCycle(ids, edges) {
  * Start a run. Writes a run.json with every node in `pending`, status
  * `running`, and returns the run.
  */
+/*
+ * A workflow can ship files its steps use, such as a script, in a folder
+ * named by its `files` field beside its JSON. Steps reach it as
+ * {{workflow.files}}. A copy saved elsewhere keeps the field, so it falls
+ * back to the built-in folder of that name.
+ */
+export function filesDirOf(def) {
+  if (!def?.files) return null;
+  const places = [def.file ? path.join(path.dirname(def.file), def.files) : null, path.join(BUILTIN_DIR, def.files)];
+  return places.find((p) => p && fs.existsSync(p) && fs.statSync(p).isDirectory()) || null;
+}
+
 export function startRun({
   workflowId, inputs = {}, repoRoot, scope = null, sessionId = null, trigger = 'you',
   budgetUsd, scheduleId = null, definition = null,
@@ -476,6 +492,7 @@ export function startRun({
     sessionId,
     repoRoot: repoRoot || null,
     cwd: sandboxPath || repoRoot || null,
+    filesDir: filesDirOf(found),
     sandboxPath,
     runtime: def.runtime || null,
     // The process driving this run. A run whose owner is gone was cut short.

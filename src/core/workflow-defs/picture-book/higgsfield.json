@@ -1,0 +1,21 @@
+{
+  "_note": "Params from `higgsfield model get nano_banana_flash`: resolution 1k/2k/4k (4k = 3 credits), aspect_ratio. 4k is needed for 2625 px print pages. The front cover uses GPT Image 2.5 (4k high = 4.25 credits), Higgsfield's pick for lettering.",
+  "sheet_model": "nano_banana_flash",
+  "page_model": "nano_banana_flash",
+  "reference_flag": "--image",
+  "sheet_params": {
+    "aspect_ratio": "4:3",
+    "resolution": "4k"
+  },
+  "page_params": {
+    "aspect_ratio": "1:1",
+    "resolution": "4k"
+  },
+  "max_images_per_run": 30,
+  "cover_model": "gpt_image_2_5",
+  "cover_params": {
+    "aspect_ratio": "1:1",
+    "resolution": "4k",
+    "quality": "high"
+  }
+}

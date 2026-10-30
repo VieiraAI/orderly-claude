@@ -7,6 +7,7 @@
  *   {{nodes.*.output}}           every direct parent, which is what a node got
  *                                implicitly before references existed
  *   {{item}}, {{item.field}}     the current element inside a loop
+ *   {{workflow.files}}           the folder of files the workflow ships with
  *
  * A node whose text names any `nodes.` reference is in explicit mode: it gets
  * exactly what it asked for and nothing else. A node that names none keeps the
@@ -34,6 +35,8 @@ export function parseRefs(text) {
       out.push({ raw, kind: 'nodes', nodeId: parts[1], path: rest });
     } else if (head === 'item') {
       out.push({ raw, kind: 'item', path: parts.slice(1) });
+    } else if (head === 'workflow' && parts[1] === 'files' && parts.length === 2) {
+      out.push({ raw, kind: 'workflow', key: 'files' });
     } else {
       out.push({ raw, kind: 'other', path: parts });
     }
@@ -124,6 +127,8 @@ export function resolveText(text, { run, nodeId = null, item, mode = 'text' } = 
       value = render(walk(run?.inputs || {}, ref.key.split('.')));
     } else if (ref.kind === 'item') {
       value = item === undefined ? undefined : render(walk(item, ref.path));
+    } else if (ref.kind === 'workflow') {
+      value = run?.filesDir || undefined;
     } else if (ref.kind === 'nodes' && ref.nodeId === '*') {
       const parents = nodeId ? parentsOf(nodeId, graph) : [];
       const chunks = parents

@@ -19,7 +19,7 @@ approvals — which was most of Decision 2. The build went on from there.
 | Decision | What exists now |
 | --- | --- |
 | 2 — authored steps | Every field handlers read is in the editor; steps can name skills (`uses`) |
-| 3 — references | `{{inputs.*}}`, `{{nodes.id.output.field}}`, `{{nodes.*.output}}`, `{{item}}`; upstream-only, checked on save; live preview from the last run; shell values quoted |
+| 3 — references | `{{inputs.*}}`, `{{nodes.id.output.field}}`, `{{nodes.*.output}}`, `{{item}}`, `{{workflow.files}}`; upstream-only, checked on save; live preview from the last run; shell values quoted |
 | 4 — durability | Boot reconcile, `interrupted` on shutdown, Resume, answers kept in `run.json`, retries with backoff, per-step timeouts, a concurrency cap, spend ceilings |
 | 5 — fan-out ceiling | The existing loop gained `max` (≤ 500) and `concurrency` (≤ 8) and stops at the spend limit |
 | 6 — control panel | Counts, answer-from-the-list, cut-short runs with Resume, failure drill-down, timeline, filters, spend |
