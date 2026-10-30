@@ -2304,6 +2304,10 @@ async function main() {
   const { runWorkflowEngineChecks } = await import('./workflow-engine.mjs');
   try { await runWorkflowEngineChecks({ check, session: target.meta }); }
   catch (e) { check('workflow checks ran to the end', false, e.stack || e.message); }
+  // The workflow assistant, against a stand-in for the claude CLI.
+  const { runAssistantChecks } = await import('./assistant.mjs');
+  try { await runAssistantChecks({ check, session: target.meta }); }
+  catch (e) { check('assistant checks ran to the end', false, e.stack || e.message); }
   // The scratch world is removed when the process exits (scratch-world.mjs).
 
   console.log(`\n${pass} passed, ${failures.length} failed\n`);

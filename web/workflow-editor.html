@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/workflows.css">
 <link rel="stylesheet" href="/workflows-editor.css">
+<link rel="stylesheet" href="/assistant.css">
 <style>
   .ed-layout { display: grid; grid-template-columns: 1fr 320px; gap: 0; height: calc(100vh - 56px); }
   .ed-canvas { position: relative; overflow: auto;
@@ -216,6 +217,7 @@
     </select>
   </div>
   <div class="wf-actions">
+    <button class="claude-btn" id="btnClaude" type="button" title="Ask Claude to build, change or explain this workflow (⌘J)" aria-label="Ask Claude"></button>
     <div class="add-wrap">
       <button class="run-btn add-open" id="btnAddNodeOpen">+ Add step</button>
       <div class="add-pop" id="addPop">
@@ -246,6 +248,11 @@
   mountAppMenu(document.getElementById('appMenu'), { here: 'workflows', theme: true });
 </script>
 
+<div class="pv-banner" id="pvBanner" role="status" hidden>
+  <span>Previewing Claude’s proposal</span>
+  <span class="pv-key"><i class="k-add">new</i><i class="k-chg">changed</i><i class="k-rem">removed</i></span>
+  <button type="button" id="pvStop">Stop previewing</button>
+</div>
 <div class="ed-layout no-sel" id="edLayout">
   <div class="zoom-bar" role="group" aria-label="Zoom">
     <button type="button" id="zoomOut" title="Zoom out" aria-label="Zoom out">−</button>
