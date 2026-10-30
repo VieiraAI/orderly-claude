@@ -13,6 +13,8 @@
  * pixel positions in parallel so dragging is smooth and the saved def
  * reflects what the user placed on screen (snapped to a 20px grid).
  */
+import { mountAssistant } from '/assistant.mjs';
+
 const $ = (id) => document.getElementById(id);
 const COL_W = 240, ROW_H = 180, GUTTER = 60;
 
@@ -124,6 +126,7 @@ async function boot() {
   // A graph wider than the screen opens fitted, so no step starts hidden.
   if (state.content && $('edInner').parentElement.clientWidth < state.content.w) fitZoom();
   markSaved(!!state.loaded, state.def.version);
+  mountClaude();
   // An id shared with another workflow is said once on opening, not hidden.
   if (state.clash) validate({ announce: true }); else validateSoon();
 }
@@ -618,6 +621,8 @@ async function save() {
     history.replaceState(null, '', `/workflow-editor.html?from=${encodeURIComponent(r.id)}${refQuery(state.loaded)}`);
     render();
     markSaved(true, r.version);
+    // Saved for the first time: the conversation about it follows it.
+    state.assistant?.rekey(assistantKey());
     toast(r.version > 1 ? `Saved as version ${r.version}. Runs already made keep the version they ran.` : 'Saved.', 'ok', 2500);
     return true;
   } catch (e) {
@@ -974,6 +979,8 @@ function renderCanvas() {
   for (const n of state.def.graph.nodes) {
     inner.append(nodeCard(n));
   }
+  // Previewing a proposal: steps it would remove stay visible, faded.
+  for (const n of state.previewing?.removed || []) inner.append(nodeCard(n));
   // Grow the inner container to contain every absolutely-positioned card.
   // Without this, cards past col 6 land outside .ed-canvas-inner's bounds,
   // the SVG stays width:100% of the (narrower) inner, and edges to those
@@ -1055,7 +1062,9 @@ function nodeCard(n) {
   if (n.id === state.selectedId) cls.push('sel');
   if (n.id === state.connectFromId) cls.push('connect-src');
   else if (state.connectFromId) cls.push('connect-target');
-  if (probs.length) cls.push('has-problem');
+  if (probs.length && !state.previewing) cls.push('has-problem');
+  const pv = previewMark(n.id);
+  if (pv) cls.push(`pv-${pv}`);
   card.className = cls.join(' ');
   card.style.left = `${x}px`;
   card.style.top = `${y}px`;
@@ -1075,7 +1084,8 @@ function nodeCard(n) {
     </div>
     <div class="n-title">${escapeHtml(n.title || n.id)}</div>
     <div class="n-what">${escapeHtml(summary(n))}</div>
-    ${flags.length ? `<div class="n-foot"><span class="n-flags">${flags.join(' · ')}</span></div>` : ''}`;
+    ${flags.length ? `<div class="n-foot"><span class="n-flags">${flags.join(' · ')}</span></div>` : ''}
+    ${pv ? `<span class="pv-badge">${{ added: 'new', changed: 'changed', removed: 'removed' }[pv]}</span>` : ''}`;
   card.title = probs.map(plain).join('\n');
   card.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1565,6 +1575,162 @@ function setMode(mode) {
   $('modeVisual').classList.toggle('on', mode === 'visual');
   $('modeJson').classList.toggle('on', mode === 'json');
   render();
+}
+
+/* -------------------------------- Claude --------------------------------- */
+
+/*
+ * The assistant's conversation is kept per workflow. A saved one is named by
+ * where it lives; one not saved yet gets a name for this tab, which moves to
+ * the real one on the first save.
+ */
+function assistantKey() {
+  if (state.loaded) return `wf:${state.loaded.scope}:${state.loaded.repoRoot || ''}:${state.loaded.id}`;
+  let k = null;
+  try { k = sessionStorage.getItem('oc-assist-new'); } catch { /* private window */ }
+  if (!k) {
+    k = `new:${crypto.randomUUID()}`;
+    try { sessionStorage.setItem('oc-assist-new', k); } catch { /* fine: one per load */ }
+  }
+  return k;
+}
+
+function mountClaude() {
+  state.assistant = mountAssistant({
+    launcher: $('btnClaude'),
+    key: assistantKey,
+    // While previewing, Claude still works from what the person has.
+    def: () => (state.previewing ? state.previewing.backup : state.def),
+    repoRoot: () => state.loaded?.repoRoot || null,
+    title: () => (state.previewing ? state.previewing.backup : state.def)?.title || '',
+    isPreviewing: () => !!state.previewing,
+    preview: startPreview,
+    endPreview,
+    apply: applyProposal,
+    save,
+    docked: () => relayout(),
+  });
+  addEventListener('resize', relayout);
+  $('pvStop').addEventListener('click', () => { endPreview(); state.assistant.renderProposal(); });
+}
+
+/*
+ * The canvas takes whatever room is left under the header, which changes
+ * when the assistant docks beside it and the header wraps to two rows.
+ */
+function relayout() {
+  const layout = $('edLayout');
+  const top = layout.getBoundingClientRect().top;
+  layout.style.height = `${Math.max(320, innerHeight - top)}px`;
+  requestAnimationFrame(() => { render(); showAll(); });
+}
+
+/** Zoom out just enough that every step is on screen. */
+function showAll() {
+  const canvas = $('edInner')?.parentElement;
+  if (state.content && canvas && (canvas.clientWidth < state.content.w * state.zoom || canvas.clientHeight < state.content.h * state.zoom)) fitZoom();
+}
+
+function previewMark(id) {
+  const p = state.previewing;
+  if (!p) return null;
+  if (p.removedIds.has(id)) return 'removed';
+  if (p.addedIds.has(id)) return 'added';
+  if (p.changedIds.has(id)) return 'changed';
+  return null;
+}
+
+/** Show a proposal on the canvas without changing the workflow. */
+function startPreview(draft, diff) {
+  if (state.previewing) endPreview();
+  const backup = state.def;
+  const next = normalise(structuredClone(draft));
+  placeNew(next, backup);
+  state.previewing = {
+    backup,
+    removed: diff.steps.removed.map((r) => backup.graph.nodes.find((n) => n.id === r.id)).filter(Boolean),
+    removedIds: new Set(diff.steps.removed.map((x) => x.id)),
+    addedIds: new Set(diff.steps.added.map((x) => x.id)),
+    changedIds: new Set(diff.steps.changed.map((x) => x.id)),
+  };
+  state.def = next;
+  state.selectedId = null; state.connectFromId = null; state.side = null;
+  document.body.classList.add('previewing');
+  $('pvBanner').hidden = false;
+  render();
+  // A proposal shown off the edge of the canvas is not shown at all.
+  showAll();
+}
+
+function endPreview() {
+  if (!state.previewing) return;
+  state.def = state.previewing.backup;
+  state.previewing = null;
+  document.body.classList.remove('previewing');
+  $('pvBanner').hidden = true;
+  render();
+}
+
+/** Put a proposal on the canvas, unsaved. Returns how to take it back. */
+function applyProposal(draft) {
+  if (state.previewing) endPreview();
+  const before = structuredClone(state.def);
+  const wasDirty = state.dirty;
+  const next = normalise(structuredClone(draft));
+  placeNew(next, before);
+  // The workflow keeps its identity; Claude does not rename it.
+  next.id = before.id || next.id;
+  state.def = next;
+  changed();
+  return () => {
+    state.def = before;
+    changed();
+    if (!wasDirty && state.loaded) { state.dirty = false; markSaved(true, state.def.version); }
+  };
+}
+
+/*
+ * Steps Claude added come without a place on the canvas. Each goes one
+ * column right of the latest step it waits on, in the first free row near
+ * it; everything the person placed stays where it is.
+ */
+function placeNew(def, before) {
+  const nodes = def.graph.nodes;
+  const placed = (n) => Number.isFinite(n.col) && Number.isFinite(n.row);
+  const keep = new Map((before?.graph?.nodes || []).map((n) => [n.id, n]));
+  for (const n of nodes) {
+    const was = keep.get(n.id);
+    if (!placed(n) && was && placed(was)) { n.col = was.col; n.row = was.row; }
+  }
+  const parents = Object.fromEntries(nodes.map((n) => [n.id, []]));
+  for (const [a, b] of def.graph.edges) parents[b]?.push(a);
+  const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
+  const taken = new Set(nodes.filter(placed).map((n) => `${n.col}:${n.row}`));
+  const firstCol = nodes.some(placed) ? Math.min(...nodes.filter(placed).map((n) => n.col)) : 1;
+  let guard = nodes.length * nodes.length + 5;
+  while (nodes.some((n) => !placed(n)) && guard-- > 0) {
+    for (const n of nodes) {
+      if (placed(n)) continue;
+      const ps = parents[n.id].map((id) => byId[id]).filter(Boolean);
+      if (ps.some((p) => !placed(p))) continue; // place its parents first
+      n.col = ps.length ? Math.max(...ps.map((p) => p.col)) + 1 : firstCol;
+      let row = ps.length ? ps[0].row : 0;
+      while (taken.has(`${n.col}:${row}`)) row++;
+      n.row = row;
+      taken.add(`${n.col}:${n.row}`);
+    }
+  }
+  // Anything left (only possible in a loop) goes at the end of the first column.
+  for (const n of nodes) if (!placed(n)) { n.col = firstCol; n.row = Math.max(-1, ...nodes.filter(placed).map((x) => x.row)) + 1; }
+  // A step slotted in between two others pushes what follows it one column
+  // right, so every connection still reads left to right.
+  for (let pass = 0; pass < nodes.length; pass++) {
+    let moved = false;
+    for (const [a, b] of def.graph.edges) {
+      if (byId[a] && byId[b] && byId[b].col <= byId[a].col) { byId[b].col = byId[a].col + 1; moved = true; }
+    }
+    if (!moved) break;
+  }
 }
 
 function slug(s, live = false) {

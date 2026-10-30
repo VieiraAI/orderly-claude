@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { PROJECTS_DIR } from './paths.mjs';
+import { PROJECTS_DIR, assistantDir } from './paths.mjs';
 import { readHead } from './jsonl.mjs';
 
 function firstPrompt(records) {
@@ -36,7 +36,7 @@ export function listSessions({ limit = 400 } = {}) {
 
       const key = `${st.mtimeMs}:${st.size}`;
       const cached = headCache.get(file);
-      if (cached && cached.key === key) { out.push(cached.entry); continue; }
+      if (cached && cached.key === key) { if (!cached.entry.cwd?.startsWith(assistantDir())) out.push(cached.entry); continue; }
 
       const head = readHead(file, 256 * 1024);
       const pick = (k) => head.find((r) => r[k])?.[k] || null;
@@ -56,6 +56,9 @@ export function listSessions({ limit = 400 } = {}) {
         bytes: st.size,
       };
       headCache.set(file, { key, entry });
+      // The workflow assistant's conversations are Claude Code sessions too,
+      // but they belong to a workflow, not to the person's terminals.
+      if (entry.cwd && entry.cwd.startsWith(assistantDir())) continue;
       out.push(entry);
     }
   }

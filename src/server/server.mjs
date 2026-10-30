@@ -26,6 +26,7 @@ import {
 } from '../core/workflows.mjs';
 import { suggestWorkflows } from '../core/workflow-suggest.mjs';
 import { Scheduler } from '../core/workflow-runner.mjs';
+import { Assistant } from '../core/assistant.mjs';
 import { redoPrompt, redoPicture, applyRedo } from '../core/workflow-handlers.mjs';
 import { resolveText, referenceFields } from '../core/refs.mjs';
 import { readSettings, writeSettings, runSpend } from '../core/settings.mjs';
@@ -423,6 +424,11 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       catch { clients.delete(res); } // a dead client should not be kept
     }
   };
+
+  // The workflow assistant: one conversation per workflow, each a locked-down
+  // Claude Code session whose only effect is a proposal the person reviews.
+  const assistant = new Assistant();
+  assistant.on('update', (e) => broadcast('assistant', e));
 
   const resolveView = (id) => {
     const wanted = id || liveId;
@@ -878,6 +884,39 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       }
 
 
+      // The workflow assistant. Keys come from the editor: a saved workflow's
+      // scope, repo and id, or a fresh one for a workflow not yet saved.
+      if (url.pathname.startsWith('/api/assistant')) {
+        const sub = url.pathname.slice('/api/assistant'.length);
+        const keyOk = (k) => typeof k === 'string' && k.length > 0 && k.length <= 600;
+        try {
+          if (sub === '' && req.method === 'GET') {
+            const key = url.searchParams.get('key');
+            if (!keyOk(key)) return send(400, { error: 'key required' });
+            return send(200, { state: assistant.status(key), conversation: assistant.conversation(key), person: personName(liveCwd) });
+          }
+          const body = req.method === 'POST' ? await readBody(req, 5_000_000) : {};
+          if (!keyOk(body.key) && sub !== '/rekey') return send(400, { error: 'key required' });
+          if (sub === '/message' && req.method === 'POST') {
+            // A repo is only read if Orderly already knows it.
+            const repoRoot = repoFrom(body.repoRoot || null);
+            const model = ['haiku', 'sonnet', 'opus'].includes(body.model) ? body.model : 'sonnet';
+            return send(200, { state: assistant.send({ key: body.key, text: body.text, def: body.def, repoRoot, model }) });
+          }
+          if (sub === '/stop' && req.method === 'POST') return send(200, { stopped: assistant.stop(body.key) });
+          if (sub === '/reset' && req.method === 'POST') return send(200, { reset: assistant.reset(body.key) });
+          if (sub === '/resolve' && req.method === 'POST') {
+            if (!['applied', 'discarded'].includes(body.action)) return send(400, { error: 'action must be applied or discarded' });
+            return send(200, { resolved: assistant.resolve(body.key, body.action) });
+          }
+          if (sub === '/rekey' && req.method === 'POST') {
+            if (!keyOk(body.from) || !keyOk(body.to)) return send(400, { error: 'from and to required' });
+            return send(200, { moved: assistant.rekey(body.from, body.to) });
+          }
+          return send(404, { error: 'not found' });
+        } catch (e) { return send(e.status || 400, { error: e.message }); }
+      }
+
       // Import a definition file someone shared. An id used by any other
       // workflow, here or in another repo, is refused with a free one
       // suggested, never silently overwritten or shadowed.
@@ -1321,6 +1360,7 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
   scheduleTick();
   const close = () => {
     for (const r of runners.values()) r.stop();
+    assistant.stopAll();
     // Nobody chose to end these runs, so they are left resumable rather than
     // recorded as though someone had pressed Stop.
     for (const s of schedulers.values()) s.suspend();

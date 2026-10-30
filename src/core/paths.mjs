@@ -18,6 +18,8 @@ export const SCRATCH_RUNS_DIR = path.join(DATA_DIR, 'runs', '_scratch');
 export const USER_WORKFLOWS_DIR = path.join(CLAUDE_DIR, 'workflows');
 export const USER_SKILLS_DIR = path.join(CLAUDE_DIR, 'skills');
 export const USER_PROMPTS_DIR = path.join(CLAUDE_DIR, 'prompts');
+/** Where the workflow assistant keeps one working folder per conversation. Per call, so tests can move it. */
+export const assistantDir = () => process.env.ORDERLY_ASSISTANT_DIR || path.join(DATA_DIR, 'assistant');
 
 /** The workflows and runs directories for a repo. The repo owns both. */
 export function repoWorkflowsDir(repoRoot) {
