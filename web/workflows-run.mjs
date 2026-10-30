@@ -216,6 +216,7 @@ function render() {
   renderTimeline();
   renderRunActions();
   if (selectedId) openDrawer(selectedId, { keepScroll: true });
+  refreshRedo();
 }
 
 /** Why the run is in the state it is, in a sentence, with what to do next. */
@@ -580,6 +581,10 @@ function makeCard(n, pos, parent) {
     // A picture opens full size on its own; the pager turns the pictures
     // over. Neither opens the step drawer.
     if (e.target.closest('.pv-img')) return;
+    const redo = e.target.closest('[data-redo]');
+    if (redo) { openRedo(n, redo.dataset.redo); return; }
+    const later = e.target.closest('[data-rerun-from]');
+    if (later) { rerunFromCanvas(later.dataset.rerunFrom); return; }
     const turn = e.target.closest('[data-pv]');
     if (turn) { turnPictures(n, Number(turn.dataset.pv)); return; }
     if (e.target.closest('.pv-pager')) return;
@@ -856,9 +861,10 @@ function previewHtml(n) {
       ? `<span class="running-note"><span class="dot-pulse"></span>drawing… ${imgs.length} so far</span>`
       : `<span class="pv-title">${imgs.length} ${imgs.length === 1 ? 'picture' : 'pictures'}</span>`;
     html += `<div class="pv-head${pages ? ' pv-gap' : ''}">${head}${count}</div>${live ? lastLine(n) : ''}`;
-    html += `<div class="pv-imgs">${shown.map((m) => `<a class="pv-img" href="${blobUrl(m.ref)}" target="_blank" title="Open full size">${m.kind === 'video'
+    html += `<div class="pv-imgs">${shown.map((m) => `<div class="pv-tile"><a class="pv-img" href="${blobUrl(m.ref)}" target="_blank" title="Open full size">${m.kind === 'video'
       ? `<video src="${blobUrl(m.ref)}" muted loop autoplay playsinline></video>`
-      : `<img src="${blobUrl(m.ref)}" alt="${label(m)}" loading="lazy">`}<span class="pv-cap">${label(m)}</span></a>`).join('')}</div>`;
+      : `<img src="${blobUrl(m.ref)}" alt="${label(m)}" loading="lazy">`}<span class="pv-cap">${label(m)}</span></a>${redoMark(n, m)}</div>`).join('')}</div>`;
+    html += staleNote(n);
   }
   return html;
 }
@@ -873,6 +879,147 @@ function turnPictures(n, by) {
   card.querySelector('.c-body').innerHTML = cardBody(n);
   // The last page may hold fewer pictures, so the card can change height.
   stackCards();
+}
+
+/* ---- Draw one picture again, from its prompt edited by hand ---- */
+
+function canRedo(n) { return (meta.redoSteps || []).includes(n.id); }
+function redoState(nodeId, name) { return (meta.redos || []).find((r) => r.nodeId === nodeId && r.name === name); }
+
+/** On a picture: the Redo button, or how its redraw is going. */
+function redoMark(n, m) {
+  if (m.kind !== 'image' || !canRedo(n) || n.status === 'running') return '';
+  const st = redoState(n.id, m.name);
+  if (st?.status === 'drawing') return '<span class="pv-redoing"><span class="dot-pulse"></span>drawing again…</span>';
+  const failed = st?.status === 'failed';
+  return `<button type="button" class="pv-redo${failed ? ' bad' : ''}" data-redo="${esc(m.name)}" title="${failed ? esc(st.error) : 'Edit its prompt and draw this picture again'}">${failed ? 'Redo failed · try again' : 'Redo'}</button>`;
+}
+
+/**
+ * A picture drawn again after later steps had used it leaves those steps out
+ * of date. Name the first, and offer to repeat from it once the run is over.
+ */
+function staleNote(n) {
+  const times = Object.values(n.output?.redone || {});
+  if (!times.length) return '';
+  const last = times.sort().pop();
+  const after = new Set();
+  const queue = [n.id];
+  while (queue.length) {
+    const id = queue.shift();
+    for (const [a, b] of run.graph.edges || []) if (a === id && !after.has(b)) { after.add(b); queue.push(b); }
+  }
+  const stale = run.graph.nodes.find((x) => after.has(x.id) && x.status === 'done' && x.endedAt && x.endedAt < last);
+  if (!stale) return '';
+  const over = !['running', 'awaiting-answer'].includes(run.status);
+  return `<div class="pv-stale">Drawn again after “${esc(stale.title || stale.id)}” ran, so it and later steps are out of date.${over
+    ? ` <button type="button" class="run-btn" data-rerun-from="${esc(stale.id)}">Repeat from there</button>` : ''}</div>`;
+}
+
+let redoOpen = null;   // { nodeId, name, ref, drawing } while the dialog is open
+
+function redoDialog() {
+  let d = document.getElementById('redoDlg');
+  if (d) return d;
+  d = document.createElement('dialog');
+  d.id = 'redoDlg';
+  d.className = 'redo-dlg';
+  d.innerHTML = `
+    <div class="redo-head">
+      <div><div class="dr-kind">Draw one picture again</div><h3 class="dr-title" id="redoName"></h3></div>
+      <button type="button" class="x" id="redoClose" title="Close">×</button>
+    </div>
+    <div class="redo-main">
+      <a class="redo-pic" id="redoPicLink" target="_blank" title="Open full size"><img id="redoImg" alt=""></a>
+      <label class="redo-edit"><span class="dr-h">Prompt</span><textarea id="redoText" spellcheck="true"></textarea></label>
+    </div>
+    <div class="redo-foot">
+      <span class="redo-note" id="redoNote"></span>
+      <button type="button" class="run-btn" id="redoCancel">Close</button>
+      <button type="button" class="run-btn go" id="redoGo">Draw again</button>
+    </div>`;
+  document.body.append(d);
+  const close = () => { redoOpen = null; d.close(); };
+  d.querySelector('#redoClose').onclick = close;
+  d.querySelector('#redoCancel').onclick = close;
+  d.addEventListener('close', () => { redoOpen = null; });
+  d.addEventListener('click', (e) => { if (e.target === d) close(); });
+  d.querySelector('#redoGo').onclick = startRedo;
+  return d;
+}
+
+async function openRedo(n, name) {
+  const m = (n.output?.images || []).find((x) => x.name === name);
+  if (!m) return;
+  const d = redoDialog();
+  redoOpen = { nodeId: n.id, name, ref: m.ref, drawing: redoState(n.id, name)?.status === 'drawing' };
+  d.querySelector('#redoName').textContent = name.split('/').pop();
+  showRedoPicture(m.ref);
+  const text = d.querySelector('#redoText');
+  text.value = '';
+  text.placeholder = 'Loading the prompt that drew it…';
+  setRedoNote('');
+  syncRedo();
+  if (!d.open) d.showModal();
+  text.focus();
+  const r = await fetch(`/api/runs/${encodeURIComponent(run.runId)}/nodes/${encodeURIComponent(n.id)}/redo?name=${encodeURIComponent(name)}`)
+    .then((x) => x.json()).catch(() => ({ error: 'Could not reach Orderly' }));
+  if (redoOpen?.name !== name) return;
+  if (r.error) { setRedoNote(r.error, true); return; }
+  text.value = r.prompt || '';
+  text.setSelectionRange(0, 0);
+  text.scrollTop = 0;
+  text.placeholder = r.prompt ? '' : 'No prompt was kept beside this picture. Write the one to draw it from.';
+}
+
+function showRedoPicture(ref) {
+  const d = redoDialog();
+  d.querySelector('#redoImg').src = blobUrl(ref);
+  d.querySelector('#redoPicLink').href = blobUrl(ref);
+}
+
+function setRedoNote(text, bad = false) {
+  const el = redoDialog().querySelector('#redoNote');
+  el.textContent = text;
+  el.classList.toggle('bad', bad);
+}
+
+/** Lock the dialog while its picture is being drawn. */
+function syncRedo() {
+  const d = redoDialog();
+  const busy = !!redoOpen?.drawing;
+  d.querySelector('#redoText').disabled = busy;
+  d.querySelector('#redoGo').disabled = busy;
+  d.querySelector('#redoGo').textContent = busy ? 'Drawing…' : 'Draw again';
+  if (busy) setRedoNote('Drawing it again. This can take a few minutes; you can close this and watch the card.');
+}
+
+async function startRedo() {
+  if (!redoOpen || redoOpen.drawing) return;
+  const prompt = redoDialog().querySelector('#redoText').value;
+  if (!prompt.trim()) { setRedoNote('Write a prompt first.', true); return; }
+  redoOpen.drawing = true;
+  syncRedo();
+  const r = await post(`/api/runs/${encodeURIComponent(run.runId)}/nodes/${encodeURIComponent(redoOpen.nodeId)}/redo`, { name: redoOpen.name, prompt });
+  if (r.error && redoOpen) { redoOpen.drawing = false; syncRedo(); setRedoNote(r.error, true); }
+}
+
+/** After each update: show the new picture, or why it failed, in the open dialog. */
+function refreshRedo() {
+  if (!redoOpen) return;
+  const n = run.graph.nodes.find((x) => x.id === redoOpen.nodeId);
+  const m = n?.output?.images?.find((x) => x.name === redoOpen.name);
+  const st = redoState(redoOpen.nodeId, redoOpen.name);
+  if (st?.status === 'drawing') { redoOpen.drawing = true; syncRedo(); return; }
+  if (!redoOpen.drawing) return;
+  redoOpen.drawing = false;
+  syncRedo();
+  if (st?.status === 'failed') { setRedoNote(st.error, true); return; }
+  if (m && m.ref !== redoOpen.ref) {
+    redoOpen.ref = m.ref;
+    showRedoPicture(m.ref);
+    setRedoNote('Drawn again. Edit the prompt and draw again if it still needs work.');
+  }
 }
 
 /** What a step made and asked to show — pictures, and clips that play. */
@@ -971,10 +1118,12 @@ function openDrawer(id, { keepScroll = false } = {}) {
     ${sec('What it was given', n.sent && n.sent.replace(/^\$ /, '') !== authored ? pre(n.sent) : '')}
     ${sec('What it made', o.images?.length ? `<div class="dr-shown">${o.images.map((m) => m.kind === 'video'
       ? `<figure><video src="${blobUrl(m.ref)}" controls muted loop autoplay playsinline></video><figcaption>${esc(m.name)}</figcaption></figure>`
-      : `<figure><a href="${blobUrl(m.ref)}" target="_blank"><img src="${blobUrl(m.ref)}" alt="${esc(m.name)}"></a><figcaption>${esc(m.name)}</figcaption></figure>`).join('')}</div>` : '')}
+      : `<figure><a href="${blobUrl(m.ref)}" target="_blank"><img src="${blobUrl(m.ref)}" alt="${esc(m.name)}"></a><figcaption>${esc(m.name)}</figcaption>${redoMark(n, m)}</figure>`).join('')}</div>${staleNote(n)}` : '')}
     ${sec('What it produced', made)}
     ${terminal && n.status !== 'pending' ? `<button class="run-btn" id="drRerun">⟲ Repeat from this step</button>` : ''}`;
   body.querySelector('#drRerun')?.addEventListener('click', () => rerunFromCanvas(n.id));
+  for (const b of body.querySelectorAll('[data-redo]')) b.onclick = () => openRedo(n, b.dataset.redo);
+  for (const b of body.querySelectorAll('[data-rerun-from]')) b.onclick = () => rerunFromCanvas(b.dataset.rerunFrom);
   drawer.setAttribute('aria-hidden', 'false');
   drawer.classList.add('on');
   if (keepScroll) drawer.scrollTop = scroll;

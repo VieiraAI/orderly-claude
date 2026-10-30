@@ -25,7 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { screenshot, detectDevServer, pageProblem } from './capture.mjs';
 import { putFile } from './blobs.mjs';
-import { resolveText, isExplicit } from './refs.mjs';
+import { resolveText, isExplicit, shellQuote } from './refs.mjs';
 import { runSpend } from './settings.mjs';
 import {
   loadBrand,
@@ -690,6 +690,76 @@ function storedRef(file, stored) {
     const st = fs.statSync(file);
     return stored.get(`${file}:${st.size}:${st.mtimeMs}`) || null;
   } catch { return null; }
+}
+
+/* ------------------------- redo one shown picture ------------------------ */
+
+/*
+ * A step that draws many pictures can say how to draw one of them again:
+ * `redo: { cmd }`, where {{redo.file}} is the picture's path in the project
+ * and {{redo.prompt}} a file holding the prompt the person edited. The prompt
+ * that drew a picture is read from beside it: 10.png → 10.prompt.txt.
+ *
+ * A redo is a tool, not part of the run's record, so a run started before its
+ * workflow learned `redo` can use the workflow's current one for that step.
+ */
+
+/** The picture, its prompt file and the step's redo, or an error saying why not. */
+function redoTarget(run, nodeId, name, currentDef) {
+  const node = run.graph?.nodes?.find((n) => n.id === nodeId);
+  if (!node) throw final(`no step ${nodeId} in this run`);
+  const now = currentDef?.graph?.nodes?.find((n) => n.id === nodeId && n.kind === node.kind);
+  const redo = node.spec?.redo?.cmd ? node.spec.redo : now?.spec?.redo;
+  if (!redo?.cmd) throw final(`"${node.title || nodeId}" cannot draw single pictures again`);
+  if (node.status === 'running') throw final(`"${node.title || nodeId}" is still running`);
+  if (!(node.output?.images || []).some((m) => m.name === name && m.kind === 'image')) {
+    throw final(`${name} is not one of the pictures "${node.title || nodeId}" showed`);
+  }
+  const root = path.resolve(cwdOf(run));
+  const file = path.resolve(root, name);
+  if (!file.startsWith(root + path.sep)) throw final(`${name} is outside the project`);
+  return { node, redo, root, file, promptFile: file.replace(/\.[a-z0-9]+$/i, '.prompt.txt') };
+}
+
+/** The prompt that drew a shown picture, or '' when the step kept none. */
+export function redoPrompt(run, nodeId, name, currentDef) {
+  const { promptFile } = redoTarget(run, nodeId, name, currentDef);
+  try { return fs.readFileSync(promptFile, 'utf8'); } catch { return ''; }
+}
+
+/**
+ * Draw one shown picture again from an edited prompt. Returns the new
+ * picture's blob ref; applyRedo puts it on the run. The two are apart because
+ * drawing takes minutes, and the run may have moved on in the meantime.
+ */
+export async function redoPicture(run, nodeId, name, prompt, { currentDef, signal } = {}) {
+  if (!String(prompt || '').trim()) throw final('The prompt is empty');
+  const { node, redo, root, file } = redoTarget(run, nodeId, name, currentDef);
+  const tmp = path.join(os.tmpdir(), `orderly-redo-${process.pid}-${Date.now()}.txt`);
+  fs.writeFileSync(tmp, String(prompt));
+  try {
+    const cmd = resolveOrFail(
+      redo.cmd.replaceAll('{{redo.file}}', shellQuote(name)).replaceAll('{{redo.prompt}}', shellQuote(tmp)),
+      { run }, node, { mode: 'shell' });
+    const res = await exec(['sh', '-c', cmd], { cwd: root, signal, timeoutMs: redo.timeoutMs || 900_000 });
+    if (res.code !== 0) {
+      const why = failureLine([res.out, res.err].filter(Boolean).join('\n'));
+      throw final(`Drawing ${name} again failed (exit ${res.code})${why ? `: ${why.slice(0, 300)}` : ''}`);
+    }
+    if (!fs.existsSync(file)) throw final(`The command finished but ${name} is not there`);
+    return putFile(file);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+/** Put a redrawn picture on its step, and note when, so later steps can show they are out of date. */
+export function applyRedo(run, nodeId, name, ref, at = new Date().toISOString()) {
+  const node = run.graph?.nodes?.find((n) => n.id === nodeId);
+  if (!node?.output?.images) return false;
+  node.output.images = node.output.images.map((m) => (m.name === name ? { ...m, ref } : m));
+  node.output.redone = { ...(node.output.redone || {}), [name]: at };
+  return true;
 }
 
 // How often a running command step looks for new pictures and output.
