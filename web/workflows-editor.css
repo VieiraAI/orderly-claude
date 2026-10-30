@@ -147,3 +147,16 @@ header.wf-header { grid-template-columns: 1fr 200px 150px auto; }
 .past-run .pr-why { grid-column: 1 / -1; font: 11.5px var(--f-ui); color: var(--ship); }
 .past-run .rated { margin-left: 6px; }
 .runs-foot { margin-top: 12px; }
+
+/* Delete a step: the window that asks first. */
+.del-dlg { width: min(420px, 92vw); padding: 20px 22px 18px; border: 1px solid var(--edge-strong); border-radius: 12px;
+  background: var(--surface); color: var(--text); box-shadow: 0 24px 64px color-mix(in oklab, #000 var(--shadow-pct, 50%), transparent); }
+.del-dlg::backdrop { background: color-mix(in oklab, var(--bg) 60%, transparent); }
+.del-dlg h3 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+.del-dlg p { margin: 0 0 10px; font-size: 13.5px; line-height: 1.5; color: var(--mute); }
+.del-dlg .del-warn { color: var(--amber, #9C6F22); }
+.del-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.del-foot .btn { height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--edge-hi); background: var(--surface); color: var(--text); font: 500 13px var(--f-ui, inherit); cursor: pointer; }
+.del-foot .btn:hover { border-color: var(--edge-strong); }
+.del-foot .btn.danger { background: var(--ship, #A94E46); border-color: var(--ship, #A94E46); color: #fff; }
+.del-foot .btn.danger:hover { filter: brightness(1.08); }
