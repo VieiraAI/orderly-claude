@@ -574,7 +574,7 @@ function makeCard(n, pos, parent) {
     </div>
     <div class="c-body">${cardBody(n)}</div>
     <div class="c-foot">
-      <span>${esc(n.title)}</span>
+      <span>${esc(n.title)}${outOfDate(n) ? ' <span class="stale-tag" title="An earlier step was redone after this one ran">out of date</span>' : ''}</span>
       <span class="credit">${footMeta}</span>
     </div>`;
   card.onclick = (e) => {
@@ -584,7 +584,7 @@ function makeCard(n, pos, parent) {
     const redo = e.target.closest('[data-redo]');
     if (redo) { openRedo(n, redo.dataset.redo); return; }
     const later = e.target.closest('[data-rerun-from]');
-    if (later) { rerunFromCanvas(later.dataset.rerunFrom); return; }
+    if (later) { redoStep(later.dataset.rerunFrom, 'onward', later); return; }
     const turn = e.target.closest('[data-pv]');
     if (turn) { turnPictures(n, Number(turn.dataset.pv)); return; }
     if (e.target.closest('.pv-pager')) return;
@@ -896,13 +896,14 @@ function redoMark(n, m) {
 }
 
 /**
- * A picture drawn again after later steps had used it leaves those steps out
- * of date. Name the first, and offer to repeat from it once the run is over.
+ * A step redone, or a picture drawn again, after later steps had used it
+ * leaves those steps out of date. Name the first, and offer to redo from it.
  */
 function staleNote(n) {
-  const times = Object.values(n.output?.redone || {});
-  if (!times.length) return '';
-  const last = times.sort().pop();
+  const drawn = Object.values(n.output?.redone || {}).sort().pop() || '';
+  const ended = n.status === 'done' ? n.endedAt || '' : '';
+  const last = drawn > ended ? drawn : ended;
+  if (!last) return '';
   const after = new Set();
   const queue = [n.id];
   while (queue.length) {
@@ -911,9 +912,8 @@ function staleNote(n) {
   }
   const stale = run.graph.nodes.find((x) => after.has(x.id) && x.status === 'done' && x.endedAt && x.endedAt < last);
   if (!stale) return '';
-  const over = !['running', 'awaiting-answer'].includes(run.status);
-  return `<div class="pv-stale">Drawn again after “${esc(stale.title || stale.id)}” ran, so it and later steps are out of date.${over
-    ? ` <button type="button" class="run-btn" data-rerun-from="${esc(stale.id)}">Repeat from there</button>` : ''}</div>`;
+  return `<div class="pv-stale">${last === drawn ? 'Drawn again' : 'Redone'} after “${esc(stale.title || stale.id)}” ran, so it and later steps are out of date.${!meta.ownedElsewhere
+    ? ` <button type="button" class="run-btn" data-rerun-from="${esc(stale.id)}">Redo from there</button>` : ''}</div>`;
 }
 
 let redoOpen = null;   // { nodeId, name, ref, drawing } while the dialog is open
@@ -1120,13 +1120,68 @@ function openDrawer(id, { keepScroll = false } = {}) {
       ? `<figure><video src="${blobUrl(m.ref)}" controls muted loop autoplay playsinline></video><figcaption>${esc(m.name)}</figcaption></figure>`
       : `<figure><a href="${blobUrl(m.ref)}" target="_blank"><img src="${blobUrl(m.ref)}" alt="${esc(m.name)}"></a><figcaption>${esc(m.name)}</figcaption>${redoMark(n, m)}</figure>`).join('')}</div>${staleNote(n)}` : '')}
     ${sec('What it produced', made)}
-    ${terminal && n.status !== 'pending' ? `<button class="run-btn" id="drRerun">⟲ Repeat from this step</button>` : ''}`;
-  body.querySelector('#drRerun')?.addEventListener('click', () => rerunFromCanvas(n.id));
+    ${o.images?.length ? '' : staleNote(n)}
+    ${redoable(n) ? `<div class="dr-sec dr-redo"><div class="dr-h">Run it again, in this run</div>
+      <div class="dr-redo-row">
+        <button class="run-btn" data-redo-step="alone" title="Later steps that finished keep what they made">↻ Redo this step</button>
+        <button class="run-btn" data-redo-step="onward" title="Every step after this one runs again too">↻ Redo from here</button>
+      </div>
+      <div class="dr-redo-why">${esc(redoWhy(n))}</div>
+      <span class="need-status" id="drRedoStatus"></span></div>` : ''}`;
+  for (const b of body.querySelectorAll('[data-redo-step]')) b.onclick = () => redoStep(n.id, b.dataset.redoStep, b);
   for (const b of body.querySelectorAll('[data-redo]')) b.onclick = () => openRedo(n, b.dataset.redo);
-  for (const b of body.querySelectorAll('[data-rerun-from]')) b.onclick = () => rerunFromCanvas(b.dataset.rerunFrom);
+  for (const b of body.querySelectorAll('[data-rerun-from]')) b.onclick = () => redoStep(b.dataset.rerunFrom, 'onward', b);
   drawer.setAttribute('aria-hidden', 'false');
   drawer.classList.add('on');
   if (keepScroll) drawer.scrollTop = scroll;
+}
+
+/** A finished step that ran before an earlier step was last redone or redrawn. */
+function outOfDate(n) {
+  if (n.status !== 'done' || !n.endedAt) return false;
+  const before = new Set();
+  const stack = [n.id];
+  while (stack.length) {
+    const id = stack.pop();
+    for (const [a, b] of run.graph.edges || []) if (b === id && !before.has(a)) { before.add(a); stack.push(a); }
+  }
+  return run.graph.nodes.some((x) => before.has(x.id) && x.status === 'done'
+    && [x.endedAt, ...Object.values(x.output?.redone || {})].some((t) => t && t > n.endedAt));
+}
+
+/** A step that has run, or is running, in a run this window may change. */
+function redoable(n) {
+  return !meta.ownedElsewhere && !['pending', 'skipped'].includes(n.status);
+}
+
+function redoWhy(n) {
+  const later = new Set();
+  const queue = [n.id];
+  while (queue.length) {
+    const id = queue.shift();
+    for (const [a, b] of run.graph.edges || []) if (a === id && !later.has(b)) { later.add(b); queue.push(b); }
+  }
+  const done = run.graph.nodes.filter((x) => later.has(x.id) && x.status === 'done').length;
+  const what = n.status === 'running' ? 'stops it and starts it again' : 'runs it again';
+  if (!later.size) return `Either one ${what}; nothing comes after it.`;
+  return `“Redo this step” ${what}${done ? ` and keeps the ${done} later step${done === 1 ? '' : 's'} that finished` : ''}. “Redo from here” also runs the ${later.size} step${later.size === 1 ? '' : 's'} after it again.`;
+}
+
+let redoing = false;
+async function redoStep(nodeId, mode, button) {
+  if (redoing) return;
+  redoing = true;
+  const label = button?.textContent;
+  if (button) { button.disabled = true; button.textContent = 'Starting…'; }
+  const r = await post(`/api/runs/${encodeURIComponent(run.runId)}/redo-step`, { nodeId, mode });
+  redoing = false;
+  if (button) { button.disabled = false; button.textContent = label; }
+  if (r.redone) { load(); return; }
+  const why = r.needsChoice
+    ? `“${r.needsChoice[0].title}” was cut short and is not safe to repeat. Use Resume first and say whether it finished.`
+    : r.error || 'Could not redo it.';
+  const el = document.getElementById('drRedoStatus') || document.getElementById('actStatus');
+  if (el) { el.textContent = why; el.classList.add('bad'); }
 }
 
 document.getElementById('drawerClose').onclick = () => {

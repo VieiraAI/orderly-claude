@@ -22,10 +22,10 @@ import {
   listDefinitions, listAllDefinitions, knownRepoRoots, getDefinition, startRun, readRun, listRuns, runsForSession, deleteRun, rerunRun,
   scaffoldWorkflow, writeWorkflow, validateDefinition, lintDefinition, deleteWorkflow, duplicateWorkflow,
   stripRuntime, freeId, claimId, markClashes, whereWord, reconcileRuns, prepareResume, openQuestion, recordAnswer, writeRun, RESUMABLE,
-  registerRoot, addLesson, updateRun,
+  registerRoot, addLesson, updateRun, prepareRedo,
 } from '../core/workflows.mjs';
 import { suggestWorkflows } from '../core/workflow-suggest.mjs';
-import { Scheduler } from '../core/workflow-runner.mjs';
+import { Scheduler, terminal } from '../core/workflow-runner.mjs';
 import { Assistant } from '../core/assistant.mjs';
 import { redoPrompt, redoPicture, applyRedo } from '../core/workflow-handlers.mjs';
 import { resolveText, referenceFields } from '../core/refs.mjs';
@@ -1067,6 +1067,31 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
           broadcast('run-start', { runId: run.runId, workflowId: run.workflowId });
           return send(200, { run });
         } catch (e) { return send(400, { error: e.message }); }
+      }
+
+      // Redo one step in the same run: `mode` "alone" or "onward" (resetForRedo).
+      const runRedoStepMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/redo-step$/);
+      if (runRedoStepMatch && req.method === 'POST') {
+        const id = runRedoStepMatch[1];
+        const body = await readBody(req).catch(() => ({}));
+        if (!body.nodeId) return send(400, { error: 'nodeId required' });
+        const s = schedulers.get(id);
+        if (s && !terminal(s.run.status)) {
+          try { return send(200, { redone: s.redo(body.nodeId, body.mode) }); }
+          catch (e) { return send(400, { error: e.message }); }
+        }
+        const run = readRun(id, { repoRoot: liveCwd });
+        if (!run) return send(404, { error: 'run not found' });
+        if (ownedElsewhere(run)) return send(409, { error: 'Another Orderly window is running this — redo the step there' });
+        if (['running', 'awaiting-answer'].includes(run.status)) run.status = 'interrupted';
+        let prepared;
+        try { prepared = prepareRedo(run, body.nodeId, body.mode, { choices: body.choices || {} }); }
+        catch (e) { return send(400, { error: e.message }); }
+        if (prepared.needsChoice) return send(409, { needsChoice: prepared.needsChoice });
+        writeRun(prepared.run);
+        startScheduler(prepared.run);
+        broadcast('run-start', { runId: id, workflowId: prepared.run.workflowId });
+        return send(200, { redone: true });
       }
 
       const runDeleteMatch = url.pathname.match(/^\/api\/runs\/([^/]+)$/);

@@ -908,3 +908,9 @@ button.stat:hover { background: var(--raised); }
 .run-btn.go { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
 .run-btn.go:hover { color: var(--accent-ink); filter: brightness(1.06); }
 @media (max-width: 760px) { .redo-main { grid-template-columns: 1fr; } .redo-edit textarea { min-height: 220px; } }
+
+/* Redo a step in the same run, from the step drawer. */
+.dr-redo-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.dr-redo-why { margin-top: 8px; font-size: 12px; line-height: 1.5; color: var(--mute); }
+.dr-redo .need-status { display: block; margin-top: 6px; }
+.stale-tag { margin-left: 4px; font-size: 10.5px; color: var(--amber); white-space: nowrap; }
