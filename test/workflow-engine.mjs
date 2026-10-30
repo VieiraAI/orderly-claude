@@ -7,6 +7,8 @@
  *
  *   node test/workflow-engine.mjs
  */
+// First, so standalone runs read and write only a throwaway world too.
+import './scratch-world.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -942,7 +944,7 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
   }
 }
 
-// Standalone: pick any session on disk to satisfy the server's boot.
+// Standalone: boot on the scratch world's session.
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const { listSessions } = await import('../src/core/sessions.mjs');
   const session = listSessions({ limit: 50 }).find((s) => s.file && fs.existsSync(s.file));
