@@ -148,13 +148,18 @@ export function mountAssistant(ed) {
     $('oaError').textContent = err || '';
     launcher.classList.toggle('on', s.open);
     launcher.classList.toggle('has-proposal', !s.open && st.proposal?.status === 'pending');
+    // Follow the conversation if you were at its end. Measured before drawing
+    // and applied after the proposal card, which takes room from the thread.
+    const root = $('oaScroll');
+    const follow = s.follow || s.pendingText || root.scrollHeight - root.scrollTop - root.clientHeight < 140;
+    s.follow = false;
     renderThread();
     renderProposal();
+    if (follow) root.scrollTo({ top: root.scrollHeight, behavior: 'instant' });
   }
 
   function renderThread() {
     const root = $('oaScroll');
-    const atBottom = root.scrollHeight - root.scrollTop - root.clientHeight < 140;
     root.innerHTML = '';
     const turns = s.data?.conversation?.turns || [];
     const busy = !!s.data?.state?.busy;
@@ -181,7 +186,6 @@ export function mountAssistant(ed) {
     }
     // Claude's avatar is the spark, not initials.
     for (const a of root.querySelectorAll('.avatar.claude')) a.innerHTML = SPARK;
-    if (atBottom || s.pendingText) root.scrollTop = root.scrollHeight;
   }
 
   function emptyState() {
@@ -302,7 +306,7 @@ export function mountAssistant(ed) {
     panel.classList.add('open');
     panel.setAttribute('aria-hidden', 'false');
     document.body.classList.add('assist-open');
-    ed.docked?.(true);
+    s.follow = true; // opening shows the latest of the conversation
     const id = ed.def()?.id;
     if (id) {
       fetch(`/api/runs?workflow=${encodeURIComponent(id)}&limit=5`).then((r) => r.json())
@@ -319,7 +323,6 @@ export function mountAssistant(ed) {
     panel.classList.remove('open');
     panel.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('assist-open');
-    ed.docked?.(false);
     clearInterval(s.poll);
     render();
     launcher.focus();
