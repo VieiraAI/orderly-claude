@@ -996,6 +996,66 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     check('the previews raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
 
+    // The run page: back to the workflow, and a preview window for what a
+    // step made (a page it designed, a page it saved). Then the editor:
+    // right-click a step to delete it, after a confirmation.
+    await save({ id: 'ui-pages', title: 'UI pages', graph: { nodes: [
+      { id: 'design', title: 'Design', kind: 'agent', col: 0, row: 0, spec: { prompt: 'A landing page', output: 'html' } },
+      { id: 'site', title: 'Save site', kind: 'publish', col: 1, row: 0, spec: { target: 'file', path: 'pv-out/site.html', content: '<!doctype html><h1 id="saved">Saved page</h1>' } },
+      { id: 'tidy', title: 'Tidy', kind: 'script', col: 2, row: 0, spec: { cmd: 'true' } },
+    ], edges: [['design', 'site'], ['site', 'tidy']] } });
+    const pgId = (await start('ui-pages')).run.runId;
+    await until(pgId, settled);
+    p = await open(`/workflows-run.html#${pgId}`);
+    r = await p.ev(`const back = document.getElementById('backToWf');
+      return { back: back.textContent.trim(), href: back.getAttribute('href'), pv: [...document.querySelectorAll('.card.has-pv')].map((c) => c.dataset.id) };`);
+    check('a run page has Back to workflow, to this workflow in the editor', r.back === '← Back to workflow' && /^\/workflow-editor\.html\?from=ui-pages&scope=project/.test(r.href || ''), JSON.stringify(r));
+    check('steps that made a web page are marked as previewable; others are not', r.pv.join() === 'design,site', JSON.stringify(r.pv));
+    r = await p.ev(`document.querySelector('.card[data-id="site"]').click(); ${tick}
+      const d = document.getElementById('pvwDlg');
+      const f = d?.querySelector('iframe');
+      await new Promise((r) => setTimeout(r, 400));
+      return { open: !!d?.open, title: d?.querySelector('#pvwTitle').textContent, file: d?.querySelector('#pvwFile').textContent,
+        sandbox: f?.getAttribute('sandbox'), src: f?.getAttribute('src'), drawer: document.getElementById('drawer').classList.contains('on') };`);
+    check('clicking it opens the preview window, not the step drawer', r.open && r.title === 'Save site' && r.file === 'pv-out/site.html' && !r.drawer, JSON.stringify(r));
+    check('the page shows sandboxed: its scripts run, but it cannot reach Orderly', r.sandbox === 'allow-scripts', JSON.stringify(r));
+    const served = await fetch(base + r.src);
+    const body = await served.text();
+    check('the saved page is served whole, under a sandbox policy', served.ok && /id="saved"/.test(body) && /sandbox/.test(served.headers.get('content-security-policy') || ''), `${served.status} ${served.headers.get('content-security-policy')}`);
+    r = await p.ev(`const d = document.getElementById('pvwDlg');
+      d.querySelector('#pvwSizes [data-w="390"]').click(); ${tick}
+      const w = d.querySelector('iframe').style.width;
+      d.querySelector('#pvwDetails').click(); ${tick}
+      return { w, closed: !d.open, drawer: document.getElementById('drawer').classList.contains('on'), btn: !!document.getElementById('drPreview') };`);
+    check('it previews at phone width, and Step details opens the drawer, which links back', r.w === '390px' && r.closed && r.drawer && r.btn, JSON.stringify(r));
+    r = await p.ev(`document.getElementById('drawerClose').click();
+      document.querySelector('.card[data-id="design"]').click(); ${tick}
+      const d = document.getElementById('pvwDlg');
+      const src = d.querySelector('iframe').getAttribute('src'); d.close();
+      return { open: true, src };`);
+    const mock = await fetch(base + r.src).then((x) => x.text());
+    check('a page a step designed opens the same way', /<h1>Mock<\/h1>/.test(mock), mock.slice(0, 80));
+    const plain = await fetch(`${base}/api/runs/${pgId}/nodes/tidy/page`);
+    check('a step that made no page has nothing to serve', plain.status === 404, String(plain.status));
+    check('the preview window raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
+    p = await open('/workflow-editor.html?from=ui-pages');
+    const rightClick = (id) => `document.querySelector('.n-card[data-id="${id}"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 })); ${tick}`;
+    r = await p.ev(`${rightClick('site')}
+      const d = document.getElementById('delDlg');
+      return { open: !!d?.open, title: d?.querySelector('#delTitle').textContent, what: d?.querySelector('#delWhat').textContent, focus: document.activeElement?.id };`);
+    check('right-clicking a step asks before deleting it, saying what goes with it',
+      r.open && r.title === 'Delete “Save site”?' && /its 2 connections/.test(r.what) && r.focus === 'delCancel', JSON.stringify(r));
+    r = await p.ev(`document.getElementById('delCancel').click(); ${tick}
+      return { open: document.getElementById('delDlg').open, cards: document.querySelectorAll('.n-card').length };`);
+    check('Cancel keeps the step', !r.open && r.cards === 3, JSON.stringify(r));
+    r = await p.ev(`${rightClick('site')} document.getElementById('delGo').click(); ${tick}
+      return { cards: [...document.querySelectorAll('.n-card')].map((c) => c.dataset.id), saved: document.getElementById('saveLine').textContent };`);
+    check('Delete step removes it and its connections, unsaved until Save', r.cards.join() === 'design,tidy' && /unsaved/.test(r.saved), JSON.stringify(r));
+    check('deleting raised no errors or browser dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
     // Repeat from a step: two quick clicks start one run, and the page moves
     // to it. Only the part after # changes, which a browser does not reload for.
     p = await open(`/workflows-run.html#${failId}`);

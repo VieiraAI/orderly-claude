@@ -178,6 +178,7 @@ function render() {
   document.getElementById('crumbTitle').textContent = run.workflowTitle;
   document.getElementById('runTitle').textContent   = run.workflowTitle;
   document.getElementById('runCatPip').className    = `pip ${run.category || ''}`;
+  document.getElementById('backToWf').href = `/workflow-editor.html?from=${encodeURIComponent(run.workflowId)}${runRef()}`;
   const nodes = run.graph?.nodes || [];
   const done = nodes.filter((n) => n.status === 'done').length;
   const totals = { cost: 0, tokens: 0, elapsedS: 0 };
@@ -553,7 +554,7 @@ function makeCard(n, pos, parent) {
   const askish = n.kind === 'ask' || n.kind === 'decision' || n.kind === 'approve';
   const kls = ['card', `k-${n.kind}`, n.status].join(' ') + (askish ? ' ask' : '');
   const card = document.createElement('div');
-  card.className = kls;
+  card.className = kls + (previewOf(n) ? ' has-pv' : '');
   card.style.cssText = `left:${pos.left}px;top:${pos.top}px;width:${pos.width}px`;
   card.dataset.id = n.id;
   // The model label on the head uses the real model that ran if we have it,
@@ -576,7 +577,8 @@ function makeCard(n, pos, parent) {
     <div class="c-foot">
       <span>${esc(n.title)}</span>
       <span class="credit">${footMeta}</span>
-    </div>`;
+    </div>
+    ${previewOf(n) ? '<span class="pv-open" aria-hidden="true">Preview ↗</span>' : ''}`;
   card.onclick = (e) => {
     // A picture opens full size on its own; the pager turns the pictures
     // over. Neither opens the step drawer.
@@ -588,6 +590,9 @@ function makeCard(n, pos, parent) {
     const turn = e.target.closest('[data-pv]');
     if (turn) { turnPictures(n, Number(turn.dataset.pv)); return; }
     if (e.target.closest('.pv-pager')) return;
+    // Something to review opens in the preview window; the step's details
+    // are one click away from there.
+    if (previewOf(n)) { selectNode(n.id, { drawer: false }); openPreview(n); return; }
     selectNode(n.id);
   };
   parent.append(card);
@@ -1058,13 +1063,91 @@ function nse(tag, attrs) {
   return n;
 }
 
-function selectNode(id) {
+function selectNode(id, { drawer = true } = {}) {
   selectedId = id;
   for (const el of document.querySelectorAll('.card.sel, .plan-rail .item.sel')) el.classList.remove('sel');
   document.querySelector(`.card[data-id="${id}"]`)?.classList.add('sel');
   document.querySelector(`.plan-rail .item[data-id="${id}"]`)?.classList.add('sel');
   renderRunActions();
-  openDrawer(id);
+  if (drawer) openDrawer(id);
+}
+
+/* ---- The preview window: what a step made, big enough to review ---- */
+
+/**
+ * What a step made that is worth looking at full size: a web page (a mockup,
+ * or an .html file it saved), pictures, or pages of writing. Null if nothing.
+ */
+function previewOf(n) {
+  if (isPreview || n.status !== 'done') return null;
+  const o = n.output || {};
+  if (typeof o.html === 'string' && o.html.trim()) return { kind: 'page', name: o.name || `${n.id}.html` };
+  if (typeof o.path === 'string' && /\.html?$/i.test(o.path)) return { kind: 'page', name: o.path };
+  if (o.images?.length) return { kind: 'pictures', name: `${o.images.length} ${o.images.length === 1 ? 'picture' : 'pictures'}` };
+  if (pagesOf(n)) return { kind: 'pages', name: o.data?.title || 'Pages' };
+  return null;
+}
+
+const pageUrl = (n) => `/api/runs/${encodeURIComponent(run.runId)}/nodes/${encodeURIComponent(n.id)}/page`;
+
+function previewDialog() {
+  let d = document.getElementById('pvwDlg');
+  if (d) return d;
+  d = document.createElement('dialog');
+  d.id = 'pvwDlg';
+  d.className = 'pvw-dlg';
+  d.innerHTML = `
+    <div class="pvw-head">
+      <div class="pvw-name"><div class="dr-kind" id="pvwKind"></div><h3 class="dr-title" id="pvwTitle"></h3><div class="pvw-file" id="pvwFile"></div></div>
+      <div class="pvw-tools">
+        <div class="pvw-sizes" id="pvwSizes" role="group" aria-label="Preview width">
+          <button type="button" data-w="" class="on">Desktop</button><button type="button" data-w="820">Tablet</button><button type="button" data-w="390">Phone</button>
+        </div>
+        <a class="run-btn" id="pvwOpen" target="_blank" rel="noopener">Open in new tab ↗</a>
+        <button type="button" class="run-btn" id="pvwDetails">Step details</button>
+        <button type="button" class="x" id="pvwClose" title="Close (Esc)" aria-label="Close">×</button>
+      </div>
+    </div>
+    <div class="pvw-body" id="pvwBody"></div>`;
+  document.body.append(d);
+  d.querySelector('#pvwClose').onclick = () => d.close();
+  d.addEventListener('click', (e) => { if (e.target === d) d.close(); });
+  d.querySelector('#pvwSizes').onclick = (e) => {
+    const b = e.target.closest('button[data-w]');
+    if (!b) return;
+    for (const x of d.querySelectorAll('#pvwSizes button')) x.classList.toggle('on', x === b);
+    const frame = d.querySelector('.pvw-frame');
+    if (frame) frame.style.width = b.dataset.w ? `${b.dataset.w}px` : '100%';
+  };
+  return d;
+}
+
+function openPreview(n) {
+  const pv = previewOf(n);
+  if (!pv) return;
+  const d = previewDialog();
+  const o = n.output || {};
+  d.querySelector('#pvwKind').textContent = `${KIND_LABEL[n.kind] || n.kind} · ${{ page: 'web page', pictures: 'pictures', pages: 'pages' }[pv.kind]}`;
+  d.querySelector('#pvwTitle').textContent = n.title || n.id;
+  d.querySelector('#pvwFile').textContent = pv.name;
+  d.querySelector('#pvwSizes').hidden = pv.kind !== 'page';
+  for (const x of d.querySelectorAll('#pvwSizes button')) x.classList.toggle('on', !x.dataset.w);
+  const open = d.querySelector('#pvwOpen');
+  open.hidden = pv.kind !== 'page';
+  open.href = pv.kind === 'page' ? pageUrl(n) : '#';
+  d.querySelector('#pvwDetails').onclick = () => { d.close(); selectNode(n.id); };
+  const body = d.querySelector('#pvwBody');
+  if (pv.kind === 'page') {
+    // Sandboxed: the page can run its own scripts but cannot reach Orderly.
+    body.innerHTML = `<div class="pvw-stage"><iframe class="pvw-frame" sandbox="allow-scripts" title="${esc(pv.name)}" src="${pageUrl(n)}"></iframe></div>`;
+  } else if (pv.kind === 'pictures') {
+    body.innerHTML = `<div class="pvw-pics">${o.images.map((m) => m.kind === 'video'
+      ? `<figure><video src="${blobUrl(m.ref)}" controls muted loop autoplay playsinline></video><figcaption>${esc(m.name)}</figcaption></figure>`
+      : `<figure><a href="${blobUrl(m.ref)}" target="_blank" title="Open full size"><img src="${blobUrl(m.ref)}" alt="${esc(m.name)}"></a><figcaption>${esc(m.name)}</figcaption></figure>`).join('')}</div>`;
+  } else {
+    body.innerHTML = `<div class="pvw-pages">${pagesOf(n).map((p) => `<article><span class="pvw-n">${esc(String(p.n))}</span><p>${esc(p.text)}</p>${p.note ? `<div class="pvw-note">${esc(p.note)}</div>` : ''}</article>`).join('')}</div>`;
+  }
+  if (!d.open) d.showModal();
 }
 
 function dur(ms) {
@@ -1120,7 +1203,8 @@ function openDrawer(id, { keepScroll = false } = {}) {
       ? `<figure><video src="${blobUrl(m.ref)}" controls muted loop autoplay playsinline></video><figcaption>${esc(m.name)}</figcaption></figure>`
       : `<figure><a href="${blobUrl(m.ref)}" target="_blank"><img src="${blobUrl(m.ref)}" alt="${esc(m.name)}"></a><figcaption>${esc(m.name)}</figcaption>${redoMark(n, m)}</figure>`).join('')}</div>${staleNote(n)}` : '')}
     ${sec('What it produced', made)}
-    ${terminal && n.status !== 'pending' ? `<button class="run-btn" id="drRerun">⟲ Repeat from this step</button>` : ''}`;
+    ${previewOf(n) ? `<button class="run-btn go" id="drPreview">Open preview</button> ` : ''}${terminal && n.status !== 'pending' ? `<button class="run-btn" id="drRerun">⟲ Repeat from this step</button>` : ''}`;
+  body.querySelector('#drPreview')?.addEventListener('click', () => openPreview(n));
   body.querySelector('#drRerun')?.addEventListener('click', () => rerunFromCanvas(n.id));
   for (const b of body.querySelectorAll('[data-redo]')) b.onclick = () => openRedo(n, b.dataset.redo);
   for (const b of body.querySelectorAll('[data-rerun-from]')) b.onclick = () => rerunFromCanvas(b.dataset.rerunFrom);

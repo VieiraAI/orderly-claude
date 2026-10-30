@@ -1023,6 +1023,34 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       // Draw one of a step's pictures again from an edited prompt. GET reads
       // the prompt that drew it; POST starts the redraw and answers at once,
       // since drawing takes minutes. The run page follows it through `redos`.
+      // A web page a step made, shown in the run's preview window.
+      // Served sandboxed, so it cannot reach Orderly even opened on its own.
+      const runPageMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/nodes\/([^/]+)\/page$/);
+      if (runPageMatch && req.method === 'GET') {
+        const [, id, nodeId] = runPageMatch.map(decodeURIComponent);
+        const live = schedulers.get(id);
+        const run = live ? live.run : readRun(id, { repoRoot: liveCwd });
+        if (!run) return send(404, { error: 'run not found' });
+        const node = run.graph?.nodes?.find((n) => n.id === nodeId);
+        // A page the step made (a mockup) is kept in the run; one it saved
+        // into the project is read from there.
+        let html = typeof node?.output?.html === 'string' ? node.output.html : null;
+        if (html == null) {
+          const rel = node?.output?.path;
+          const root = run.cwd || run.repoRoot;
+          if (!rel || !root || !/\.html?$/i.test(rel)) return send(404, { error: 'this step did not make a web page' });
+          const full = path.resolve(root, rel);
+          if (!full.startsWith(path.resolve(root) + path.sep)) return send(400, { error: 'not inside the project' });
+          try { html = fs.readFileSync(full, 'utf8'); } catch { return send(404, { error: `${rel} is no longer there` }); }
+        }
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'content-security-policy': 'sandbox allow-scripts',
+          'cache-control': 'no-store',
+        });
+        return res.end(html);
+      }
+
       const runRedoMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/nodes\/([^/]+)\/redo$/);
       if (runRedoMatch && (req.method === 'GET' || req.method === 'POST')) {
         const [, id, nodeId] = runRedoMatch.map(decodeURIComponent);
