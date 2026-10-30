@@ -48,6 +48,7 @@ caught it is worth more than the fix.
 | `plugin/` | a Claude Code mod drawing the same bubbles in a terminal pane |
 | `test/smoke.mjs` | the whole suite |
 | `test/workflow-engine.mjs` | workflows, called by the suite; runs alone too |
+| `test/scratch-world.mjs` | the throwaway home, repo and sessions both suites run in; `KEEP_SMOKE=1` keeps it |
 | `docs/workflows-plan.md` | why workflows work the way they do |
 
 Two things are worth knowing before changing the core:

@@ -3,10 +3,11 @@ import path from 'node:path';
 import fs from 'node:fs';
 
 export const HOME = os.homedir();
-export const CLAUDE_DIR = path.join(HOME, '.claude');
+// Tests point these at a scratch folder so they never read or write the person's real ones.
+export const CLAUDE_DIR = process.env.ORDERLY_CLAUDE_DIR || path.join(HOME, '.claude');
 export const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
 export const FILE_HISTORY_DIR = path.join(CLAUDE_DIR, 'file-history');
-export const DATA_DIR = path.join(HOME, '.orderly-claude');
+export const DATA_DIR = process.env.ORDERLY_DATA_DIR || path.join(HOME, '.orderly-claude');
 // Kept so screenshots taken under the previous name are still found.
 const LEGACY_DATA_DIR = path.join(HOME, '.claudenized');
 export const SHOTS_DIR = path.join(DATA_DIR, 'shots');
@@ -47,6 +48,8 @@ let migrated = false;
 function adoptLegacyData() {
   if (migrated) return;
   migrated = true;
+  // A scratch data folder must not pull the person's old screenshots into it.
+  if (process.env.ORDERLY_DATA_DIR) return;
   const from = path.join(LEGACY_DATA_DIR, 'shots');
   if (!fs.existsSync(from)) return;
   try {

@@ -4,10 +4,14 @@
  *
  *   node test/smoke.mjs
  *
- * Boots a real server against a real session on disk, exercises every API
- * route, then loads the page in headless Chrome and checks it rendered with
- * no console errors — in both themes. Exits non-zero on any failure.
+ * Builds a throwaway world (see scratch-world.mjs), boots a real server on
+ * the session in it, exercises every API route, then loads the page in
+ * headless Chrome and checks it rendered with no console errors — in both
+ * themes. Exits non-zero on any failure. Reads nothing of the person's
+ * sessions, repos, runs or workflows, and leaves nothing behind.
  */
+// First, so every path is pointed at the scratch world before src/ loads.
+import * as world from './scratch-world.mjs';
 import net from 'node:net';
 import http from 'node:http';
 import { startServer } from '../src/server/server.mjs';
@@ -30,11 +34,6 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-
-// Every run this suite starts goes to a throwaway folder, not the Runs page
-// of the project it happens to be run from.
-const RUNS_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'orderly-smoke-runs-'));
-process.env.ORDERLY_RUNS_ROOT = RUNS_ROOT;
 
 let pass = 0;
 const failures = [];
@@ -367,12 +366,9 @@ async function inspectPage(url) {
 }
 
 async function main() {
-  // Never touch the person's real schedules or spend limits: the server this
-  // suite boots runs the schedule ticker, and would otherwise fire them.
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'orderly-smoke-'));
-  process.env.ORDERLY_SCHEDULES_DIR = path.join(scratch, 'data');
-  process.env.ORDERLY_SETTINGS_FILE = path.join(scratch, 'data', 'settings.json');
-  console.log('\nCore\n');
+  // Schedules, settings, runs, sessions and workflows all live in the
+  // scratch world, so the schedule ticker the server runs fires nothing real.
+  console.log(`\nCore (scratch world: ${world.home})\n`);
 
   const ops = lineDiff('a\nb\nc', 'a\nX\nc');
   check('diff finds one changed line', diffStats(ops).added === 1 && diffStats(ops).removed === 1);
@@ -413,6 +409,8 @@ async function main() {
   const history = buildFileHistory(target.records);
   const withChanges = target.steps.filter((s) => stepChanges(history, target.meta.sessionId, s, target.meta.cwd).length);
   check('file changes resolve for at least one step', withChanges.length > 0, `${withChanges.length} steps`);
+  // A stored before/after on the edit, so the swipe checks have one to drag.
+  if (withChanges.length) world.seedShotPair(withChanges[0].id);
 
   // Steps where Claude stopped and needed the person are the ones that will
   // not move on their own, so they have to be recognisable.
@@ -629,8 +627,15 @@ async function main() {
 
   console.log('\nCapture targeting\n');
 
+  // A listener of the suite's own, so this does not lean on whatever else
+  // happens to be running on the machine.
+  const ownListener = net.createServer();
+  await new Promise((r) => ownListener.listen(0, '127.0.0.1', r));
+  const ownPort = ownListener.address().port;
   const listening = listeningServers();
-  check('listening ports are discoverable', listening.length > 0, `${listening.length} found`);
+  ownListener.close();
+  check('listening ports are discoverable',
+    listening.some((l) => l.port === ownPort), `${listening.length} found`);
   check('every row names its process', listening.every((l) => l.pid > 0 && typeof l.command === 'string'));
   check('browsers are excluded as capture targets',
     !listening.some((l) => /chrome|chromium|firefox|safari/i.test(l.command)),
@@ -652,8 +657,8 @@ async function main() {
     capture: false,
   });
   const base = `http://127.0.0.1:${port}`;
-  // Runs this suite starts land in the real project's Runs page; remember
-  // when it began so they can be removed again at the end.
+  // Runs land in the scratch world, but remove them through the API anyway,
+  // which exercises DELETE; remember when the suite began.
   const suiteStartedAt = new Date(Date.now() - 1000).toISOString();
   const get = (p) => fetch(base + p).then((r) => r.json());
 
@@ -752,12 +757,12 @@ async function main() {
 
     const runs = await get('/api/runs');
     check('GET /api/runs lists the new run',
-      runs.runs.some((r) => r.runId === started.run.runId));
+      runs.runs.some((r) => r.runId === started.run?.runId));
     check('run summaries carry progress fields',
       runs.runs.every((r) => typeof r.totalNodes === 'number' && typeof r.doneNodes === 'number'));
 
-    const one2 = await get(`/api/runs/${started.run.runId}`);
-    check('GET /api/runs/:id reads the full run back', one2.run?.runId === started.run.runId);
+    const one2 = await get(`/api/runs/${started.run?.runId}`);
+    check('GET /api/runs/:id reads the full run back', one2.run?.runId === started.run?.runId);
 
     // Scheduler should march the graph without any client help. Poll until the
     // run reaches a terminal state or the budget elapses.
@@ -767,7 +772,7 @@ async function main() {
     const budget = Date.now() + 15000;
     while (Date.now() < budget) {
       await sleep(200);
-      const r = (await get(`/api/runs/${started.run.runId}`)).run;
+      const r = (await get(`/api/runs/${started.run?.runId}`)).run;
       if (r && (r.status === 'done' || r.status === 'failed' || r.status === 'stopped')) {
         finished = r; break;
       }
@@ -801,7 +806,7 @@ async function main() {
     check('pageProblem: a real page is fine', pageProblem({ status: 200, textLength: 120, elements: 12, images: 1 }) === null);
 
     // POST /stop on a finished run is a no-op; use it just to assert the route is wired.
-    const stopResp = await fetch(`${base}/api/runs/${started.run.runId}/stop`, {
+    const stopResp = await fetch(`${base}/api/runs/${started.run?.runId}/stop`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
     });
     check('POST /api/runs/:id/stop returns 404 once the scheduler is gone', stopResp.status === 404);
@@ -823,7 +828,7 @@ async function main() {
     check('tampered token is rejected', tampered.status === 410, String(tampered.status));
 
     // Share a run — same signed-token mechanism.
-    const shareRun = await fetch(`${base}/api/runs/${started.run.runId}/share`, {
+    const shareRun = await fetch(`${base}/api/runs/${started.run?.runId}/share`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
     }).then((r) => r.json());
     check('POST /api/runs/:id/share returns a run token',
@@ -1069,11 +1074,11 @@ async function main() {
     const askBudget = Date.now() + 5000;
     while (Date.now() < askBudget) {
       await sleep(100);
-      const r = (await get(`/api/runs/${routeStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${routeStart.run?.runId}`)).run;
       if (r?.status === 'awaiting-answer') { askReady = r; break; }
     }
     check('decision opens an awaiting-answer slot', !!askReady, askReady?.status);
-    await fetch(`${base}/api/runs/${routeStart.run.runId}/answer`, {
+    await fetch(`${base}/api/runs/${routeStart.run?.runId}/answer`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ nodeId: 'pick', answer: 'yes' }),
     });
@@ -1081,7 +1086,7 @@ async function main() {
     const routedBudget = Date.now() + 5000;
     while (Date.now() < routedBudget) {
       await sleep(100);
-      const r = (await get(`/api/runs/${routeStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${routeStart.run?.runId}`)).run;
       if (r && ['done', 'failed', 'stopped'].includes(r.status)) { routed = r; break; }
     }
     check('routed run finishes done', routed?.status === 'done',
@@ -1116,7 +1121,7 @@ async function main() {
     const gateBudget = Date.now() + 5000;
     while (Date.now() < gateBudget) {
       await sleep(100);
-      const r = (await get(`/api/runs/${gateStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${gateStart.run?.runId}`)).run;
       if (r && ['done', 'failed', 'stopped'].includes(r.status)) { gated = r; break; }
     }
     check('failing check stops the run as failed', gated?.status === 'failed',
@@ -1167,10 +1172,9 @@ async function main() {
       pubGood.length === 0, pubGood.join('; '));
 
     // End-to-end: an mcp call with a configured command runs and returns stdout.
-    const repoRootForMcp = fileURLToPath(new URL('../', import.meta.url));
-    const mcpFile = path.join(repoRootForMcp, '.claude', 'mcp.json');
-    const hadMcp = fs.existsSync(mcpFile);
-    const priorMcp = hadMcp ? fs.readFileSync(mcpFile, 'utf8') : null;
+    // The server reads .claude/mcp.json from the project it was booted on.
+    const mcpFile = path.join(world.repo, '.claude', 'mcp.json');
+    fs.mkdirSync(path.dirname(mcpFile), { recursive: true });
     fs.writeFileSync(mcpFile, JSON.stringify({
       test: { echo: 'echo tool={{tool}} name={{name}}' },
     }, null, 2));
@@ -1193,7 +1197,7 @@ async function main() {
     const mcpBudget = Date.now() + 4000;
     while (Date.now() < mcpBudget) {
       await sleep(100);
-      const r = (await get(`/api/runs/${mcpStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${mcpStart.run?.runId}`)).run;
       if (r && ['done', 'failed', 'stopped'].includes(r.status)) { mcpDone = r; break; }
     }
     check('mcp run finishes done', mcpDone?.status === 'done', mcpDone?.status);
@@ -1201,9 +1205,7 @@ async function main() {
     check('mcp invokes the configured command',
       mcpOut?.ok === true && /tool=echo name=smoke/.test(mcpOut?.out || ''),
       JSON.stringify(mcpOut).slice(0, 200));
-    // Clean up mcp.json fixture.
-    if (priorMcp) fs.writeFileSync(mcpFile, priorMcp);
-    else try { fs.unlinkSync(mcpFile); } catch {}
+    try { fs.unlinkSync(mcpFile); } catch {}
     try { fs.unlinkSync(mcpSaved.file); } catch {}
 
     // Unconfigured mcp call returns ok:false with a reason, not a crash.
@@ -1226,7 +1228,7 @@ async function main() {
     const mmBudget = Date.now() + 3000;
     while (Date.now() < mmBudget) {
       await sleep(100);
-      const r = (await get(`/api/runs/${mmStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${mmStart.run?.runId}`)).run;
       if (r && ['done', 'failed', 'stopped'].includes(r.status)) { mmDone = r; break; }
     }
     const mmOut = mmDone?.graph.nodes.find((n) => n.id === 'call')?.output;
@@ -1321,7 +1323,7 @@ async function main() {
       const until = Date.now() + 6000;
       while (Date.now() < until) {
         await sleep(100);
-        const r = (await get(`/api/runs/${started.run.runId}`)).run;
+        const r = (await get(`/api/runs/${started.run?.runId}`)).run;
         if (r && ['done', 'failed', 'stopped'].includes(r.status)) { finished = r; break; }
       }
       try { fs.unlinkSync(saved.file); } catch {}
@@ -1354,7 +1356,7 @@ async function main() {
 
     // Worktree helper: round-trip create+remove.
     const { createWorktree, removeWorktree } = await import('../src/core/worktree.mjs');
-    const repoRoot = fileURLToPath(new URL('../', import.meta.url));
+    const repoRoot = world.repo;
     const wt = createWorktree({ repoRoot, name: `smoke-${Date.now()}` });
     check('worktree directory exists after create',
       fs.existsSync(wt.path) && fs.statSync(wt.path).isDirectory(), wt.path);
@@ -1383,7 +1385,7 @@ async function main() {
     const wtRunBudget = Date.now() + 8000;
     while (Date.now() < wtRunBudget) {
       await sleep(100);
-      const r = (await get(`/api/runs/${wtRunStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${wtRunStart.run?.runId}`)).run;
       if (r && ['done', 'failed', 'stopped'].includes(r.status)) { wtRunDone = r; break; }
     }
     check('worktree run finishes done', wtRunDone?.status === 'done', wtRunDone?.status);
@@ -1435,7 +1437,7 @@ async function main() {
     const injStart = await fetch(`${base}/api/workflows/smoke-lesson-inject/run`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
     }).then((r) => r.json());
-    const injRun = (await get(`/api/runs/${injStart.run.runId}`)).run;
+    const injRun = (await get(`/api/runs/${injStart.run?.runId}`)).run;
     const draftNode = injRun?.graph.nodes.find((n) => n.id === 'draft');
     check('lesson prepended to node prompt',
       /Prior lessons[\s\S]*Always start with H1/.test(draftNode?.spec?.prompt || ''),
@@ -1497,11 +1499,11 @@ async function main() {
     const retroBudget = Date.now() + 3000;
     while (Date.now() < retroBudget) {
       await sleep(100);
-      const r = (await get(`/api/runs/${retroStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${retroStart.run?.runId}`)).run;
       if (r?.status === 'done') { retroDone = r; break; }
     }
     check('retro run finishes', retroDone?.status === 'done', retroDone?.status);
-    const patched = await fetch(`${base}/api/runs/${retroStart.run.runId}`, {
+    const patched = await fetch(`${base}/api/runs/${retroStart.run?.runId}`, {
       method: 'PATCH', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ rating: 'up', retro: 'Worked first try.' }),
     }).then((r) => r.json());
@@ -1559,7 +1561,7 @@ async function main() {
     const vpBudget = Date.now() + 5000;
     while (Date.now() < vpBudget) {
       await sleep(100);
-      const r = (await get(`/api/runs/${vpStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${vpStart.run?.runId}`)).run;
       if (r && ['done', 'failed', 'stopped'].includes(r.status)) { vpDone = r; break; }
     }
     check('verify pass: run finishes done', vpDone?.status === 'done', vpDone?.status);
@@ -1595,7 +1597,7 @@ async function main() {
     const vfBudget = Date.now() + 5000;
     while (Date.now() < vfBudget) {
       await sleep(100);
-      const r = (await get(`/api/runs/${vfStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${vfStart.run?.runId}`)).run;
       if (r && ['done', 'failed', 'stopped'].includes(r.status)) { vfDone = r; break; }
     }
     check('verify fail (skip): run finishes done', vfDone?.status === 'done', vfDone?.status);
@@ -1633,7 +1635,7 @@ async function main() {
     const vsBudget = Date.now() + 5000;
     while (Date.now() < vsBudget) {
       await sleep(100);
-      const r = (await get(`/api/runs/${vsStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${vsStart.run?.runId}`)).run;
       if (r && ['done', 'failed', 'stopped'].includes(r.status)) { vsDone = r; break; }
     }
     check('verify fail (stop): run status is failed',
@@ -1664,7 +1666,7 @@ async function main() {
       const until = Date.now() + 20000;
       while (Date.now() < until) {
         await sleep(150);
-        const r = (await get(`/api/runs/${st.run.runId}`)).run;
+        const r = (await get(`/api/runs/${st.run?.runId}`)).run;
         if (r && ['done', 'failed', 'stopped'].includes(r.status)) { fin = r; break; }
       }
       try { fs.unlinkSync(saved.file); } catch {}
@@ -1725,7 +1727,7 @@ async function main() {
     const loopBudget = Date.now() + 8000;
     while (Date.now() < loopBudget) {
       await sleep(100);
-      const r = (await get(`/api/runs/${loopStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${loopStart.run?.runId}`)).run;
       if (r && ['done', 'failed', 'stopped'].includes(r.status)) { looped = r; break; }
     }
     check('loop run finishes done', looped?.status === 'done', looped?.status);
@@ -1757,7 +1759,7 @@ async function main() {
     const delayBudget = Date.now() + 3000;
     while (Date.now() < delayBudget) {
       await sleep(50);
-      const r = (await get(`/api/runs/${delayStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${delayStart.run?.runId}`)).run;
       if (r && ['done', 'failed', 'stopped'].includes(r.status)) { delayed = r; break; }
     }
     check('delay run finishes done', delayed?.status === 'done', delayed?.status);
@@ -1787,11 +1789,11 @@ async function main() {
     const approveBudget = Date.now() + 3000;
     while (Date.now() < approveBudget) {
       await sleep(100);
-      const r = (await get(`/api/runs/${approveStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${approveStart.run?.runId}`)).run;
       if (r?.status === 'awaiting-answer') { approveReady = r; break; }
     }
     check('approve opens awaiting-answer', !!approveReady, approveReady?.status);
-    await fetch(`${base}/api/runs/${approveStart.run.runId}/answer`, {
+    await fetch(`${base}/api/runs/${approveStart.run?.runId}/answer`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ nodeId: 'ok', answer: 'approve' }),
     });
@@ -1799,7 +1801,7 @@ async function main() {
     const settledBudget = Date.now() + 3000;
     while (Date.now() < settledBudget) {
       await sleep(100);
-      const r = (await get(`/api/runs/${approveStart.run.runId}`)).run;
+      const r = (await get(`/api/runs/${approveStart.run?.runId}`)).run;
       if (r && ['done', 'failed', 'stopped'].includes(r.status)) { approved = r; break; }
     }
     check('approve finishes done when the user approves',
@@ -1823,7 +1825,7 @@ async function main() {
       const until = Date.now() + 4000;
       while (Date.now() < until) {
         await sleep(100);
-        const r = (await get(`/api/runs/${st.run.runId}`)).run;
+        const r = (await get(`/api/runs/${st.run?.runId}`)).run;
         if (r && ['done', 'failed'].includes(r.status)) { fin = r; break; }
       }
       try { fs.unlinkSync(saved.file); } catch {}
@@ -1848,7 +1850,7 @@ async function main() {
     const crashUntil = Date.now() + 5000;
     while (Date.now() < crashUntil) {
       await sleep(100);
-      const r = (await get(`/api/runs/${crashSt.run.runId}`)).run;
+      const r = (await get(`/api/runs/${crashSt.run?.runId}`)).run;
       if (r && ['done', 'failed'].includes(r.status)) { crashed = r; break; }
     }
     const crashOut = crashed?.graph.nodes[0]?.output || {};
@@ -1879,11 +1881,11 @@ async function main() {
     try { fs.unlinkSync(legacySaved.file); } catch {}
 
     // Rerun & delete.
-    const rerunResp = await fetch(`${base}/api/runs/${started.run.runId}/rerun`, {
+    const rerunResp = await fetch(`${base}/api/runs/${started.run?.runId}/rerun`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
     }).then((r) => r.json());
     check('POST /api/runs/:id/rerun returns a new run', !!rerunResp.run?.runId
-      && rerunResp.run.runId !== started.run.runId, rerunResp.error);
+      && rerunResp.run?.runId !== started.run?.runId, rerunResp.error);
     check('the rerun carries the same inputs', JSON.stringify(rerunResp.run.inputs) ===
       JSON.stringify(started.run.inputs));
 
@@ -1893,7 +1895,7 @@ async function main() {
     const budget2 = Date.now() + 8000;
     while (Date.now() < budget2) {
       await sleep(200);
-      const r2 = (await get(`/api/runs/${rerunResp.run.runId}`)).run;
+      const r2 = (await get(`/api/runs/${rerunResp.run?.runId}`)).run;
       if (r2 && ['done', 'failed', 'stopped'].includes(r2.status)) { settled = r2; break; }
     }
     if (settled) {
@@ -1907,9 +1909,9 @@ async function main() {
         partial.error);
     }
 
-    const delResp = await fetch(`${base}/api/runs/${rerunResp.run.runId}`, { method: 'DELETE' }).then((r) => r.json());
+    const delResp = await fetch(`${base}/api/runs/${rerunResp.run?.runId}`, { method: 'DELETE' }).then((r) => r.json());
     check('DELETE /api/runs/:id removes the folder', delResp.deleted === true, JSON.stringify(delResp));
-    const delMissing = await fetch(`${base}/api/runs/${rerunResp.run.runId}`).then((r) => r.status);
+    const delMissing = await fetch(`${base}/api/runs/${rerunResp.run?.runId}`).then((r) => r.status);
     check('deleted run returns 404', delMissing === 404, String(delMissing));
 
     // Skills — read from the two .claude/skills roots.
@@ -2302,8 +2304,7 @@ async function main() {
   const { runWorkflowEngineChecks } = await import('./workflow-engine.mjs');
   try { await runWorkflowEngineChecks({ check, session: target.meta }); }
   catch (e) { check('workflow checks ran to the end', false, e.stack || e.message); }
-  fs.rmSync(scratch, { recursive: true, force: true });
-  fs.rmSync(RUNS_ROOT, { recursive: true, force: true });
+  // The scratch world is removed when the process exits (scratch-world.mjs).
 
   console.log(`\n${pass} passed, ${failures.length} failed\n`);
   if (failures.length) {
