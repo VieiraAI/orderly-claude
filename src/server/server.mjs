@@ -26,6 +26,7 @@ import {
 } from '../core/workflows.mjs';
 import { suggestWorkflows } from '../core/workflow-suggest.mjs';
 import { Scheduler } from '../core/workflow-runner.mjs';
+import { redoPrompt, redoPicture, applyRedo } from '../core/workflow-handlers.mjs';
 import { resolveText, referenceFields } from '../core/refs.mjs';
 import { readSettings, writeSettings, runSpend } from '../core/settings.mjs';
 import {
@@ -337,6 +338,10 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
     if (!run.ownerPid || run.ownerPid === process.pid) return false;
     try { process.kill(run.ownerPid, 0); return true; } catch { return false; }
   }
+  // Pictures being drawn again, by run: "nodeId\nname" → { status, error }.
+  // Kept in memory only; a redraw cut short by a restart is simply gone.
+  const redos = new Map();
+
   function startScheduler(run) {
     const s = new Scheduler(run);
     s.on('update', (e) => broadcast('update', { runId: e.runId, nodeId: e.nodeId || null }));
@@ -976,6 +981,44 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         } catch (e) { return send(400, { error: e.message }); }
       }
 
+      // Draw one of a step's pictures again from an edited prompt. GET reads
+      // the prompt that drew it; POST starts the redraw and answers at once,
+      // since drawing takes minutes. The run page follows it through `redos`.
+      const runRedoMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/nodes\/([^/]+)\/redo$/);
+      if (runRedoMatch && (req.method === 'GET' || req.method === 'POST')) {
+        const [, id, nodeId] = runRedoMatch.map(decodeURIComponent);
+        const live = schedulers.get(id);
+        const run = live ? live.run : readRun(id, { repoRoot: liveCwd });
+        if (!run) return send(404, { error: 'run not found' });
+        const currentDef = getDefinition(run.workflowId, { repoRoot: run.repoRoot || liveCwd });
+        if (req.method === 'GET') {
+          try { return send(200, { prompt: redoPrompt(run, nodeId, url.searchParams.get('name') || '', currentDef) }); }
+          catch (e) { return send(400, { error: e.message }); }
+        }
+        const body = await readBody(req).catch(() => ({}));
+        const name = String(body.name || '');
+        if (!live && ownedElsewhere(run)) return send(409, { error: 'Another Orderly window is running this — redo it there' });
+        const key = `${nodeId}\n${name}`;
+        const mine = redos.get(id) || new Map();
+        if (mine.get(key)?.status === 'drawing') return send(409, { error: `${name} is already being drawn again` });
+        // Checked here, not only when drawing starts, so a bad request fails now.
+        try { redoPrompt(run, nodeId, name, currentDef); } catch (e) { return send(400, { error: e.message }); }
+        mine.set(key, { nodeId, name, status: 'drawing', at: new Date().toISOString() });
+        redos.set(id, mine);
+        broadcast('update', { runId: id, nodeId });
+        redoPicture(run, nodeId, name, body.prompt, { currentDef }).then((ref) => {
+          // The run may have been resumed or rerun meanwhile: put the new
+          // picture on whatever copy is current now.
+          const s = schedulers.get(id);
+          const now = s ? s.run : readRun(id, { repoRoot: liveCwd });
+          if (now && applyRedo(now, nodeId, name, ref)) writeRun(now);
+          mine.delete(key);
+        }, (e) => {
+          mine.set(key, { nodeId, name, status: 'failed', error: e.message, at: new Date().toISOString() });
+        }).finally(() => broadcast('update', { runId: id, nodeId }));
+        return send(202, { drawing: true });
+      }
+
       const runRerunMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/rerun$/);
       if (runRerunMatch && req.method === 'POST') {
         const body = await readBody(req).catch(() => ({}));
@@ -1176,6 +1219,11 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
           question: openQuestion(run) || legacyQuestion(run),
           live: schedulers.has(run.runId),
           ownedElsewhere: ownedElsewhere(run),
+          redos: [...(redos.get(run.runId)?.values() || [])],
+          // Steps whose pictures can be drawn one at a time: by the run's own
+          // copy of the step, or by the workflow as it is now.
+          redoSteps: (run.graph?.nodes || []).filter((n) => n.spec?.redo?.cmd
+            || def?.graph?.nodes?.some((d) => d.id === n.id && d.kind === n.kind && d.spec?.redo?.cmd)).map((n) => n.id),
         });
       }
       // Rate a run and leave a one-line retrospective. Used by the end-of-run

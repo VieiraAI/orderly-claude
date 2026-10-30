@@ -869,3 +869,42 @@ button.stat:hover { background: var(--raised); }
   background: none; color: var(--mute); font-size: 13px; line-height: 1; }
 .pv-pager button:hover:not(:disabled) { border-color: var(--edge-hi); color: var(--text); }
 .pv-pager button:disabled { opacity: .35; cursor: default; }
+
+/* ---- Draw one picture again: Redo on each picture, and its editor ---- */
+.pv-tile { position: relative; }
+.dr-shown figure { position: relative; }
+.pv-redo { position: absolute; top: 6px; right: 6px; font: 10.5px var(--f-mono); color: var(--text);
+  background: color-mix(in oklab, var(--surface) 88%, transparent); border: 1px solid var(--edge-hi);
+  border-radius: 999px; padding: 3px 9px; cursor: pointer; opacity: 0; transition: opacity .14s var(--ease), border-color .14s var(--ease); }
+.pv-tile:hover .pv-redo, .dr-shown figure:hover .pv-redo, .pv-redo:focus-visible, .pv-redo.bad { opacity: 1; }
+.pv-redo:hover { border-color: var(--accent); }
+.pv-redo.bad { color: var(--ship); border-color: color-mix(in oklab, var(--ship) 40%, transparent); }
+.pv-redoing { position: absolute; top: 6px; right: 6px; display: inline-flex; align-items: center; gap: 6px;
+  font: 10.5px var(--f-mono); color: var(--accent); background: color-mix(in oklab, var(--surface) 88%, transparent);
+  border: 1px solid var(--edge-tint); border-radius: 999px; padding: 3px 9px; }
+.pv-stale { margin-top: 8px; font-size: 11.5px; line-height: 1.5; color: var(--amber); }
+.pv-stale .run-btn { margin-left: 4px; }
+@media (hover: none) { .pv-redo { opacity: 1; } }
+
+.redo-dlg { width: min(1180px, 94vw); max-height: 92vh; padding: 0; border: 1px solid var(--edge-strong); border-radius: 10px;
+  background: var(--surface); color: var(--text); font-family: var(--f-ui); }
+.redo-dlg::backdrop { background: color-mix(in oklab, var(--bg) 72%, transparent); }
+.redo-dlg[open] { display: flex; flex-direction: column; }
+.redo-head { display: flex; align-items: flex-start; justify-content: space-between; padding: 18px 22px 0; }
+.redo-head .dr-title { margin-bottom: 14px; }
+.redo-head .x { background: transparent; border: 0; color: var(--mute); font-size: 22px; cursor: pointer; }
+.redo-head .x:hover { color: var(--text); }
+.redo-main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; padding: 0 22px; min-height: 0; }
+.redo-pic { display: block; border: 1px solid var(--edge-tint); border-radius: 8px; overflow: hidden; background: #fff; align-self: start; }
+.redo-pic img { display: block; width: 100%; max-height: 68vh; object-fit: contain; }
+.redo-edit { display: flex; flex-direction: column; min-height: 0; }
+.redo-edit textarea { flex: 1; min-height: 360px; resize: none; padding: 12px 14px; border: 1px solid var(--edge-tint); border-radius: 8px;
+  background: var(--bg); color: var(--text); font: 13px/1.55 var(--f-ui); outline: none; }
+.redo-edit textarea:focus { border-color: var(--accent); }
+.redo-edit textarea:disabled { opacity: .6; }
+.redo-foot { display: flex; align-items: center; gap: 8px; padding: 14px 22px 18px; }
+.redo-note { flex: 1; font-size: 12px; color: var(--mute); line-height: 1.45; }
+.redo-note.bad { color: var(--ship); }
+.run-btn.go { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+.run-btn.go:hover { color: var(--accent-ink); filter: brightness(1.06); }
+@media (max-width: 760px) { .redo-main { grid-template-columns: 1fr; } .redo-edit textarea { min-height: 220px; } }

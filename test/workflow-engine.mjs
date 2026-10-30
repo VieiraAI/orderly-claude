@@ -356,6 +356,60 @@ export async function runWorkflowEngineChecks({ check, session }) {
     check('a running step shows the last lines it printed', seen.some((x) => /page \d: live\/p\d\.png/.test(x.out)),
       JSON.stringify(seen.map((x) => x.out).filter(Boolean).slice(-1)));
 
+    /* --------------------------- redo one picture --------------------------- */
+    console.log('\nWorkflows: redo one picture\n');
+    {
+
+    // A step that draws two pictures, each with its prompt beside it, and
+    // can draw one again: the redo copies the prompt it was given beside the
+    // picture and makes the picture different, so a change can be seen.
+    fs.writeFileSync(path.join(repo, 'two.png'), Buffer.concat([Buffer.from(png, 'base64'), Buffer.from('x')]));
+    await save({ id: 'redo', title: 'Redo', graph: { nodes: [
+      script('art', `mkdir -p art && for p in a b; do echo ${png} | base64 -d > art/$p.png; echo "prompt $p" > art/$p.prompt.txt; done`,
+        { show: 'art/*.png', redo: { cmd: 'cp {{redo.prompt}} "$(dirname {{redo.file}})/$(basename {{redo.file}} .png).prompt.txt" && cp two.png {{redo.file}} && echo {{inputs.who}} > redo-by.txt' } }),
+      script('after', 'true'),
+    ], edges: [['art', 'after']] } });
+    r = await until((await start('redo', { who: 'me; rm -rf x' })).run.runId, settled);
+    const redoId = r.runId;
+    let meta = await api(`/api/runs/${redoId}`);
+    check('a step with a redo is listed as able to draw single pictures', meta.redoSteps?.join() === 'art', JSON.stringify(meta.redoSteps));
+    const got = await api(`/api/runs/${redoId}/nodes/art/redo?name=${encodeURIComponent('art/a.png')}`);
+    check('the prompt that drew a picture is read from beside it', got.prompt === 'prompt a\n', JSON.stringify(got));
+    const before = node(r, 'art').output.images.map((m) => m.ref);
+    const started = await api(`/api/runs/${redoId}/nodes/art/redo`, { body: { name: 'art/a.png', prompt: "it's a new prompt" } });
+    check('a redo starts at once and says so', started.status === 202 && started.drawing === true, JSON.stringify(started));
+    meta = await (async () => {
+      const end = Date.now() + 8000;
+      let m = null;
+      while (Date.now() < end) { m = await api(`/api/runs/${redoId}`); if (!m.redos?.length) break; await sleep(80); }
+      return m;
+    })();
+    const after = node(meta.run, 'art').output.images.map((m) => m.ref);
+    check('only the picture asked for is drawn again', after[0] !== before[0] && after[1] === before[1], JSON.stringify({ before, after }));
+    check('the edited prompt reaches the command whole',
+      fs.readFileSync(path.join(repo, 'art', 'a.prompt.txt'), 'utf8') === "it's a new prompt");
+    check('run inputs in a redo command are quoted', fs.readFileSync(path.join(repo, 'redo-by.txt'), 'utf8').trim() === 'me; rm -rf x');
+    check('the run notes when the picture was drawn again', !!node(meta.run, 'art').output.redone?.['art/a.png']);
+    const bad = await api(`/api/runs/${redoId}/nodes/art/redo`, { body: { name: '../outside.png', prompt: 'x' } });
+    check('only a picture the step showed can be drawn again', bad.status === 400 && /not one of the pictures/.test(bad.error || ''), JSON.stringify(bad));
+    const none = await api(`/api/runs/${redoId}/nodes/after/redo`, { body: { name: 'art/a.png', prompt: 'x' } });
+    check('a step without a redo refuses one', none.status === 400 && /cannot draw single pictures/.test(none.error || ''), JSON.stringify(none));
+    fs.writeFileSync(path.join(repo, 'two.png'), '');
+    await save({ id: 'redo-fail', title: 'Redo fail', graph: { nodes: [
+      script('art', `mkdir -p art && echo ${png} | base64 -d > art/a.png`, { show: 'art/a.png', redo: { cmd: 'echo "no credits left" >&2; exit 3' } }),
+    ], edges: [] } });
+    const failId = (await until((await start('redo-fail')).run.runId, settled)).runId;
+    await api(`/api/runs/${failId}/nodes/art/redo`, { body: { name: 'art/a.png', prompt: 'x' } });
+    const failMeta = await (async () => {
+      const end = Date.now() + 8000;
+      let m = null;
+      while (Date.now() < end) { m = await api(`/api/runs/${failId}`); if (m.redos?.[0]?.status === 'failed') break; await sleep(80); }
+      return m;
+    })();
+    check('a failed redo says why, and leaves the picture as it was',
+      /no credits left/.test(failMeta.redos?.[0]?.error || '') && !failMeta.run.graph.nodes[0].output.redone, JSON.stringify(failMeta.redos));
+    }
+
     /* ------------------------------ verify retries ---------------------------- */
     console.log('\nWorkflows: verify retries\n');
 
