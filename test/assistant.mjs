@@ -195,7 +195,10 @@ async function panelChecks({ check, base, repo }) {
     try { await cdp.once('Page.loadEventFired', sessionId, 9000); } catch { /* streams */ }
     await sleep(900);
 
-    let r = await ev(`document.getElementById('btnClaude').click(); await new Promise((r) => setTimeout(r, 700));
+    let r = await ev(`const b = document.getElementById('btnClaude').getBoundingClientRect(), z = document.querySelector('.zoom-bar').getBoundingClientRect();
+      return { inHeader: !!document.querySelector('.wf-header #btnClaude'), right: innerWidth - b.right, bottom: innerHeight - b.bottom, clear: z.right <= b.left };`);
+    check('Ask Claude sits in the bottom-right corner, clear of the zoom bar', !r.inHeader && r.right < 40 && r.bottom < 40 && r.clear, JSON.stringify(r));
+    r = await ev(`document.getElementById('btnClaude').click(); await new Promise((r) => setTimeout(r, 700));
       const a = document.querySelector('.oc-assist');
       return { open: a.classList.contains('open'), docked: document.body.classList.contains('assist-open'), title: a.querySelector('.oa-empty h3')?.textContent,
         ideas: a.querySelectorAll('.oa-suggest button').length, focus: document.activeElement?.id };`);

@@ -5,7 +5,7 @@ understand the workflow in front of them.
 
 ## What a person sees
 
-- **Ask Claude**, first in the editor's toolbar (⌘J). A panel docks on the
+- **Ask Claude**, a button in the bottom-right corner of the canvas (⌘J). A panel docks on the
   right and the editor moves over to make room, so nothing Claude proposes can
   land out of sight.
 - The conversation reads exactly like the Sessions page: avatars, names and
