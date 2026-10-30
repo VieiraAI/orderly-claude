@@ -98,6 +98,11 @@ runs on your machine.
   using the last run. Naming a step that runs later is caught before you
   can save. A value put into a shell command is quoted, so a model's output
   can never become a command.
+- **A workflow can ship its own scripts.** Name a folder in its `files`
+  field, put the folder beside the workflow's JSON, and steps call it as
+  `{{workflow.files}}`. The built-in *Make a personalised picture book* works
+  this way: a Python script turns photos and a story idea into character
+  sheets, page art and a print-ready PDF, with an approval at each stage.
 - **Failures fail.** A command that exits non-zero fails its step, as in any
   build system — tick *keep going* to let a later Check look at it instead.
   Steps can retry with a growing wait, give up after a set time, and a run

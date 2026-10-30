@@ -56,6 +56,9 @@ function resolveOrFail(text, ctx, node, opts = {}) {
   if (holes.length) {
     throw final(`${holes.join(', ')} ${holes.length === 1 ? 'was' : 'were'} empty when "${node.title || node.id}" started — check that the step it names produced that field`);
   }
+  if (missing.some((m) => /\{\{\s*workflow\.files/.test(m))) {
+    throw final(`"${node.title || node.id}" uses {{workflow.files}}, but the workflow names no files folder, or that folder is not there`);
+  }
   return out;
 }
 

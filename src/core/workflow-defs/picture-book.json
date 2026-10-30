@@ -1,0 +1,328 @@
+{
+  "schemaVersion": 2,
+  "id": "picture-book",
+  "title": "Make a personalised picture book",
+  "category": "content",
+  "estimate": "about 30 min plus your reviews",
+  "desc": "Photos of the hero become a character sheet; a prompt becomes a reviewed story; then page art, then a print-ready PDF with the words set. You approve each stage. Draws with the Higgsfield CLI (images live) or free placeholders (images mock); needs Python 3 with Pillow.",
+  "whenToUse": "Make an illustrated children's book about a real person: 1–3 photos of them are in books/<book>/photos/ and you have the story idea.",
+  "tags": [
+    "book",
+    "children",
+    "story",
+    "character sheet",
+    "higgsfield",
+    "print"
+  ],
+  "budgetUsd": 4,
+  "inputs": [
+    {
+      "key": "book",
+      "label": "Book folder (photos go in books/<this>/photos/ first)",
+      "placeholder": "ava-dragon-2026-10"
+    },
+    {
+      "key": "title",
+      "label": "Book title (lettered on the front cover)",
+      "placeholder": "G-Pa and the Hare"
+    },
+    {
+      "key": "name",
+      "label": "Hero's name, as the book calls them",
+      "placeholder": "G-Pa"
+    },
+    {
+      "key": "age",
+      "label": "Reader's age (sets words per page and type size)",
+      "placeholder": "4"
+    },
+    {
+      "key": "prompt",
+      "label": "What is the story about?",
+      "placeholder": "Ava finds a shy dragon in the garden shed and helps it learn to fly",
+      "textarea": true
+    },
+    {
+      "key": "style",
+      "label": "Art style",
+      "placeholder": "Soft gouache, warm light, gentle textures",
+      "textarea": true
+    },
+    {
+      "key": "style_refs",
+      "label": "Style picture folder (optional; leave blank to go by the style words alone)",
+      "placeholder": "books/style-guide"
+    },
+    {
+      "key": "pages",
+      "label": "Pages, one picture each (blank means 16)",
+      "placeholder": "16"
+    },
+    {
+      "key": "trim",
+      "label": "Page size in inches, square, before bleed (blank means 8.5)",
+      "placeholder": "8.5"
+    },
+    {
+      "key": "images",
+      "label": "Images: live (Higgsfield, costs credits) or mock (free placeholders). Blank means mock",
+      "placeholder": "mock"
+    }
+  ],
+  "graph": {
+    "nodes": [
+      {
+        "id": "init",
+        "title": "Set up the book",
+        "kind": "script",
+        "col": 0,
+        "row": 0,
+        "spec": {
+          "cmd": "sh {{workflow.files}}/book.sh init {{inputs.book}} --title {{inputs.title}} --name {{inputs.name}} --age {{inputs.age}} --pages {{inputs.pages}} --trim {{inputs.trim}} --style {{inputs.style}} --style-refs {{inputs.style_refs}} --images {{inputs.images}}",
+          "timeoutMs": 60000
+        }
+      },
+      {
+        "id": "describe",
+        "title": "Describe the hero",
+        "kind": "agent",
+        "col": 1,
+        "row": 0,
+        "spec": {
+          "model": "sonnet",
+          "output": "json",
+          "prompt": "Read books/{{inputs.book}}/book.json. Its `photos` field lists 1–3 photos of the hero, a real person of any age. Open each photo with the Read tool and look at it.\n\nDescribe them so an illustrator can draw the same person on every page in this style: {{inputs.style}}. Other people and objects in the photos are not part of the book; ignore them.\nDescribe only what can be seen and drawn: apparent age, build, skin tone, face shape, eye colour, hair (or no hair), facial hair, glasses, freckles, and anything else that makes them recognisable. Do not guess at identity, ethnicity, health or anything not visible. Do not copy the photos anywhere.\n\nReturn {\"appearance\": \"<one dense sentence, drawable>\", \"outfit\": \"<one outfit based on what they wear in the photos, that suits the story: {{inputs.prompt}}>\", \"keep_the_same\": [\"<3–5 details that must not change between pages>\"]}."
+        }
+      },
+      {
+        "id": "save-character",
+        "title": "Save the description",
+        "kind": "publish",
+        "col": 2,
+        "row": 0,
+        "spec": {
+          "target": "file",
+          "path": "books/{{inputs.book}}/character.json",
+          "content": "{{nodes.describe.output.data}}"
+        }
+      },
+      {
+        "id": "sheet",
+        "title": "Draw the character sheets",
+        "kind": "script",
+        "col": 5,
+        "row": 0,
+        "spec": {
+          "cmd": "sh {{workflow.files}}/book.sh sheet {{inputs.book}}",
+          "redo": {
+            "cmd": "sh {{workflow.files}}/book.sh redraw {{inputs.book}} {{redo.file}} --prompt-file {{redo.prompt}}",
+            "timeoutMs": 1200000
+          },
+          "show": "books/{{inputs.book}}/sheet/*.png",
+          "timeoutMs": 1800000
+        }
+      },
+      {
+        "id": "sheet-ok",
+        "title": "Approve the characters",
+        "kind": "approve",
+        "col": 6,
+        "row": 0,
+        "spec": {
+          "question": "Does the hero sheet look like {{inputs.name}}, does every character stay the same in every view, and do they match the art style? To redo one: reject, delete its picture in books/{{inputs.book}}/sheet/, then Retry from \"Draw the character sheets\"."
+        }
+      },
+      {
+        "id": "story",
+        "title": "Write and review the story",
+        "kind": "agent",
+        "col": 1,
+        "row": 1,
+        "spec": {
+          "model": "sonnet",
+          "output": "json",
+          "prompt": "Write a personalised children's picture book.\n\nThe book's title is exactly \"{{inputs.title}}\". Do not change it.\nThe hero: {{inputs.name}}, a real person who will be drawn from photos. They can be any age. The book is for a reader aged {{inputs.age}}.\nWhat the story is about: {{inputs.prompt}}\nArt style it will be drawn in: {{inputs.style}}\nLength: exactly {{inputs.pages}} pages, one picture per page.\n\nRules for every page:\n- Word limit per page by the reader's age: 35 words at age 4 or under, 60 at 5–6, 90 at 7–8, 120 at 9 and over.\n- The book is read aloud to the reader. Use words they hear every day and short sentences. Rhythm, sound words and a little repetition are good.\n- The story has a clear beginning, a problem, a turn, and a warm ending on the last page that settles the problem. Each page leads to the next.\n- Keep it consistent: a character only refers to something that happened on an earlier page, places stay where they were, and nobody arrives somewhere without a page or a line that gets them there.\n- While the story should be compelling and consistent, pages should include variation to keep it interesting.\n- {{inputs.name}} is the heart of the book: in most pictures, and the one whose choices drive the story.\n- `cast` lists every other recurring character, at most 3, each with a `look`: one dense, drawable sentence (species or kind, build, colours, one clothing item) that never changes.\n- `scene` describes the one picture for that page for an illustrator: where, what {{inputs.name}} is doing, who else is there, mood, time of day. Draw {{inputs.name}} and at most one other cast member; background creatures stay small and unnamed. Put the characters away from the `text_zone` side. Never ask for words, signs or letters in the picture.\n- `cover` describes the covers. `front_scene`: one picture of {{inputs.name}} that sums up the story, with room at the top for the title. `back_scene`: a quieter picture with plenty of open space at the top. `back_text`: two or three short sentences for the back cover that make someone want to read the book, without giving away the ending.\n- `characters` lists the names, exactly as in `cast` or \"{{inputs.name}}\", of everyone drawn on that page.\n- `text_zone` is \"top\" or \"bottom\": the part of the picture kept calm for the words. Pick the one the scene leaves empty, e.g. \"top\" for sky.\n- Nothing frightening for the age, no brands, no real people other than the hero, no copied characters from existing books or films. Retelling a traditional fable is fine; write your own words.\n\nReturn {\"brief\": {\"name\", \"age\", \"pages\", \"prompt\"}, \"title\", \"cover\": {\"front_scene\", \"back_scene\", \"back_text\"}, \"cast\": [{\"name\", \"look\"}], \"pages\": [{\"page\", \"text\", \"scene\", \"text_zone\", \"characters\"}]}. `title` is \"{{inputs.title}}\", unchanged. Copy the brief exactly from above, with age and pages as numbers. Number pages from 1.",
+          "verify": {
+            "maxRetries": 3,
+            "onFail": "continue",
+            "asserts": [
+              {
+                "type": "llm-judge",
+                "model": "sonnet",
+                "rubric": "Fit with the prompt. The story is clearly about `brief.prompt`, keeps what it asks for, and `brief.name` is the hero: in most pages, and the one who makes the key choice. Nothing in it contradicts the prompt. Fail only for a problem a parent reading the book would notice; style preferences are not failures. Name the page and the fix."
+              },
+              {
+                "type": "llm-judge",
+                "model": "sonnet",
+                "rubric": "Read-aloud language. The book is read aloud to a child of `brief.age`, not read alone. Fail only for a word or phrase that child would not understand when hearing it, a sentence too long to follow by ear, a change of tense, or markdown or stage directions in the text. Everyday questions, exclamations, sound words and repetition are good, not failures. Fail only for a problem a parent reading the book would notice; style preferences are not failures. Name the page and the fix."
+              },
+              {
+                "type": "llm-judge",
+                "model": "sonnet",
+                "rubric": "Story flow. There is a beginning, a problem, a turn and a warm ending that settles the problem. Fail for a continuity error: a line that refers to something that never happened, a character or place that changes without reason, a jump in place or time with nothing to explain it, or two pages telling the same event. Fail only for a problem a parent reading the book would notice; style preferences are not failures. Name the page and the fix."
+              },
+              {
+                "type": "llm-judge",
+                "model": "sonnet",
+                "rubric": "Drawable scenes. Each `scene` is one moment an illustrator could draw, shows what that page's text says, never asks for words or letters in the picture, and does not put a character or key detail in the `text_zone` side. Fail only for a problem a parent reading the book would notice; style preferences are not failures. Name the page and the fix."
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "save-story",
+        "title": "Save the story",
+        "kind": "publish",
+        "col": 2,
+        "row": 1,
+        "spec": {
+          "target": "file",
+          "path": "books/{{inputs.book}}/story.json",
+          "content": "{{nodes.story.output.data}}"
+        }
+      },
+      {
+        "id": "check",
+        "title": "Check text fits the page",
+        "kind": "script",
+        "col": 3,
+        "row": 1,
+        "spec": {
+          "cmd": "sh {{workflow.files}}/book.sh check {{inputs.book}}",
+          "timeoutMs": 60000
+        }
+      },
+      {
+        "id": "story-ok",
+        "title": "Approve the story",
+        "kind": "approve",
+        "col": 4,
+        "row": 1,
+        "spec": {
+          "question": "Approve \"{{nodes.story.output.data.title}}\"? The full text and the reviewers' notes are on the \"Write and review the story\" step; if a reviewer did not pass it, check that note first. To rewrite it: reject, then Retry from that step."
+        }
+      },
+      {
+        "id": "save-approved",
+        "title": "Save the approved story",
+        "kind": "publish",
+        "col": 5,
+        "row": 1,
+        "spec": {
+          "target": "file",
+          "path": "books/{{inputs.book}}/story.json",
+          "content": "{{nodes.story.output.data}}"
+        }
+      },
+      {
+        "id": "draw",
+        "title": "Draw the page art",
+        "kind": "script",
+        "col": 7,
+        "row": 0,
+        "spec": {
+          "cmd": "sh {{workflow.files}}/book.sh draw {{inputs.book}}",
+          "redo": {
+            "cmd": "sh {{workflow.files}}/book.sh redraw {{inputs.book}} {{redo.file}} --prompt-file {{redo.prompt}}",
+            "timeoutMs": 1200000
+          },
+          "show": "books/{{inputs.book}}/art/cover-front.png, books/{{inputs.book}}/art/0*.png, books/{{inputs.book}}/art/1*.png, books/{{inputs.book}}/art/2*.png, books/{{inputs.book}}/art/3*.png, books/{{inputs.book}}/art/cover-back.png",
+          "timeoutMs": 3600000
+        }
+      },
+      {
+        "id": "art-ok",
+        "title": "Approve the art",
+        "kind": "approve",
+        "col": 8,
+        "row": 0,
+        "spec": {
+          "question": "Are the covers and every page's art right: same characters as their sheets, matches the story, no stray text, the text area calm? See books/{{inputs.book}}/art/contact-sheet.png for all pages. To redo pages: reject, delete their pictures in books/{{inputs.book}}/art/, then Retry from \"Draw the page art\"; only the missing pages are drawn."
+        }
+      },
+      {
+        "id": "typeset",
+        "title": "Set the words on the pages",
+        "kind": "script",
+        "col": 9,
+        "row": 0,
+        "spec": {
+          "cmd": "sh {{workflow.files}}/book.sh typeset {{inputs.book}}",
+          "show": "books/{{inputs.book}}/pages/cover-front.png, books/{{inputs.book}}/pages/0*.png, books/{{inputs.book}}/pages/1*.png, books/{{inputs.book}}/pages/2*.png, books/{{inputs.book}}/pages/3*.png, books/{{inputs.book}}/pages/cover-back.png",
+          "timeoutMs": 600000
+        }
+      },
+      {
+        "id": "pages-ok",
+        "title": "Approve the finished pages",
+        "kind": "approve",
+        "col": 10,
+        "row": 0,
+        "spec": {
+          "question": "Are the finished pages ready to print? They are in books/{{inputs.book}}/pages/ and books/{{inputs.book}}/book.pdf."
+        }
+      }
+    ],
+    "edges": [
+      [
+        "init",
+        "describe"
+      ],
+      [
+        "describe",
+        "save-character"
+      ],
+      [
+        "save-character",
+        "sheet"
+      ],
+      [
+        "init",
+        "story"
+      ],
+      [
+        "story",
+        "save-story"
+      ],
+      [
+        "save-story",
+        "check"
+      ],
+      [
+        "check",
+        "story-ok"
+      ],
+      [
+        "story-ok",
+        "save-approved"
+      ],
+      [
+        "save-approved",
+        "sheet"
+      ],
+      [
+        "sheet",
+        "sheet-ok"
+      ],
+      [
+        "sheet-ok",
+        "draw"
+      ],
+      [
+        "draw",
+        "art-ok"
+      ],
+      [
+        "art-ok",
+        "typeset"
+      ],
+      [
+        "typeset",
+        "pages-ok"
+      ]
+    ]
+  },
+  "version": 1,
+  "files": "picture-book"
+}

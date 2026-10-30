@@ -225,6 +225,27 @@ export async function runWorkflowEngineChecks({ check, session }) {
     check('explicit references switch off the paste-every-parent default',
       refs.isExplicit('Use {{nodes.a.output}}') && !refs.isExplicit('Use {{inputs.a}}'));
 
+    // A workflow's own files: a folder beside its JSON, named by `files`.
+    const filesDir = path.join(repo, '.claude', 'workflows', 'kit');
+    fs.mkdirSync(filesDir, { recursive: true });
+    fs.writeFileSync(path.join(filesDir, 'hello.sh'), 'echo "kit says $1"\n');
+    await save({ id: 'kit', title: 'Kit', files: 'kit', graph: { nodes: [script('a', 'sh {{workflow.files}}/hello.sh hi')], edges: [] } });
+    r = await until((await start('kit')).run.runId, settled);
+    check('{{workflow.files}} runs a script the workflow ships with', /kit says hi/.test(node(r, 'a')?.output?.out || ''), states(r));
+    await save({ id: 'kitless', title: 'Kitless', files: 'no-such-kit', graph: { nodes: [script('a', 'sh {{workflow.files}}/hello.sh')], edges: [] } });
+    r = await until((await start('kitless')).run.runId, settled);
+    check('a missing files folder fails the step and says so',
+      node(r, 'a')?.status === 'failed' && /names no files folder, or that folder is not there/.test(node(r, 'a')?.output?.error || ''),
+      node(r, 'a')?.output?.error);
+    check('a copy of a built-in finds the built-in files folder',
+      /workflow-defs\/picture-book$/.test(wf.filesDirOf({ id: 'my-book', files: 'picture-book' }) || ''));
+    check('files must be a plain folder name',
+      wf.validateDefinition({ id: 'x', title: 'x', schemaVersion: 2, files: '../etc', graph: { nodes: [script('a', 'true')], edges: [] } })
+        .some((p) => /files must be a folder name/.test(p)));
+    const book = wf.getDefinition('picture-book', {});
+    check('the picture-book built-in is valid and has its files', book?.scope === 'builtin' && !book.invalid
+      && fs.existsSync(path.join(wf.filesDirOf(book), 'book.sh')), JSON.stringify(book?.problems));
+
     /* --------------------------- real exit codes ---------------------------- */
     console.log('\nWorkflows: commands that fail\n');
 
