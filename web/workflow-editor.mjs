@@ -484,13 +484,49 @@ function refreshAddPickers() {
 }
 
 function deleteSelected() {
-  if (!state.selectedId) return;
-  const id = state.selectedId;
+  if (state.selectedId) deleteNode(state.selectedId);
+}
+
+function deleteNode(id) {
   state.def.graph.nodes = state.def.graph.nodes.filter((n) => n.id !== id);
   state.def.graph.edges = (state.def.graph.edges || []).filter(([a, b]) => a !== id && b !== id);
-  state.selectedId = null;
+  if (state.selectedId === id) state.selectedId = null;
   state.connectFromId = null;
   changed();
+}
+
+/*
+ * Right-click a step to delete it. A window asks first, and says what else
+ * goes with it: its connections, and any steps that use what it makes.
+ */
+function confirmDelete(n) {
+  let d = document.getElementById('delDlg');
+  if (!d) {
+    d = document.createElement('dialog');
+    d.id = 'delDlg';
+    d.className = 'del-dlg';
+    d.innerHTML = `
+      <h3 id="delTitle"></h3>
+      <p id="delWhat"></p>
+      <p class="del-warn" id="delWarn" hidden></p>
+      <div class="del-foot">
+        <button type="button" class="btn" id="delCancel">Cancel</button>
+        <button type="button" class="btn danger" id="delGo">Delete step</button>
+      </div>`;
+    document.body.append(d);
+    d.querySelector('#delCancel').onclick = () => d.close();
+    d.addEventListener('click', (e) => { if (e.target === d) d.close(); });
+  }
+  const links = (state.def.graph.edges || []).filter(([a, b]) => a === n.id || b === n.id).length;
+  const users = state.def.graph.nodes.filter((x) => x.id !== n.id && JSON.stringify(x.spec || {}).includes(`${n.id}.`));
+  d.querySelector('#delTitle').textContent = `Delete “${n.title || n.id}”?`;
+  d.querySelector('#delWhat').textContent = `This removes the step${links ? ` and its ${links} connection${links === 1 ? '' : 's'}` : ''} from the canvas. Nothing is saved until you press Save.`;
+  const warn = d.querySelector('#delWarn');
+  warn.hidden = !users.length;
+  warn.textContent = users.length ? `${users.map((u) => `“${u.title || u.id}”`).join(', ')} ${users.length === 1 ? 'uses' : 'use'} what this step makes and will need fixing.` : '';
+  d.querySelector('#delGo').onclick = () => { d.close(); deleteNode(n.id); toast(`Deleted “${n.title || n.id}”. Save to keep the change.`); };
+  d.showModal();
+  d.querySelector('#delCancel').focus();
 }
 
 function patchSelected(fields) {
@@ -1094,6 +1130,13 @@ function nodeCard(n) {
       return;
     }
     selectNode(n.id);
+  });
+  card.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (state.previewing || card.classList.contains('pv-removed')) return;
+    selectNode(n.id);
+    confirmDelete(n);
   });
   attachDrag(card, n);
   return card;

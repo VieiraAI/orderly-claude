@@ -914,3 +914,34 @@ button.stat:hover { background: var(--raised); }
 .dr-redo-why { margin-top: 8px; font-size: 12px; line-height: 1.5; color: var(--mute); }
 .dr-redo .need-status { display: block; margin-top: 6px; }
 .stale-tag { margin-left: 4px; font-size: 10.5px; color: var(--amber); white-space: nowrap; }
+
+/* ---- Run page: the preview window, and cards that open it ---- */
+.card.has-pv { cursor: zoom-in; }
+.card .pv-open { position: absolute; top: 34px; right: 8px; padding: 2px 8px; border-radius: 999px; font: 500 10.5px var(--f-mono);
+  color: var(--text); background: var(--surface); border: 1px solid var(--edge-hi); opacity: 0; transition: opacity .15s ease; pointer-events: none; }
+.card.has-pv:hover .pv-open, .card.has-pv.sel .pv-open { opacity: 1; }
+.pvw-dlg { width: min(1280px, 96vw); height: min(900px, 92vh); padding: 0; border: 1px solid var(--edge-strong); border-radius: 12px;
+  background: var(--surface); color: var(--text); box-shadow: 0 30px 80px color-mix(in oklab, #000 var(--shadow-pct, 50%), transparent); }
+.pvw-dlg::backdrop { background: color-mix(in oklab, var(--bg) 72%, transparent); backdrop-filter: blur(2px); }
+.pvw-dlg[open] { display: flex; flex-direction: column; }
+.pvw-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 16px 20px 14px; border-bottom: 1px solid var(--edge-tint); }
+.pvw-head .dr-title { margin: 2px 0 0; }
+.pvw-file { font: 11.5px var(--f-mono); color: var(--faint); margin-top: 4px; }
+.pvw-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.pvw-tools .x { background: transparent; border: 0; color: var(--mute); font-size: 24px; line-height: 1; cursor: pointer; padding: 0 2px 0 6px; }
+.pvw-tools .x:hover { color: var(--text); }
+.pvw-sizes { display: inline-flex; padding: 2px; border: 1px solid var(--edge-tint); border-radius: 8px; background: var(--well, var(--bg)); }
+.pvw-sizes button { border: 0; background: transparent; color: var(--mute); font: 500 12px var(--f-ui, inherit); padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+.pvw-sizes button.on { background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--edge-hi); }
+.pvw-body { flex: 1; min-height: 0; overflow: auto; background: var(--bg); }
+.pvw-stage { height: 100%; display: flex; justify-content: center; padding: 16px; box-sizing: border-box; }
+.pvw-frame { width: 100%; height: 100%; border: 1px solid var(--edge-tint); border-radius: 8px; background: #fff; transition: width .2s ease; }
+.pvw-pics { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; padding: 20px; }
+.pvw-pics figure { margin: 0; }
+.pvw-pics img, .pvw-pics video { display: block; width: 100%; border-radius: 8px; border: 1px solid var(--edge-tint); background: #fff; }
+.pvw-pics figcaption { font: 11.5px var(--f-mono); color: var(--mute); margin-top: 6px; }
+.pvw-pages { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; padding: 20px; }
+.pvw-pages article { position: relative; padding: 22px 22px 30px; background: var(--surface); border: 1px solid var(--edge-tint); border-radius: 8px; }
+.pvw-pages p { margin: 0; font-size: 14.5px; line-height: 1.6; white-space: pre-wrap; }
+.pvw-n { position: absolute; bottom: 8px; right: 12px; font: 11px var(--f-mono); color: var(--faint); }
+.pvw-note { margin-top: 10px; font-size: 12px; color: var(--faint); }
