@@ -647,13 +647,14 @@ async function validate({ announce = false } = {}) {
     body: JSON.stringify({ def }),
   }).then((x) => x.json()).catch(() => ({ ok: false, problems: ['Orderly is not answering — is it still running?'] }));
   // An empty canvas is not a problem worth shouting about while building.
-  state.problems = (r.problems || []).filter((p) => !(state.def.graph.nodes.length === 0 && /nodes is empty/.test(p)));
+  // An empty canvas is a draft, not a problem: it saves, and runs once it has a step.
+  state.problems = (r.problems || []).filter((p) => !/no steps yet/.test(p));
   state.warnings = r.warnings || [];
   // Renaming it in the editor is how the clash is fixed; until then, say so.
   if (state.clash && state.loaded && state.def.id === state.loaded.id) state.warnings = [state.clash.message, ...state.warnings];
   renderCanvas();
   if (announce) showProblems(state.problems, state.warnings);
-  return r.ok;
+  return state.problems.length === 0;
 }
 
 async function save() {
@@ -2184,6 +2185,7 @@ function runInputs(def) {
  */
 async function openRunDialog({ prefill } = {}) {
   if (state.dirty || !state.loaded) { const saved = await save(); if (!saved) return; }
+  if (!state.def.graph.nodes.length) { toast('Saved. Add a step with + Add step, then run it.', '', 4000); return; }
   const fields = runInputs(state.def);
   const values = prefill || (state.run?.workflowId === state.loaded.id ? state.run.inputs : null) || {};
   if (!fields.length) { await go({}); return; }

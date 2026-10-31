@@ -1314,6 +1314,23 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     check('the editor\'s run view raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
 
+    // A workflow can be saved with just a name and settings, before it has
+    // any steps. It is listed as a draft and cannot run until it has one.
+    p = await open('/workflow-editor.html');
+    r = await p.ev(`const $ = (id) => document.getElementById(id);
+      $('wfTitle').value = 'Just a name'; $('wfTitle').dispatchEvent(new Event('input', { bubbles: true }));
+      $('wfScope').value = 'project'; $('wfScope').dispatchEvent(new Event('change', { bubbles: true }));
+      $('btnSettings').click(); $('wfBudget').value = '2'; $('wfBudget').dispatchEvent(new Event('input', { bubbles: true }));
+      $('btnSave').click(); await new Promise((r) => setTimeout(r, 900));
+      return { saved: $('saveLine').textContent, search: location.search, status: $('status').textContent };`);
+    const draft = (await api('/api/workflows')).workflows.find((w) => w.id === 'just-a-name');
+    check('a workflow with a name and no steps saves', /saved/.test(r.saved) && /from=just-a-name/.test(r.search) && draft?.budgetUsd === 2, JSON.stringify(r));
+    check('…and is listed as a draft', draft?.draft === true && draft?.invalid === true, JSON.stringify(draft && { draft: draft.draft, problems: draft.problems }));
+    const runDraft = await start('just-a-name');
+    check('…which cannot run until it has a step', runDraft.status === 400 && /no steps yet/.test(runDraft.error || ''), JSON.stringify(runDraft));
+    check('saving a draft raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
     // A step that is working has a moving border, and Stop is above the canvas.
     await save({ id: 'ed-slow', title: 'Editor slow', graph: { nodes: [script('z', 'sleep 30')], edges: [] } });
     const slowId = (await start('ed-slow')).run.runId;

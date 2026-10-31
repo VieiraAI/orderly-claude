@@ -19,7 +19,7 @@ import { SHOTS_DIR, INSTANCES_FILE, ensureDirs, transcriptPathFor, uploadsFor } 
 import { randomUUID } from 'node:crypto';
 import { loadShots, attachShots } from '../core/shots.mjs';
 import {
-  listDefinitions, listAllDefinitions, knownRepoRoots, getDefinition, startRun, readRun, listRuns, runsForSession, deleteRun, rerunRun,
+  listDefinitions, listAllDefinitions, knownRepoRoots, getDefinition, startRun, NO_STEPS, readRun, listRuns, runsForSession, deleteRun, rerunRun,
   scaffoldWorkflow, writeWorkflow, validateDefinition, lintDefinition, deleteWorkflow, duplicateWorkflow,
   stripRuntime, freeId, claimId, markClashes, whereWord, reconcileRuns, prepareResume, openQuestion, recordAnswer, writeRun, RESUMABLE,
   registerRoot, addLesson, updateRun, prepareRedo,
@@ -736,7 +736,8 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         const body = await readBody(req);
         const problems = validateDefinition(body.def || {});
         const warnings = problems.length ? [] : lintDefinition(body.def || {});
-        return send(200, { ok: problems.length === 0, problems, warnings });
+        // `saveable`: a draft with no steps yet can be saved, though not run.
+        return send(200, { ok: problems.length === 0, saveable: problems.every((p) => p === NO_STEPS), problems, warnings });
       }
       if (url.pathname === '/api/workflows' && req.method === 'POST') {
         const body = await readBody(req);

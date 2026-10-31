@@ -80,6 +80,7 @@ function readScope({ scope, dir, root }) {
     // A definition that stopped validating stays listed, marked, so its
     // owner can open and fix it. Hiding it would look like it was deleted.
     if (problems.length) { entry.invalid = true; entry.problems = problems; }
+    if (problems.length === 1 && problems[0] === NO_STEPS) entry.draft = true;
     return entry;
   });
 }
@@ -156,6 +157,12 @@ export const VERIFY_ASSERTS = new Set([
   'color-in-palette', 'font-is-brand', 'contrast-min', 'spacing-on-scale', 'no-raw-hex', 'llm-judge',
 ]);
 
+/*
+ * A workflow with no steps is a draft: it can be saved with just a name and
+ * settings, and is listed, but cannot run until it has a step.
+ */
+export const NO_STEPS = 'it has no steps yet';
+
 export function validateDefinition(d) {
   const problems = [];
   if (!d || typeof d !== 'object') return ['not an object'];
@@ -197,7 +204,7 @@ export function validateDefinition(d) {
   const v2 = d.schemaVersion === 2;
   const nodes = d.graph?.nodes;
   if (!Array.isArray(nodes) || nodes.length === 0) {
-    problems.push('graph.nodes is empty');
+    problems.push(NO_STEPS);
     return problems; // nothing else to check
   }
   const ids = new Set();
@@ -663,7 +670,8 @@ export function scaffoldWorkflow(id, { title, category = 'build', estimate = '~1
  * overwrite an existing file unless `overwrite: true`. Returns the final path.
  */
 export function writeWorkflow({ def, scope = 'project', repoRoot = null, overwrite = false }) {
-  const problems = validateDefinition(def);
+  // A draft with no steps yet saves; it just cannot run.
+  const problems = validateDefinition(def).filter((p) => p !== NO_STEPS);
   if (problems.length) throw new Error(`workflow invalid: ${problems.join('; ')}`);
   const dir = scope === 'user' ? USER_WORKFLOWS_DIR
     : scope === 'project' ? (repoRoot ? repoWorkflowsDir(repoRoot) : null)
