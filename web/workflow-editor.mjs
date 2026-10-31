@@ -146,8 +146,10 @@ async function boot() {
     fillStartFrom();
   }
   fetch('/api/skills').then((x) => x.json()).then((r) => { state.skills = r.skills || []; if (state.selectedId) renderSelected(); }).catch(() => {});
-  // The workflows a "Run a workflow" step can pick from.
-  fetch('/api/workflows').then((x) => x.json()).then((r) => { state.library = (r.workflows || []).filter((w) => !w.invalid); if (state.selectedId) renderSelected(); }).catch(() => {});
+  // The workflows a "Run a workflow" step can pick from, kept current: a
+  // workflow saved in another tab shows up when you come back to this one.
+  loadLibrary();
+  addEventListener('focus', loadLibrary);
   fillKindPickers();
   bindUi();
   // ?panel=runs opens straight onto this workflow's past runs.
@@ -421,6 +423,7 @@ function addNode() {
   if ($('newAfter'))  $('newAfter').value  = '';
   if ($('newBefore')) $('newBefore').value = '';
   changed();
+  if (kind === 'workflow') loadLibrary();
   setTimeout(() => $('selSpec').querySelector('textarea, input')?.focus(), 0);
 }
 
@@ -617,6 +620,16 @@ function changeKind(kind) {
   changed();
 }
 
+/** Fetch the workflows a "Run a workflow" step can pick; redraw the step's form if the list changed. */
+async function loadLibrary() {
+  const r = await fetch('/api/workflows').then((x) => x.json()).catch(() => null);
+  if (!r) return;
+  const list = (r.workflows || []).filter((w) => !w.invalid);
+  const changed = !state.library || list.map((w) => `${w.key}@${w.version || 0}`).join() !== state.library.map((w) => `${w.key}@${w.version || 0}`).join();
+  state.library = list;
+  if (changed && selectedNode()?.kind === 'workflow') renderSelected();
+}
+
 function selectNode(id) {
   if (state.connectFromId && state.connectFromId !== id) {
     // Pending connect: wire this one and clear the mode.
@@ -629,6 +642,7 @@ function selectNode(id) {
   state.selectedId = id;
   state.side = null;
   render();
+  if (selectedNode()?.kind === 'workflow') loadLibrary();
 }
 
 /* ------------------------------ save & files ----------------------------- */

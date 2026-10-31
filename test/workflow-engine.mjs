@@ -1231,6 +1231,11 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
       sel.dispatchEvent(new Event('change')); ${tick}
       return { none: document.getElementById('selSpec').textContent.includes('It asks for nothing'), saved: document.getElementById('saveLine').textContent };`);
     check('picking another workflow shows its inputs instead', r.none && /unsaved/.test(r.saved), JSON.stringify(r));
+    // A workflow saved after the editor opened is offered without reloading.
+    await save({ id: 'made-later', title: 'Made later', graph: { nodes: [script('m', 'echo later')], edges: [] } });
+    r = await p.ev(`document.querySelector('.n-card[data-id="inner"]').click(); await new Promise((r) => setTimeout(r, 600));
+      return [...document.getElementById('sp-wf').options].some((o) => /^Made later/.test(o.textContent));`);
+    check('a workflow saved after the editor opened is in the step\'s list without a reload', r === true, String(r));
     check('the Run a workflow form raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
 
