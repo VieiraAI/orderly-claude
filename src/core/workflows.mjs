@@ -148,7 +148,7 @@ function readDir(dir) {
  */
 export const V2_KINDS = new Set([
   'agent', 'script', 'decision', 'check', 'publish', 'display',
-  'inputs', 'loop', 'delay', 'approve', 'mcp',
+  'inputs', 'loop', 'delay', 'approve', 'mcp', 'workflow',
 ]);
 
 /** Checks an Ask Claude step can run on its own output. */
@@ -411,6 +411,13 @@ function validateV2Node(n) {
     case 'approve':
       if (!spec.question && !spec.prompt) problems.push('spec.question or spec.prompt is required');
       break;
+    case 'workflow':
+      if (typeof spec.workflow !== 'string' || !spec.workflow.trim()) problems.push('pick the workflow it runs');
+      if (spec.inputs != null && (typeof spec.inputs !== 'object' || Array.isArray(spec.inputs)
+        || !Object.values(spec.inputs).every((v) => typeof v === 'string'))) {
+        problems.push('spec.inputs must map each input to text');
+      }
+      break;
   }
   return problems;
 }
@@ -453,7 +460,7 @@ export function filesDirOf(def) {
 
 export function startRun({
   workflowId, inputs = {}, repoRoot, scope = null, sessionId = null, trigger = 'you',
-  budgetUsd, scheduleId = null, definition = null,
+  budgetUsd, scheduleId = null, definition = null, parent = null,
 }) {
   const found = definition || getDefinition(workflowId, { repoRoot, scope });
   if (!found) throw new Error(`workflow not found: ${workflowId}`);
@@ -489,6 +496,9 @@ export function startRun({
     status: 'running',
     trigger,
     scheduleId,
+    // Set when a "Run a workflow" step started this run: which run and step,
+    // and the workflows above it, so a workflow can never end up inside itself.
+    parent,
     sessionId,
     repoRoot: repoRoot || null,
     cwd: sandboxPath || repoRoot || null,

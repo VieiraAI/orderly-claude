@@ -25,7 +25,7 @@ const KIND_GLYPH = {
   // v2
   agent: '◆', script: '>_', decision: '◇', check: '✓',
   publish: '↑', display: '▦', inputs: '≡',
-  loop: '↻', delay: '◷', approve: '✓',
+  loop: '↻', delay: '◷', approve: '✓', workflow: '⧉',
 };
 
 /** What each kind does, said plainly. Order is the order offered. */
@@ -36,6 +36,7 @@ const KINDS = {
   approve:  { name: 'Ask me to approve', desc: 'Waits for you; reject ends the run' },
   check:    { name: 'Check',             desc: 'Stops the run if something is wrong' },
   loop:     { name: 'Repeat for each',   desc: 'Does one thing per item in a list' },
+  workflow: { name: 'Run a workflow',    desc: 'Runs another workflow as one step, and hands on what it made' },
   publish:  { name: 'Save or publish',   desc: 'Writes a file, or drafts a PR' },
   display:  { name: 'Show together',     desc: 'Gathers earlier results side by side' },
   delay:    { name: 'Wait',              desc: 'Pauses for a set time' },
@@ -56,6 +57,7 @@ const KIND_SPEC_DEFAULT = {
   loop:     () => ({ over: '{{inputs.items}}', action: 'agent', prompt: 'Do this for {{item}}.', max: 20, concurrency: 2 }),
   delay:    () => ({ wait: '30s' }),
   approve:  () => ({ question: 'Does this look right?' }),
+  workflow: () => ({ workflow: '', inputs: {} }),
 };
 
 const CHECK_TYPES = [
@@ -118,6 +120,8 @@ async function boot() {
     fillStartFrom();
   }
   fetch('/api/skills').then((x) => x.json()).then((r) => { state.skills = r.skills || []; if (state.selectedId) renderSelected(); }).catch(() => {});
+  // The workflows a "Run a workflow" step can pick from.
+  fetch('/api/workflows').then((x) => x.json()).then((r) => { state.library = (r.workflows || []).filter((w) => !w.invalid); if (state.selectedId) renderSelected(); }).catch(() => {});
   fillKindPickers();
   bindUi();
   // ?panel=runs opens straight onto this workflow's past runs.
@@ -1427,6 +1431,28 @@ function renderSpecForm(n) {
         + (s.options || []).map((o, i) => `<div class="list-row"><input class="wide" data-opt="${i}" value="${escapeAttr(o.label || '')}" placeholder="Choice"><span></span><button class="run-btn danger x" data-rm-opt="${i}" title="Remove">✕</button></div>`).join('')
         + '<button class="run-btn" data-act="add-opt">+ add choice</button>';
       break;
+    case 'workflow': {
+      const lib = (state.library || []).filter((w) => w.id !== state.def.id);
+      const pick = workflowPicked(s, lib);
+      const wfOpt = (w) => `<option value="${escapeAttr(w.key || w.id)}" ${pick && (pick.key || pick.id) === (w.key || w.id) ? 'selected' : ''}>${escapeHtml(w.title || w.id)}${w.scope === 'project' && w.repoName ? ` · ${escapeHtml(w.repoName)}` : w.scope === 'builtin' ? ' · starter' : ''}</option>`;
+      html = '<label for="sp-wf">Workflow to run</label>'
+        + `<select id="sp-wf" data-wf="1"><option value="">${state.library ? 'Pick a workflow' : 'Loading your workflows…'}</option>`
+        + (s.workflow && !pick ? `<option value="" selected>${escapeHtml(s.workflow)} (not found)</option>` : '')
+        + `${lib.map(wfOpt).join('')}</select>`;
+      if (pick) {
+        html += `<div class="hint block-hint">${escapeHtml(pick.description || '')} <a href="/workflow-editor.html?from=${encodeURIComponent(pick.id)}${refQuery(pick)}" target="_blank">Open it ↗</a></div>`;
+        const fields = pick.inputs || [];
+        html += fields.length
+          ? `<h4 class="sub-h">Its inputs</h4><div class="hint block-hint">What this run gives it each time. Type text, or insert an input or a result from an earlier step.</div>`
+            + fields.map((f) => refHead(escapeHtml(f.label || f.key), `inputs.${f.key}`) + txt(`inputs.${f.key}`, s.inputs?.[f.key], f.placeholder || '', true)).join('')
+          : '<div class="hint block-hint">It asks for nothing, so it runs as it is.</div>';
+        const steps = pick.graph?.nodes || [];
+        if (steps.length) {
+          html += `<h4 class="sub-h">What it hands on</h4><div class="hint block-hint">Later steps can use any of its steps' results, for example <code>{{nodes.${escapeHtml(n.id)}.output.steps.${escapeHtml(steps[steps.length - 1].id)}}}</code>. Its steps: ${steps.map((x) => `<code>${escapeHtml(x.id)}</code>`).join(' ')}</div>`;
+        }
+      }
+      break;
+    }
     case 'approve':
       html = refHead('What are you approving?', 'question') + txt('question', s.question, 'Ship {{inputs.version}}?', true);
       break;
@@ -1488,6 +1514,14 @@ function renderSpecForm(n) {
     });
     if (el.dataset.ref) el.addEventListener('focus', () => { state.refField = el; previewSoon(); });
   }
+  mount.querySelector('[data-wf]')?.addEventListener('change', (e) => {
+    const w = (state.library || []).find((x) => (x.key || x.id) === e.target.value);
+    const x = selectedNode(); if (!x) return;
+    // Which workflow, and where it lives, so the run finds the same one.
+    x.spec = { ...x.spec, workflow: w?.id || '', scope: w?.scope || undefined, repo: w?.scope === 'project' ? w.repoRoot : undefined, inputs: {} };
+    if (!w) delete x.spec.workflow;
+    changed();
+  });
   for (const b of mount.querySelectorAll('.ref-btn')) {
     b.addEventListener('click', (e) => { e.stopPropagation(); openRefPop(b, $(b.dataset.for)); });
   }
@@ -1537,6 +1571,13 @@ function renderSpecForm(n) {
   // Preview the main text field without waiting for a focus.
   if (!state.refField || !mount.contains(state.refField)) state.refField = mount.querySelector('[data-ref]');
   previewSoon();
+}
+
+/** The library entry a Run a workflow step names: same repo first, then by id. */
+function workflowPicked(spec, lib) {
+  if (!spec.workflow) return null;
+  return lib.find((w) => w.id === spec.workflow && (!spec.repo || w.repoRoot === spec.repo) && (!spec.scope || w.scope === spec.scope))
+    || lib.find((w) => w.id === spec.workflow) || null;
 }
 
 /** Ask Claude: look at the result, and try again with what was wrong. */

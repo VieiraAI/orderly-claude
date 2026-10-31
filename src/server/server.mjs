@@ -27,7 +27,7 @@ import {
 import { suggestWorkflows } from '../core/workflow-suggest.mjs';
 import { Scheduler, terminal } from '../core/workflow-runner.mjs';
 import { Assistant } from '../core/assistant.mjs';
-import { redoPrompt, redoPicture, applyRedo } from '../core/workflow-handlers.mjs';
+import { redoPrompt, redoPicture, applyRedo, setRunLauncher } from '../core/workflow-handlers.mjs';
 import { resolveText, referenceFields } from '../core/refs.mjs';
 import { readSettings, writeSettings, runSpend } from '../core/settings.mjs';
 import {
@@ -354,6 +354,15 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
     s.start();
     return s;
   }
+
+  // A "Run a workflow" step starts its run here, so it is listed, followed
+  // and stopped like any other.
+  setRunLauncher(({ parent, ...opts }) => {
+    const run = startRun({ ...opts, parent, trigger: `step "${parent.nodeId}" of ${parent.title}` });
+    const scheduler = startScheduler(run);
+    broadcast('run-start', { runId: run.runId, workflowId: run.workflowId, parentRunId: parent.runId });
+    return { run, scheduler };
+  });
 
   /*
    * A workflow is named by scope + repo + id, since two repos may each have
