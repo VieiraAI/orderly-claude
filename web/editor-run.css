@@ -160,3 +160,6 @@ body.has-run .ed-layout:not(.no-sel) { grid-template-columns: 1fr 380px; }
 .mini.rs-done .rs-badge { background: var(--ok); } .mini.rs-failed .rs-badge { background: var(--ship); }
 .mini.rs-ask .rs-badge { background: var(--amber); color: #1a1408; font: 700 10px var(--f-ui); }
 @media (prefers-reduced-motion: reduce) { .mini.rs-ask, .mini.rs-running { animation: none; } }
+.mini.has-pv { cursor: pointer; }
+.mini.has-pv:hover, .mini.has-pv:focus-visible { box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 35%, transparent); outline: none; }
+.mini-pv { position: absolute; right: 7px; bottom: 5px; font: 9.5px var(--f-mono); color: var(--accent); }

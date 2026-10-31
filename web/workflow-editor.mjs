@@ -2295,7 +2295,16 @@ function openable(card, n, rn) {
   const box = document.createElement('div');
   box.className = 'n-inner';
   box.innerHTML = inner ? innerHtml(inner) : '<div class="n-inner-none">Pick the workflow it runs, in the panel on the right.</div>';
-  box.addEventListener('mousedown', (e) => { if (e.target.closest('a')) e.stopPropagation(); });
+  box.addEventListener('mousedown', (e) => { if (e.target.closest('a, .mini[data-pv]')) e.stopPropagation(); });
+  // An inner step that made something to look at opens it here, full size.
+  const show = (e) => {
+    const m = e.target.closest('.mini[data-pv]');
+    if (!m || !inner?.child) return;
+    e.stopPropagation();
+    openPreview(inner.nodes.find((x) => x.id === m.dataset.pv), inner.child.runId);
+  };
+  box.addEventListener('click', show);
+  box.addEventListener('keydown', (e) => { if (e.key === 'Enter') show(e); });
   const foot = card.querySelector('.n-foot');
   if (foot) card.insertBefore(box, foot); else card.append(box);
   if (inner) card.style.width = `${Math.max(320, inner.w + 24)}px`;
@@ -2364,9 +2373,11 @@ function innerHtml(i) {
   const minis = i.nodes.map((x) => {
     const rs = i.child ? runState(x) : null;
     const label = KINDS[x.kind]?.name || LEGACY[x.kind] || x.kind;
-    return `<div class="mini k-${escapeAttr(x.kind)}${rs ? ` rs-${rs}` : ''}" style="left:${i.pos[x.id].x}px;top:${i.pos[x.id].y}px" title="${escapeAttr(`${x.title || x.id} · ${label}${rs ? ` · ${{ done: 'done', failed: 'failed', ask: 'waiting for you', running: 'working', skipped: 'skipped', stopped: 'stopped' }[rs]}` : ''}`)}">
+    const pv = i.child && previewOf(x);
+    return `<div class="mini k-${escapeAttr(x.kind)}${rs ? ` rs-${rs}` : ''}${pv ? ' has-pv' : ''}"${pv ? ` data-pv="${escapeAttr(x.id)}" role="button" tabindex="0"` : ''} style="left:${i.pos[x.id].x}px;top:${i.pos[x.id].y}px" title="${escapeAttr(`${x.title || x.id} · ${label}${rs ? ` · ${{ done: 'done', failed: 'failed', ask: 'waiting for you', running: 'working', skipped: 'skipped', stopped: 'stopped' }[rs]}` : ''}`)}">
       <span class="mini-kind">${KIND_GLYPH[x.kind] || '●'} ${escapeHtml(label)}</span>
       <span class="mini-title">${escapeHtml(x.title || x.id)}</span>
+      ${pv ? '<span class="mini-pv">Preview ↗</span>' : ''}
       ${RS_BADGE[rs] ? `<span class="rs-badge">${RS_BADGE[rs]}</span>` : ''}
     </div>`;
   }).join('');

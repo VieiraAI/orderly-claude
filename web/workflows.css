@@ -951,3 +951,6 @@ button.stat:hover { background: var(--raised); }
 .card .sub-bar i { display: block; height: 100%; background: var(--k-workflow); }
 .card .sub-open { font-size: 12px; color: var(--k-workflow); text-decoration: none; }
 .card .sub-open:hover { text-decoration: underline; }
+/* What a question is about: buttons that open the earlier steps' work full size. */
+.ap-see { display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 10px; }
+.ap-see:empty { display: none; }

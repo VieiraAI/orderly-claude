@@ -1282,6 +1282,37 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     check('answering from the outer run raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
 
+    // What a question is about can be looked at where it is asked: the step
+    // before it made a web page, and the question offers to open it.
+    await save({ id: 'sub-draws', title: 'Sub draws', graph: { nodes: [
+      { id: 'draw', title: 'Three looks', kind: 'agent', col: 1, row: 0, spec: { model: 'haiku', output: 'html', prompt: 'Draw three looks.' } },
+      { id: 'pick', title: 'Pick a look', kind: 'decision', col: 2, row: 0, spec: { question: 'Which look?', options: [{ label: 'A', edgeLabel: 'a' }, { label: 'B', edgeLabel: 'b' }] } },
+    ], edges: [['draw', 'pick']] } });
+    await save({ id: 'sub-draws-outer', title: 'Sub draws outer', graph: { nodes: [{ id: 'inner', title: 'inner', kind: 'workflow', col: 1, row: 0, spec: { workflow: 'sub-draws' } }], edges: [] } });
+    const drawsId = (await start('sub-draws-outer')).run.runId;
+    const drawsOuter = await until(drawsId, (x) => node(x, 'inner')?.waitsFor === 'child');
+    const drawsInner = node(drawsOuter, 'inner')?.output?.child?.runId;
+    p = await open(`/workflow-editor.html?run=${drawsId}`);
+    await sleep(500);
+    r = await p.ev(`const see = [...document.querySelectorAll('#apSee [data-see]')];
+      const label = see[0]?.textContent || '';
+      see[0]?.click(); await new Promise((r) => setTimeout(r, 400));
+      const d = document.getElementById('pvwDlg');
+      const out = { label, open: !!d?.open, src: d?.querySelector('iframe')?.getAttribute('src') || '', details: d?.querySelector('#pvwDetails')?.hidden };
+      d?.close();
+      const c = () => document.querySelector('.n-card[data-id="inner"]');
+      c().querySelector('.n-open').click(); await new Promise((r) => setTimeout(r, 800));
+      const mini = c().querySelector('.mini[data-pv="draw"]');
+      out.mini = !!mini;
+      mini?.click(); await new Promise((r) => setTimeout(r, 400));
+      out.miniOpen = !!d?.open; d?.close();
+      return out;`);
+    check('a question shows the work it is about, and opens it full size on this page',
+      r.label === 'See Three looks ↗' && r.open && r.src.includes(`/api/runs/${drawsInner}/nodes/draw/page`) && r.details === true, JSON.stringify(r));
+    check('…and an opened-up workflow step opens an inner step\'s work the same way', r.mini && r.miniOpen, JSON.stringify(r));
+    check('previewing from the outer run raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
     // The editor shows a run on the workflow's own canvas: each card's state
     // on its border, the result inside, and the run's question and actions
     // above the canvas. Steps the run has not reached look as they do when editing.

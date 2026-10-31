@@ -242,6 +242,7 @@ function renderAnswer() {
   mount.innerHTML = `<div class="answer-panel">
     <div class="ap-eyebrow">Waiting for you · ${esc(path)}</div>
     <div class="ap-q">${esc(q.question)}</div>
+    <div class="ap-see" id="apSee">${answerSee.key === seeKey(q) ? answerSee.html : ''}</div>
     <div class="need-actions">${buttons}<span class="need-status" id="apStatus"></span></div>
   </div>`;
   const send = async (answer) => {
@@ -256,6 +257,45 @@ function renderAnswer() {
     mount.querySelector('#answerSend').onclick = () => send(box.value.trim());
     box.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(box.value.trim()); });
   }
+  showWhatToChooseFrom(q);
+}
+
+/*
+ * What a question is about: the nearest earlier steps that made something
+ * to look at (three directions, screenshots), each a button that opens it
+ * in the preview window here. For a question an inner workflow asks, they
+ * are read from that workflow's run.
+ */
+let answerSee = { key: null, html: '', nodes: [], runId: null };
+const seeKey = (q) => `${q.runId || run.runId}:${q.nodeId}`;
+
+async function showWhatToChooseFrom(q) {
+  const key = seeKey(q);
+  if (answerSee.key !== key) {
+    const runId = q.runId || run.runId;
+    const from = runId === run.runId ? run
+      : (await fetch(`/api/runs/${encodeURIComponent(runId)}`).then((x) => x.json()).catch(() => ({}))).run;
+    if (!from) return;
+    const parents = {};
+    for (const [a, b] of from.graph.edges || []) (parents[b] ||= []).push(a);
+    // Nearest first: the steps just before the question, then theirs.
+    const seen = new Set(); const order = []; let level = [q.nodeId];
+    while (level.length && order.length < 3) {
+      const next = [];
+      for (const id of level) for (const p of parents[id] || []) if (!seen.has(p)) { seen.add(p); next.push(p); }
+      for (const id of next) { const n = from.graph.nodes.find((x) => x.id === id); if (n && previewOf(n)) order.push(n); }
+      level = next;
+    }
+    const nodes = order.slice(0, 3);
+    answerSee = {
+      key, runId, nodes,
+      html: nodes.map((n, i) => `<button type="button" class="run-btn ap-see-btn" data-see="${i}" title="Open what it made, full size">See ${esc(n.title || n.id)} ↗</button>`).join(''),
+    };
+  }
+  const mount = document.getElementById('apSee');
+  if (!mount || seeKey(meta.question || {}) !== key) return;
+  mount.innerHTML = answerSee.html;
+  for (const b of mount.querySelectorAll('[data-see]')) b.onclick = () => openPreview(answerSee.nodes[Number(b.dataset.see)], answerSee.runId);
 }
 
 async function post(url, body = {}, method = 'POST') {
@@ -852,7 +892,7 @@ function previewOf(n) {
   return null;
 }
 
-const pageUrl = (n) => `/api/runs/${encodeURIComponent(run.runId)}/nodes/${encodeURIComponent(n.id)}/page`;
+const pageUrl = (n, runId = run.runId) => `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(n.id)}/page`;
 
 function previewDialog() {
   let d = document.getElementById('pvwDlg');
@@ -886,7 +926,8 @@ function previewDialog() {
   return d;
 }
 
-function openPreview(n) {
+/** `runId` names another run the step is in: one a step of this run started. */
+function openPreview(n, runId = run.runId) {
   const pv = previewOf(n);
   if (!pv) return;
   const d = previewDialog();
@@ -898,12 +939,14 @@ function openPreview(n) {
   for (const x of d.querySelectorAll('#pvwSizes button')) x.classList.toggle('on', !x.dataset.w);
   const open = d.querySelector('#pvwOpen');
   open.hidden = pv.kind !== 'page';
-  open.href = pv.kind === 'page' ? pageUrl(n) : '#';
+  open.href = pv.kind === 'page' ? pageUrl(n, runId) : '#';
+  // Step details are of this run's steps; a step of another run has its own page.
+  d.querySelector('#pvwDetails').hidden = runId !== run.runId;
   d.querySelector('#pvwDetails').onclick = () => { d.close(); host.select(n.id); };
   const body = d.querySelector('#pvwBody');
   if (pv.kind === 'page') {
     // Sandboxed: the page can run its own scripts but cannot reach Orderly.
-    body.innerHTML = `<div class="pvw-stage"><iframe class="pvw-frame" sandbox="allow-scripts" title="${esc(pv.name)}" src="${pageUrl(n)}"></iframe></div>`;
+    body.innerHTML = `<div class="pvw-stage"><iframe class="pvw-frame" sandbox="allow-scripts" title="${esc(pv.name)}" src="${pageUrl(n, runId)}"></iframe></div>`;
   } else if (pv.kind === 'pictures') {
     body.innerHTML = `<div class="pvw-pics">${o.images.map((m) => m.kind === 'video'
       ? `<figure><video src="${blobUrl(m.ref)}" controls muted loop autoplay playsinline></video><figcaption>${esc(m.name)}</figcaption></figure>`
