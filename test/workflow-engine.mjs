@@ -1282,6 +1282,20 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     check('answering from the outer run raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
 
+    // With no live stream (as when Orderly restarts under an open page), a
+    // live run is still read again, so the page catches up on its own.
+    const quietId = (await start('sub-waits')).run.runId;
+    const quiet = await until(quietId, (x) => node(x, 'inner')?.waitsFor === 'child');
+    p = await open(`/workflow-editor.html?run=${quietId}&snapshot=1`);
+    const askedBefore = await p.ev(`return !!document.querySelector('#answerPanel [data-answer]');`);
+    await api(`/api/runs/${node(quiet, 'inner').output.child.runId}/answer`, { body: { nodeId: 'ok', answer: 'approve' } });
+    await until(quietId, settled);
+    await sleep(6000);
+    r = await p.ev(`return { panel: !!document.querySelector('#answerPanel [data-answer]'), cls: document.querySelector('.n-card[data-id="inner"]').className, status: document.getElementById('rbStatus').textContent };`);
+    check('a page that lost its live stream catches up with the run by itself',
+      askedBefore && !r.panel && /rs-done/.test(r.cls) && /Done/.test(r.status), JSON.stringify(r));
+    await p.close();
+
     // What a question is about can be looked at where it is asked: the step
     // before it made a web page, and the question offers to open it.
     await save({ id: 'sub-draws', title: 'Sub draws', graph: { nodes: [

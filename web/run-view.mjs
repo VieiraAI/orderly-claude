@@ -234,6 +234,10 @@ function renderAnswer() {
   const q = meta.question;
   const mount = document.getElementById('answerPanel');
   if (!q || meta.ownedElsewhere) { mount.innerHTML = ''; return; }
+  // Someone typing an answer keeps what they typed when the run is read again.
+  const key = `${q.runId || run.runId}:${q.nodeId}`;
+  if (mount.dataset.q === key && mount.contains(document.activeElement) && document.activeElement.id === 'answerText') return;
+  mount.dataset.q = key;
   const buttons = q.choices?.length
     ? q.choices.map((c) => `<button class="answer-btn ${/reject|^no$/i.test(c) ? 'neg' : ''}" data-answer="${esc(c)}">${esc(c)}</button>`).join('')
     : '<input class="answer-text" id="answerText" placeholder="Your answer"><button class="answer-btn" id="answerSend">Answer</button>';

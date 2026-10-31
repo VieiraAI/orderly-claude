@@ -2156,7 +2156,28 @@ function followRuns() {
     pending = setTimeout(() => refreshRun().catch(() => {}), 120);
   };
   for (const ev of ['update', 'run-start', 'run-finish']) runStream.addEventListener(ev, mine);
+  // The stream drops when Orderly restarts. A browser retries some drops and
+  // gives up on others; a closed stream is opened again, and the run read
+  // afresh, so the page never sits on an old picture.
+  runStream.addEventListener('error', () => {
+    if (runStream?.readyState !== EventSource.CLOSED) return;
+    runStream = null;
+    setTimeout(() => { followRuns(); refreshRun().catch(() => {}); }, 2000);
+  });
+  runStream.addEventListener('open', () => refreshRun().catch(() => {}));
 }
+
+/*
+ * Belt and braces for a live run: read it again every few seconds while the
+ * tab is showing, and as soon as it is shown again, whatever the stream did.
+ */
+const LIVE = new Set(['running', 'awaiting-answer']);
+setInterval(() => {
+  if (state.runId && LIVE.has(state.run?.status) && document.visibilityState === 'visible' && !state.dragging) refreshRun().catch(() => {});
+}, 5000);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state.runId) refreshRun().catch(() => {});
+});
 
 const RUN_WORDS = { running: 'Running', 'awaiting-answer': 'Waiting for you', done: 'Done', failed: 'Failed', stopped: 'Stopped', interrupted: 'Cut short' };
 

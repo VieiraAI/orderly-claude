@@ -325,6 +325,12 @@ if (!new URLSearchParams(location.search).has('snapshot')) {
   };
   for (const ev of ['update', 'run-start', 'run-finish']) src.addEventListener(ev, mine);
 }
+// A live run is read again every few seconds and when the tab is shown, in
+// case the stream dropped (Orderly restarted) and did not come back.
+setInterval(() => {
+  if (run && ['running', 'awaiting-answer'].includes(run.status) && document.visibilityState === 'visible') load().catch(() => {});
+}, 5000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && run && !isPreview) load().catch(() => {}); });
 window.addEventListener('resize', () => run && drawEdges(document.getElementById('canvas'), document.getElementById('edges')));
 
 if (runId || isPreview) load();
