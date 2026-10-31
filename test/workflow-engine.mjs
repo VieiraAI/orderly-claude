@@ -825,7 +825,7 @@ export async function runWorkflowEngineChecks({ check, session }) {
     check('scheduled runs can never be left without a daily limit', res.status === 400, res.error);
 
     // The second project and its twin workflow, for the per-project sections.
-    await browserChecks({ check, base, api, save, start, until, settled, node, repo, other, twin, wf });
+    await browserChecks({ check, base, api, save, start, until, settled, node, repo, other, twin, wf, script, states });
   } finally {
     if (server) server.close();
     sched.releaseLock();
@@ -844,7 +844,7 @@ export async function runWorkflowEngineChecks({ check, session }) {
  * must load without a console error or a browser dialog — a dialog blocks
  * automation and is a worse experience than saying it inline.
  */
-async function browserChecks({ check, base, api, save, start, until, settled, node, repo, other, twin, wf }) {
+async function browserChecks({ check, base, api, save, start, until, settled, node, repo, other, twin, wf, script, states }) {
   const { findChrome } = await import('../src/core/capture.mjs');
   const { CDP, httpJSON } = await import('../src/core/cdp.mjs');
   const { spawn } = await import('node:child_process');
@@ -1232,6 +1232,102 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
       return { none: document.getElementById('selSpec').textContent.includes('It asks for nothing'), saved: document.getElementById('saveLine').textContent };`);
     check('picking another workflow shows its inputs instead', r.none && /unsaved/.test(r.saved), JSON.stringify(r));
     check('the Run a workflow form raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
+    // The editor shows a run on the workflow's own canvas: each card's state
+    // on its border, the result inside, and the run's question and actions
+    // above the canvas. Steps the run has not reached look as they do when editing.
+    await save({
+      id: 'ed-run', title: 'Editor run', inputs: [{ key: 'w', label: 'Word' }],
+      graph: {
+        nodes: [
+          script('a', 'echo made {{inputs.w}}'),
+          { ...script('b', 'if echo {{inputs.w}} | grep -q bad; then echo too bad >&2; exit 1; fi; echo fine'), col: 2 },
+          { id: 'q', title: 'q', kind: 'decision', col: 3, row: 0, spec: { question: 'Keep it?', options: [{ label: 'Yes', edgeLabel: 'yes' }, { label: 'No', edgeLabel: 'no' }] } },
+        ],
+        edges: [['a', 'b'], ['b', 'q']],
+      },
+    });
+    const badId = (await start('ed-run', { w: 'bad' })).run.runId;
+    await until(badId, settled);
+    p = await open(`/workflow-editor.html?run=${badId}`);
+    r = await p.ev(`const card = (id) => document.querySelector('.n-card[data-id="' + id + '"]');
+      const look = (id) => ({ cls: card(id)?.className || '', badge: !!card(id)?.querySelector('.rs-badge svg'), body: !!card(id)?.querySelector('.c-body'), what: !!card(id)?.querySelector('.n-what') });
+      return { title: document.getElementById('wfTitle').value, bar: !document.getElementById('runBar').classList.contains('hidden'),
+        status: document.getElementById('rbStatus').textContent, notice: document.getElementById('runNotice').textContent,
+        a: look('a'), b: look('b'), q: look('q'), search: location.search };`);
+    check('the editor opens a run by its id alone, on its own workflow\'s canvas',
+      r.title === 'Editor run' && r.bar && /Failed/.test(r.status) && /too bad/.test(r.notice), JSON.stringify(r));
+    check('a step that finished has a green border and a check; one that failed, red and a warning',
+      /rs-done/.test(r.a.cls) && r.a.badge && r.a.body && /rs-failed/.test(r.b.cls) && r.b.badge, JSON.stringify([r.a, r.b]));
+    check('a step the run did not reach looks as it does when editing', !/rs-/.test(r.q.cls) && r.q.what && !r.q.body, JSON.stringify(r.q));
+    r = await p.ev(`document.querySelector('.n-card[data-id="b"]').click(); ${tick}
+      const step = document.getElementById('runStep');
+      return { shown: !step.classList.contains('hidden'), why: step.textContent.includes('too bad'),
+        redo: [...step.querySelectorAll('[data-redo-step]')].map((b) => b.dataset.redoStep).join(),
+        settings: document.getElementById('selBlock').style.display !== 'none', fromHere: !!document.getElementById('rsFromHere') };`);
+    check('selecting a step shows what it did in the run, with redo, above its settings',
+      r.shown && r.why && r.redo === 'alone,onward' && r.settings && r.fromHere, JSON.stringify(r));
+
+    // Change the failing step, then start from it with the workflow as it is now.
+    r = await p.ev(`const cmd = document.querySelector('#selSpec [data-spec="cmd"]');
+      cmd.value = 'echo fixed {{inputs.w}}'; cmd.dispatchEvent(new Event('input', { bubbles: true })); ${tick}
+      const changed = document.querySelector('.n-card[data-id="b"]').textContent.includes('changed since');
+      document.getElementById('rsFromHere').click();
+      return { changed };`);
+    await sleep(1500);
+    const fromId = await p.ev('return new URLSearchParams(location.search).get(\'run\');');
+    const fromRun = await until(fromId, (x) => x.status === 'awaiting-answer' || settled(x));
+    check('a step changed since the run says so on its card', r.changed, JSON.stringify(r));
+    check('Run from here saves, keeps what came before, and runs the changed step',
+      fromId && fromId !== badId && node(fromRun, 'a')?.kept === true && node(fromRun, 'b')?.output?.out?.trim() === 'fixed bad'
+      && (await api('/api/workflows/ed-run?scope=project')).workflow?.version === 2, `${fromId} ${states(fromRun)} ${node(fromRun, 'b')?.output?.out}`);
+    await sleep(400);
+    r = await p.ev(`const q = document.querySelector('.n-card[data-id="q"]');
+      const yes = document.querySelector('#answerPanel [data-answer="Yes"]');
+      const asked = { cls: q.className, badge: q.querySelector('.rs-badge')?.textContent, button: !!yes };
+      yes?.click(); return asked;`);
+    const edAnswered = await until(fromId, settled);
+    check('a question waits on its card, and is answered above the canvas', /rs-ask/.test(r.cls) && r.badge === '?' && r.button && edAnswered.status === 'done',
+      `${JSON.stringify(r)} ${edAnswered?.status}`);
+
+    // ▶ Run asks for its inputs on this page and runs on this canvas.
+    r = await p.ev(`document.getElementById('btnRun').click(); await new Promise((r) => setTimeout(r, 400));
+      const d = document.getElementById('runDlg'); const w = d?.querySelector('[data-key="w"]');
+      const prefilled = w?.value; w.value = 'calm'; d.querySelector('#rdGo').click();
+      await new Promise((r) => setTimeout(r, 1500));
+      return { open: !!d?.open, prefilled, path: location.pathname, run: new URLSearchParams(location.search).get('run') };`);
+    const ranHere = r.run && await until(r.run, (x) => x.status === 'awaiting-answer' || settled(x));
+    check('▶ Run asks for its inputs on the page, then shows the new run on this canvas',
+      r.prefilled === 'bad' && !r.open && r.path === '/workflow-editor.html' && r.run && r.run !== fromId && ranHere?.inputs?.w === 'calm', JSON.stringify(r));
+    await p.ev(`document.querySelector('#answerPanel [data-answer="No"]')?.click();`);
+    await until(r.run, settled);
+
+    // A step added since the run looks as it does when editing.
+    r = await p.ev(`document.getElementById('newKind').value = 'script'; document.getElementById('btnAddNode').click(); ${tick}
+      const added = [...document.querySelectorAll('.n-card')].find((c) => !['a', 'b', 'q'].includes(c.dataset.id));
+      return { cls: added?.className || '', what: !!added?.querySelector('.n-what') };`);
+    check('a step added since the run looks as it does when editing', r.cls && !/rs-/.test(r.cls) && r.what, JSON.stringify(r));
+    r = await p.ev(`document.getElementById('rbClose').click(); ${tick}
+      return { bar: document.getElementById('runBar').classList.contains('hidden'), run: new URLSearchParams(location.search).has('run'), states: document.querySelectorAll('.n-card[class*="rs-"]').length };`);
+    check('closing the run leaves the canvas as it is for editing', r.bar && !r.run && r.states === 0, JSON.stringify(r));
+    check('the editor\'s run view raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
+    // A step that is working has a moving border, and Stop is above the canvas.
+    await save({ id: 'ed-slow', title: 'Editor slow', graph: { nodes: [script('z', 'sleep 30')], edges: [] } });
+    const slowId = (await start('ed-slow')).run.runId;
+    await until(slowId, (x) => node(x, 'z')?.status === 'running');
+    p = await open(`/workflow-editor.html?from=ed-slow&run=${slowId}`);
+    r = await p.ev(`const c = document.querySelector('.n-card[data-id="z"]');
+      const live = { cls: c.className, ring: getComputedStyle(c, '::before').animationName };
+      document.querySelector('#rbActions [data-act="stop"]').click(); return live;`);
+    const stoppedRun = await until(slowId, settled);
+    check('a step that is working has a moving border, and Stop stops the run',
+      /rs-running/.test(r.cls) && r.ring === 'rsSpin' && stoppedRun.status === 'stopped', `${JSON.stringify(r)} ${stoppedRun?.status}`);
+    await sleep(500);
+    r = await p.ev(`return document.querySelector('.n-card[data-id="z"]').className;`);
+    check('…and the card follows the run as it changes', /rs-stopped/.test(r), r);
     await p.close();
   } finally {
     try { cdp?.close?.(); } catch { /* gone */ }

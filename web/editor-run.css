@@ -1,0 +1,121 @@
+/*
+ * A run shown on the workflow editor's canvas (workflow-editor.html): the
+ * run bar over the canvas, each card's state on its border, and the "In this
+ * run" part of the step sidebar. The card bodies reuse the run page's styles
+ * from workflows.css.
+ */
+
+/* ------------------------------- run bar -------------------------------- */
+.run-bar { padding: 10px 24px 12px; background: var(--surface); border-bottom: 1px solid var(--edge-tint);
+  max-height: 42vh; overflow: auto; }
+.rb-row { display: flex; gap: 20px; align-items: flex-start; }
+.rb-main { flex: 1; min-width: 0; }
+.rb-side { flex: 0 1 auto; max-width: 58%; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.rb-tools { display: flex; gap: 6px; align-items: center; }
+.rb-line { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; min-height: 28px; font: 12.5px var(--f-ui); color: var(--mute); }
+.rb-eyebrow { font: 10px var(--f-mono); letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
+.rb-status { display: inline-flex; align-items: center; gap: 8px; color: var(--text); }
+.rb-status .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 13%, transparent); animation: rowPulse 1.4s ease-in-out infinite; }
+.rb-status .run-totals { color: var(--mute); }
+.rb-x { background: transparent; border: 0; color: var(--mute); font-size: 20px; line-height: 1; padding: 2px 6px; cursor: pointer; }
+.rb-x:hover { color: var(--text); }
+#rbActions .run-actions { margin-top: 0; justify-content: flex-end; }
+.run-bar .notice:first-child { margin-top: 6px; }
+.run-bar .answer-panel { margin-top: 8px; }
+.run-bar .retro { margin-top: 8px; }
+.rb-timeline .timeline { margin: 10px 0 0; }
+
+/* The sidebar is wider while a run is shown: it carries the step's result too. */
+body.has-run .ed-layout:not(.no-sel) { grid-template-columns: 1fr 380px; }
+
+/* ---------------------------- cards in a run ----------------------------- */
+.n-card .c-body { font-size: 12px; color: var(--mute); max-height: 380px; overflow: hidden; display: flex; flex-direction: column; gap: 4px; }
+.n-card.run-wide { width: 360px; }
+.n-card .n-model { margin-left: auto; font: 10px var(--f-mono); color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.n-card .n-meta { font: 10px var(--f-mono); color: var(--faint); }
+.n-card .rs-changed { font: 10px var(--f-mono); color: var(--amber); }
+.n-card .n-preview { align-self: flex-start; font: 10.5px var(--f-mono); color: var(--accent); background: transparent;
+  border: 1px solid color-mix(in oklab, var(--accent) 40%, transparent); border-radius: 999px; padding: 2px 9px; cursor: pointer; }
+.n-card .n-preview:hover { background: color-mix(in oklab, var(--accent) 12%, transparent); }
+
+/* The state sits on the border, the whole way round, with a mark top right. */
+/* .ed-canvas in front: the state's colour outranks hover and selection, which show as a ring. */
+.ed-canvas .n-card[class*="rs-"] { border-width: 1.5px; border-left-width: 3px; padding-left: 10px; }
+.ed-canvas .n-card.rs-done    { border-color: var(--ok); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ok) 14%, transparent); }
+.ed-canvas .n-card.rs-failed  { border-color: var(--ship); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ship) 16%, transparent); }
+.ed-canvas .n-card.rs-ask     { border-color: var(--amber); animation: rsAsk 1.6s ease-in-out infinite; }
+.ed-canvas .n-card.rs-stopped { border-style: dashed; border-color: color-mix(in oklab, var(--design) 60%, transparent); }
+.ed-canvas .n-card.rs-skipped { border-style: dashed; opacity: .45; }
+.ed-canvas .n-card[class*="rs-"].sel { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent); animation: none; }
+
+/* Working: a light runs round the border. */
+@property --rs-a { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+.ed-canvas .n-card.rs-running { border-color: color-mix(in oklab, var(--accent) 28%, transparent); }
+.n-card.rs-running::before {
+  content: ''; position: absolute; inset: -2px -2px -2px -4px; border-radius: 11px; padding: 2.5px;
+  background: conic-gradient(from var(--rs-a),
+    transparent 0 8%, color-mix(in oklab, var(--accent) 35%, transparent) 25%, var(--accent) 45%, transparent 50% 58%,
+    color-mix(in oklab, var(--accent) 35%, transparent) 75%, var(--accent) 95%, transparent 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  animation: rsSpin 1.6s linear infinite; pointer-events: none;
+}
+.ed-canvas .n-card.rs-running { animation: rsWork 1.6s ease-in-out infinite; }
+@keyframes rsWork {
+  0%, 100% { box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 8%, transparent); }
+  50%      { box-shadow: 0 0 0 6px color-mix(in oklab, var(--accent) 16%, transparent); }
+}
+@keyframes rsSpin { to { --rs-a: 360deg; } }
+@keyframes rsAsk {
+  0%, 100% { box-shadow: 0 0 0 2px color-mix(in oklab, var(--amber) 14%, transparent); }
+  50%      { box-shadow: 0 0 0 5px color-mix(in oklab, var(--amber) 26%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .n-card.rs-running::before { animation: none; background: var(--accent); }
+  .ed-canvas .n-card.rs-ask, .ed-canvas .n-card.rs-running { animation: none; }
+}
+
+.rs-badge { position: absolute; top: -9px; right: -9px; width: 20px; height: 20px; border-radius: 50%;
+  display: grid; place-items: center; z-index: 2; color: #fff; box-shadow: 0 0 0 2px var(--bg); pointer-events: none; }
+.rs-badge svg { display: block; }
+.rs-done .rs-badge   { background: var(--ok); }
+.rs-failed .rs-badge { background: var(--ship); }
+.rs-ask .rs-badge    { background: var(--amber); color: #1a1408; font: 700 12px var(--f-ui); }
+
+/* A step the run had that the workflow no longer has. */
+.ed-canvas .n-card.rs-gone { opacity: .55; border-style: dashed; }
+.n-card .n-gone { font: 10px var(--f-mono); color: var(--faint); }
+
+/* ------------------------ "In this run" in the sidebar ------------------------ */
+.run-step { border-bottom: 1px dashed var(--edge-tint); padding-bottom: 16px; }
+.run-step .rs-h { font: 10.5px var(--f-mono); color: var(--accent); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
+.run-step .dr-title { font-size: 17px; margin: 2px 0 10px; }
+.run-step .dr-facts { grid-template-columns: 62px 1fr; font-size: 12px; margin-bottom: 10px; }
+.run-step .dr-sec { margin-top: 12px; }
+.run-step .dr-pre { max-height: 220px; font-size: 11px; }
+.run-step .run-btn { margin-top: 8px; }
+.run-step .dr-redo-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.run-step .dr-redo-row .run-btn { margin-top: 0; }
+.run-step .dr-redo-why, .rs-more-why { font: 11px/1.45 var(--f-ui); color: var(--faint); margin-top: 6px; }
+.run-step .dr-shown { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.run-step .dr-shown img, .run-step .dr-shown video { width: 100%; display: block; border-radius: 4px; }
+.run-step .dr-shown figcaption { font: 10px var(--f-mono); color: var(--faint); }
+.rs-more { margin-top: 14px; }
+.rs-more .rs-changed-note { font: 11.5px/1.45 var(--f-ui); color: var(--amber); margin-bottom: 4px; }
+
+/* -------------------------- start a run here -------------------------- */
+.run-dlg { width: min(520px, calc(100vw - 32px)); padding: 22px 24px; border: 1px solid var(--edge-strong); border-radius: 12px;
+  background: var(--surface); color: var(--text); }
+.run-dlg::backdrop { background: color-mix(in oklab, #000 45%, transparent); }
+.run-dlg h3 { margin: 0 0 4px; font: var(--d-wt) 20px/1.2 var(--f-display); letter-spacing: -0.01em; }
+.run-dlg .rd-sub { font: 12px/1.45 var(--f-ui); color: var(--mute); margin-bottom: 14px; }
+.run-dlg label { display: block; font: 11px var(--f-mono); color: var(--mute); letter-spacing: .04em; margin: 10px 0 4px; }
+.run-dlg input, .run-dlg textarea { width: 100%; box-sizing: border-box; padding: 8px 10px; font: 13px var(--f-ui); color: var(--text);
+  background: var(--bg); border: 1px solid var(--edge-tint); border-radius: 6px; outline: none; }
+.run-dlg textarea { min-height: 96px; resize: vertical; font: 12.5px/1.5 var(--f-ui); }
+.run-dlg input:focus, .run-dlg textarea:focus { border-color: var(--edge-hi); }
+.run-dlg .rd-foot { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 18px; }
+.run-dlg .rd-status { margin-right: auto; font: 12px var(--f-ui); color: var(--mute); }
+.run-dlg .rd-status.bad { color: var(--ship); }
+.run-dlg .run-btn.go { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }

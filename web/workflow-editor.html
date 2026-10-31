@@ -16,6 +16,7 @@
 <link rel="stylesheet" href="/workflows.css">
 <link rel="stylesheet" href="/workflows-editor.css">
 <link rel="stylesheet" href="/assistant.css">
+<link rel="stylesheet" href="/editor-run.css">
 <style>
   .ed-layout { display: grid; grid-template-columns: 1fr 320px; gap: 0; height: calc(100vh - 56px); }
   .ed-canvas { position: relative; overflow: auto;
@@ -253,6 +254,29 @@
   <span class="pv-key"><i class="k-add">new</i><i class="k-chg">changed</i><i class="k-rem">removed</i></span>
   <button type="button" id="pvStop">Stop previewing</button>
 </div>
+<!-- The run shown on the canvas: how it is going, its question, and what to do next. -->
+<section class="run-bar hidden" id="runBar" aria-label="This run">
+  <div class="rb-row">
+    <div class="rb-main">
+      <div class="rb-line">
+        <span class="rb-eyebrow">This run</span>
+        <span class="rb-status" id="rbStatus"></span>
+        <a class="link" id="rbParent" hidden title="The run whose step started this one"></a>
+      </div>
+      <div id="runNotice"></div>
+      <div id="answerPanel"></div>
+      <div id="retroPanel"></div>
+    </div>
+    <div class="rb-side">
+      <div class="rb-tools">
+        <button class="run-btn" id="rbTimeline" type="button" aria-expanded="false" title="Each step as a bar against the run's clock">Timeline</button>
+        <button class="rb-x" id="rbClose" type="button" title="Stop showing this run, and just edit" aria-label="Stop showing this run">×</button>
+      </div>
+      <div id="rbActions"></div>
+    </div>
+  </div>
+  <div class="rb-timeline" id="rbTimelineWrap" hidden><div class="timeline hidden" id="timeline"></div></div>
+</section>
 <div class="ed-layout no-sel" id="edLayout">
   <div class="zoom-bar" role="group" aria-label="Zoom">
     <button type="button" id="zoomOut" title="Zoom out" aria-label="Zoom out">−</button>
@@ -277,6 +301,12 @@
       <button id="modeJson">{ } JSON</button>
     </div>
 
+    <!-- The selected step in the run on the canvas: what it did, and redo. -->
+    <div class="block run-step hidden" id="runStep">
+      <div class="rs-h">In this run</div>
+      <div id="drawerBody"></div>
+      <div id="runStepMore"></div>
+    </div>
     <div class="block" id="runsBlock" style="display:none;">
       <h3>Past runs <span class="count" id="runsCount"></span></h3>
       <div id="runsList"></div>

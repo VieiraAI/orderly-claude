@@ -150,7 +150,7 @@ function workflowBubble(run) {
   const toneCls = waiting ? 'ask' : live ? 'running' : (failed || stopped || cut) ? 'warn' : 'done';
   return el('a', {
     class: `bubble workflow tone-${toneCls}`,
-    href: `/workflows-run.html#${run.runId}`,
+    href: `/workflow-editor.html?run=${run.runId}`,
     target: '_blank', rel: 'noopener',
     title: 'Open the canvas for this run',
   }, [

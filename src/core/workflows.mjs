@@ -460,7 +460,7 @@ export function filesDirOf(def) {
 
 export function startRun({
   workflowId, inputs = {}, repoRoot, scope = null, sessionId = null, trigger = 'you',
-  budgetUsd, scheduleId = null, definition = null, parent = null,
+  budgetUsd, scheduleId = null, definition = null, parent = null, reuse = null,
 }) {
   const found = definition || getDefinition(workflowId, { repoRoot, scope });
   if (!found) throw new Error(`workflow not found: ${workflowId}`);
@@ -515,8 +515,33 @@ export function startRun({
     graph: { nodes: withLessons(freshNodes(def), def.lessons), edges: [...(def.graph?.edges || [])] },
     cost: 0,
   };
+  if (reuse) keepFromEarlierRun(run, def, reuse);
   writeRun(run);
   return run;
+}
+
+/*
+ * Start from a step with the workflow as it is now, keeping what an earlier
+ * run already made before that step. A step is kept only where it finished
+ * in that run and is set up the same way now; one that was changed since
+ * runs again, and so does everything after the chosen step.
+ */
+function keepFromEarlierRun(run, def, { runId, fromNodeId }) {
+  const prior = readRun(runId);
+  if (!prior) throw new Error(`run not found: ${runId}`);
+  if (prior.workflowId !== run.workflowId) throw new Error('that run is of another workflow');
+  if (!def.graph.nodes.some((n) => n.id === fromNodeId)) throw new Error(`there is no step "${fromNodeId}" in this workflow`);
+  const before = collectAncestors(def.graph, fromNodeId);
+  const ran = Object.fromEntries((prior.definition?.graph?.nodes || prior.graph?.nodes || []).map((n) => [n.id, n]));
+  const same = (a, b) => !!a && !!b && a.kind === b.kind && JSON.stringify(a.spec ?? null) === JSON.stringify(b.spec ?? null)
+    && (a.prompt ?? null) === (b.prompt ?? null) && (a.command ?? null) === (b.command ?? null);
+  const defNodes = Object.fromEntries(def.graph.nodes.map((n) => [n.id, n]));
+  run.graph.nodes = run.graph.nodes.map((n) => {
+    const prev = prior.graph?.nodes?.find((x) => x.id === n.id);
+    if (!before.has(n.id) || prev?.status !== 'done' || !same(defNodes[n.id], ran[n.id])) return n;
+    return { ...n, status: 'done', output: prev.output, startedAt: prev.startedAt, endedAt: prev.endedAt, attempts: prev.attempts || 1, kept: true };
+  });
+  run.reusedFrom = { runId, fromNodeId };
 }
 
 /** Prepend live lessons (pinned or down-rated) to each matching node's prompt. */

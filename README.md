@@ -91,11 +91,22 @@ runs on your machine.
   *Run a workflow*, *Save or publish*. Connect them in the order they should run. Every
   setting the engine reads has a field in the panel; the file view is there
   to diff, not to author in. Or start from a built-in with **Make it yours**.
+- **Build it and run it in one place.** **▶ Run** asks for the inputs on the
+  editor's own page and runs the workflow on its canvas. Each card fills in
+  with what its step made, and its border says how it is going: a moving
+  light while it works, green with a check when done, red with a warning
+  when it failed, amber while it waits for you. A step not reached yet, or
+  added since, looks as it does when editing. The run's question, notices
+  and actions (stop, resume, repeat, share) sit above the canvas; selecting
+  a step shows what it did, with redo, above its settings. Change a step and
+  **Run from here with the workflow as it is now** keeps what earlier steps
+  made and runs the rest with your change. **◷ Runs** opens past runs on the
+  same canvas.
 - **Workflows are building blocks.** A *Run a workflow* step runs another
   workflow as one step: you fill its inputs from this run, its card follows
   that run and links to it, and later steps use what its steps made as
   `{{nodes.ID.output.steps.STEP.FIELD}}`. A question it asks is answered on
-  its own Run page; its spending counts against this run's limit; stopping
+  its own canvas; its spending counts against this run's limit; stopping
   this run stops it. A workflow can never run itself, and they nest at most
   three deep.
 - **Steps name what they use.** `{{inputs.audience}}` is something typed when

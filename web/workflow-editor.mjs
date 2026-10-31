@@ -14,6 +14,11 @@
  * reflects what the user placed on screen (snapped to a 20px grid).
  */
 import { mountAssistant } from '/assistant.mjs';
+import {
+  bindRunView, setRun, KIND_LABEL, cardBody, cardClick, cardFootMeta, previewOf, openPreview,
+  renderNotice, renderAnswer, renderRetro, renderRunActions, renderTimeline, openDrawer, refreshRedo,
+  outOfDate, runSeconds, fmtSeconds, money,
+} from '/run-view.mjs';
 
 const $ = (id) => document.getElementById(id);
 const COL_W = 240, ROW_H = 180, GUTTER = 60;
@@ -101,6 +106,11 @@ const state = {
   warnings: [],
   skills: [],
   refField: null,      // the field a reference will be inserted into
+  run: null,           // the run shown on the canvas, if any
+  runId: null,
+  runMeta: {},
+  grid: null,          // column and row starts while a run sizes the cards
+  dragging: false,
 };
 
 /* ---------------------------------- init --------------------------------- */
@@ -109,10 +119,26 @@ async function boot() {
   // /workflow-editor.html?from=<id> loads an existing def into the editor so
   // "Edit" on a workflow's preview page lands you in a prefilled editor.
   const q = new URLSearchParams(location.search);
-  const from = q.get('from') || q.get('id');
+  let from = q.get('from') || q.get('id');
+  let scope = q.get('scope'), repo = q.get('repo');
+  // ?run=<id> shows that run on its workflow's canvas; alone, it names the workflow too.
+  const runId = q.get('run');
+  const shown = runId ? await fetch(`/api/runs/${encodeURIComponent(runId)}`).then((x) => x.json()).catch(() => ({})) : null;
+  if (runId && !shown?.run) toast('That run is not there any more — it may have been deleted.', 'err', 0);
+  if (shown?.run && !from) {
+    from = shown.run.workflowId;
+    if (shown.run.scope === 'project' && shown.run.repoRoot) { scope = 'project'; repo = shown.run.repoRoot; }
+  }
   // scope + repo name a workflow from another project; see refQuery.
-  if (from) await loadExisting(from, { scope: q.get('scope'), repo: q.get('repo') });
-  else {
+  if (from) await loadExisting(from, { scope, repo, quiet: !!shown?.run });
+  // A run of a workflow since deleted still shows, on the copy it ran.
+  if (shown?.run && !state.def.graph.nodes.length && shown.run.definition) {
+    state.def = normalise(structuredClone(shown.run.definition));
+    toast('This workflow is not in your library any more. This is the copy the run used; save it to keep it.', '', 0);
+  }
+  if (from || shown?.run) {
+    if (shown?.run) { state.runId = runId; applyRun(shown); followRuns(); }
+  } else {
     state.def = blank();
     // Arriving from "start a new workflow called …" on the Workflows page.
     const title = (q.get('title') || '').trim();
@@ -173,10 +199,10 @@ function refQuery(w) {
     ? `&scope=project&repo=${encodeURIComponent(w.repoRoot)}` : '';
 }
 
-async function loadExisting(id, { scope: wantScope, repo } = {}) {
+async function loadExisting(id, { scope: wantScope, repo, quiet = false } = {}) {
   const q = wantScope && repo ? `?scope=${encodeURIComponent(wantScope)}&repo=${encodeURIComponent(repo)}` : '';
   const r = await fetch(`/api/workflows/${encodeURIComponent(id)}${q}`).then((x) => x.json()).catch(() => ({}));
-  if (!r.workflow) { state.def = blank(); toast(`There is no workflow called "${id}".`, 'err'); return; }
+  if (!r.workflow) { state.def = blank(); if (!quiet) toast(`There is no workflow called "${id}".`, 'err'); return; }
   state.bootedRepo = r.bootedRepo || null;
   // Drop server-side fields that aren't part of the on-disk def.
   const { scope, source, file, invalid, problems, repoRoot, repoName, key, clash, ...clean } = r.workflow;
@@ -313,6 +339,15 @@ function bindUi() {
   });
 
   $('btnValidate').addEventListener('click', () => validate({ announce: true }));
+  $('rbClose').addEventListener('click', closeRun);
+  $('rbTimeline').addEventListener('click', () => {
+    const wrap = $('rbTimelineWrap');
+    wrap.hidden = !wrap.hidden;
+    $('rbTimeline').setAttribute('aria-expanded', String(!wrap.hidden));
+    $('rbTimeline').classList.toggle('on', !wrap.hidden);
+  });
+  // The run bar changes height as the run goes; the canvas takes the rest.
+  new ResizeObserver(() => fitLayout()).observe($('runBar'));
   $('btnSave').addEventListener('click', save);
   $('btnRun')?.addEventListener('click', saveAndRun);
   $('modeVisual').addEventListener('click', () => setMode('visual'));
@@ -672,12 +707,11 @@ async function save() {
 }
 
 /**
- * Save first, then open the workflow's own sheet, which collects every
- * input (an Inputs step's fields included) and reports problems inline.
+ * Save first, then ask for its inputs on this page and run it here, on the
+ * canvas, rather than on a page of its own.
  */
 async function saveAndRun() {
-  if (state.dirty || !state.loaded) { const saved = await save(); if (!saved) return; }
-  location.href = `/workflows.html?open=${encodeURIComponent(state.loaded.id)}${refQuery(state.loaded)}#workflows`;
+  await openRunDialog();
 }
 
 async function importFile() {
@@ -854,7 +888,7 @@ function insertRef(text) {
 
 /* --------------------------------- render -------------------------------- */
 
-/* Past runs of this workflow, newest first, each opening its run page. */
+/* Past runs of this workflow, newest first, each opening on this canvas. */
 const RUN_WORD = { running: 'Running', 'awaiting-answer': 'Waiting for you', done: 'Done', failed: 'Failed', stopped: 'Stopped', interrupted: 'Cut short' };
 async function loadPastRuns() {
   const id = state.loaded?.id;
@@ -891,13 +925,21 @@ async function loadPastRuns() {
     const word = r.needsYou ? 'Waiting for you' : RUN_WORD[r.status] || r.status;
     const why = r.status === 'failed' && r.failedNode ? `“${r.failedNode.title}” failed` : '';
     const rated = r.rating ? `<span class="rated ${r.rating}">${r.rating === 'up' ? 'good' : 'not good'}</span>` : '';
-    return `<a class="past-run" href="/workflows-run.html#${encodeURIComponent(r.runId)}">
+    return `<a class="past-run${r.runId === state.runId ? ' on' : ''}" data-run="${escapeAttr(r.runId)}" href="/workflow-editor.html?run=${encodeURIComponent(r.runId)}">
       <span class="pr-when">${escapeHtml(date)} · ${escapeHtml(time)}</span>
       <span class="pr-state s-${live ? 'live' : escapeHtml(r.status)}">${escapeHtml(word)}</span>
       <span class="pr-meta">${[took, cost, r.doneNodes != null ? `${r.doneNodes} of ${r.totalNodes} steps` : ''].filter(Boolean).map(escapeHtml).join(' · ')}${rated}</span>
       ${why ? `<span class="pr-why">${escapeHtml(why)}</span>` : ''}
     </a>`;
   }).join('') + more;
+  // Open on this canvas, not another page.
+  for (const a of $('runsList').querySelectorAll('[data-run]')) {
+    a.addEventListener('click', (e) => {
+      if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+      e.preventDefault();
+      showRun(a.dataset.run);
+    });
+  }
 }
 
 function tookText(s) {
@@ -927,7 +969,7 @@ function renderLessons() {
         <label class="check-line"><input type="checkbox" data-pin-lesson="${i}" ${l.pin ? 'checked' : ''}> Use next time</label>
         <button class="run-btn danger x" data-rm-lesson="${i}" title="Remove this lesson" aria-label="Remove this lesson">✕</button>
       </div>`).join('')
-    : '<div class="list-empty">None yet. Mark a finished run as good or not good on its run page to add one.</div>';
+    : '<div class="list-empty">None yet. Mark a finished run as good or not good, above the canvas while it is shown, to add one.</div>';
   for (const el of $('lessonsList').querySelectorAll('[data-pin-lesson]')) {
     el.onchange = () => { state.def.lessons[Number(el.dataset.pinLesson)].pin = el.checked; renderLessons(); changed({ redraw: false }); };
   }
@@ -964,6 +1006,7 @@ function render() {
   refreshAddPickers();
   renderCanvas();
   renderSelected();
+  renderRunStep();
   // Sidebar collapses when nothing is selected — the canvas fills the width.
   const layout = $('edLayout');
   if (layout) layout.classList.toggle('no-sel', !state.selectedId && !state.side);
@@ -1021,6 +1064,8 @@ function renderCanvas() {
   }
   // Previewing a proposal: steps it would remove stay visible, faded.
   for (const n of state.previewing?.removed || []) inner.append(nodeCard(n));
+  // A run shows the steps it ran that the workflow no longer has, faded.
+  for (const n of goneSteps()) inner.append(nodeCard({ ...n, gone: true }));
   // Grow the inner container to contain every absolutely-positioned card.
   // Without this, cards past col 6 land outside .ed-canvas-inner's bounds,
   // the SVG stays width:100% of the (narrower) inner, and edges to those
@@ -1031,6 +1076,8 @@ function renderCanvas() {
     w: nodes.reduce((m, n) => Math.max(m, GUTTER + ((n.col || 0) - o.col) * COL_W + 220), 0) + GUTTER,
     h: nodes.reduce((m, n) => Math.max(m, GUTTER + ((n.row || 0) - o.row) * ROW_H + 140), 0) + GUTTER,
   };
+  state.grid = null;
+  if (state.run) state.content = reflow(inner);
   const canvas = inner.parentElement;
   const w = Math.max(state.content.w, canvas.clientWidth / (state.zoom || 1));
   const h = Math.max(state.content.h, canvas.clientHeight / (state.zoom || 1));
@@ -1087,7 +1134,7 @@ function summary(n) {
 
 /** The leftmost column and top row in use, drawn at the gutter. */
 function gridOrigin() {
-  const nodes = state.def.graph.nodes;
+  const nodes = [...state.def.graph.nodes, ...goneSteps()];
   if (!nodes.length) return { col: 0, row: 0 };
   return { col: Math.min(...nodes.map((n) => n.col || 0)), row: Math.min(...nodes.map((n) => n.row || 0)) };
 }
@@ -1105,11 +1152,20 @@ function nodeCard(n) {
   if (probs.length && !state.previewing) cls.push('has-problem');
   const pv = previewMark(n.id);
   if (pv) cls.push(`pv-${pv}`);
+  // In the run on the canvas: its state on the border, and what it made inside.
+  const rn = n.gone ? n : runNode(n.id);
+  const rs = !state.previewing && runState(rn);
+  if (rs) cls.push(`rs-${rs}`);
+  if (rs && previewOf(rn) && /pictures|pages/.test(previewOf(rn).kind)) cls.push('run-wide');
+  if (n.gone) cls.push('rs-gone');
   card.className = cls.join(' ');
   card.style.left = `${x}px`;
   card.style.top = `${y}px`;
   card.dataset.id = n.id;
   card.dataset.kind = n.kind;
+  card.dataset.c = String((n.col || 0) - o.col);
+  card.dataset.r = String((n.row || 0) - o.row);
+  if (rs) return runCard(card, n, rn, rs);
   const s = n.spec || {};
   const flags = [];
   if (s.retry?.attempts) flags.push(`↻ ${s.retry.attempts}`);
@@ -1146,10 +1202,37 @@ function nodeCard(n) {
   return card;
 }
 
+/** A card whose step is in the run: selected, dragged and deleted as any other. */
+function runCard(card, n, rn, rs) {
+  card.innerHTML = runCardHtml(n, rn, rs);
+  card.title = '';
+  card.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (cardClick(rn, e)) return;
+    if (e.target.closest('.n-preview')) { openPreview(rn); return; }
+    if (!n.gone && e.shiftKey && state.selectedId && state.selectedId !== n.id) {
+      if (addEdge(state.selectedId, n.id)) changed();
+      return;
+    }
+    selectNode(n.id);
+  });
+  if (n.gone) return card;
+  card.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    selectNode(n.id);
+    confirmDelete(n);
+  });
+  attachDrag(card, n);
+  return card;
+}
+
 function attachDrag(card, n) {
   let dragging = false, moved = false, startX, startY, startLeft, startTop;
   card.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
+    // Buttons and links on a card's result are pressed, not dragged.
+    if (e.target.closest('button, a, iframe, video')) return;
     dragging = true; moved = false;
     startX = e.clientX; startY = e.clientY;
     startLeft = parseFloat(card.style.left); startTop = parseFloat(card.style.top);
@@ -1165,6 +1248,7 @@ function attachDrag(card, n) {
     // the click handler can run, so selection appears broken.
     if (!moved && Math.abs(dx) + Math.abs(dy) < 4) return;
     moved = true;
+    state.dragging = true;
     card.style.left = `${Math.max(0, Math.round((startLeft + dx) / 20) * 20)}px`;
     card.style.top  = `${Math.max(0, Math.round((startTop  + dy) / 20) * 20)}px`;
     renderEdges();
@@ -1172,13 +1256,21 @@ function attachDrag(card, n) {
   window.addEventListener('mouseup', () => {
     if (!dragging) return;
     dragging = false;
+    state.dragging = false;
     card.classList.remove('dragging');
     document.body.style.userSelect = '';
-    if (!moved) return; // plain click — let the click handler fire selectNode.
-    // Snap pixels back to col/row and re-render.
+    if (!moved) {
+      // plain click — let the click handler fire selectNode.
+      if (state.redrawAfterDrag) { state.redrawAfterDrag = false; renderCanvas(); }
+      return;
+    }
+    state.redrawAfterDrag = false;
+    // Snap pixels back to col/row and re-render. While a run sizes the
+    // cards, the grid's columns and rows are not all the same size.
     const o = state.origin || { col: 0, row: 0 };
-    n.col = Math.max(0, Math.round((parseFloat(card.style.left) - GUTTER) / COL_W) + o.col);
-    n.row = Math.max(0, Math.round((parseFloat(card.style.top)  - GUTTER) / ROW_H) + o.row);
+    const g = state.grid;
+    n.col = Math.max(0, gridIndex(parseFloat(card.style.left), g?.colLeft, COL_W) + o.col);
+    n.row = Math.max(0, gridIndex(parseFloat(card.style.top), g?.rowTop, ROW_H) + o.row);
     changed();
   });
 }
@@ -1814,6 +1906,337 @@ function placeNew(def, before) {
     }
     if (!moved) break;
   }
+}
+
+/* --------------------------- a run on the canvas -------------------------- */
+
+/*
+ * A run of this workflow is shown on its own canvas: each card keeps its
+ * place and fills in with what the step made, and its border says how it is
+ * going. A step added since the run, or not reached yet, stays as it is here.
+ * The run bar above the canvas has the run's state, question and actions;
+ * the sidebar has the selected step's result above its settings. All of it
+ * is drawn by run-view.mjs, which the run page uses too.
+ */
+bindRunView({
+  reload: () => refreshRun(),
+  select: (id) => selectNode(id),
+  selected: () => state.selectedId,
+  restack: () => renderCanvas(),
+  cardEl: (id) => $('edInner').querySelector(`.n-card[data-id="${CSS.escape(id)}"]`),
+  actionsMount: () => $('rbActions'),
+  drawerEl: () => $('runStep'),
+  runHref: (id) => `/workflow-editor.html?run=${encodeURIComponent(id)}`,
+  openRun: (id) => showRun(id),
+  afterDelete: () => closeRun(),
+  again: (r) => openRunDialog({ prefill: r.inputs || {} }),
+  answerHint: '◆ Answer it above the canvas',
+});
+
+function runNode(id) { return state.run?.graph?.nodes?.find((n) => n.id === id) || null; }
+
+/** How a step is doing in the run on the canvas; null until it starts. */
+function runState(rn) {
+  if (!rn || rn.status === 'pending') return null;
+  if (rn.waitsFor) return 'ask';
+  return { done: 'done', running: 'running', failed: 'failed', skipped: 'skipped', stopped: 'stopped', interrupted: 'stopped' }[rn.status] || null;
+}
+
+const RS_BADGE = {
+  done: svgMark('<path d="M3.5 7.2 L6 9.6 L10.5 4.6"/>'),
+  failed: svgMark('<path d="M7 2.2 L12.4 11.6 H1.6 Z"/><line x1="7" y1="5.6" x2="7" y2="8.3"/><circle cx="7" cy="10" r="0.4" fill="currentColor"/>', 1.4),
+  ask: '?',
+};
+function svgMark(inner, w = 2) {
+  return `<svg viewBox="0 0 14 14" width="12" height="12" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+}
+
+/** Steps the run had that the workflow does not have any more. */
+function goneSteps() {
+  if (!state.run) return [];
+  const here = new Set(state.def.graph.nodes.map((n) => n.id));
+  return state.run.graph.nodes.filter((n) => !here.has(n.id) && n.status !== 'pending');
+}
+
+/** True when a step is set up differently now from how the run ran it. */
+function changedSinceRun(n) {
+  const ran = state.run?.definition?.graph?.nodes?.find((x) => x.id === n.id);
+  if (!ran) return !!state.run?.definition;
+  return ran.kind !== n.kind || JSON.stringify(ran.spec ?? null) !== JSON.stringify(n.spec ?? null);
+}
+
+/** The card's inside while its step is in the run: what it made, as on the run page. */
+function runCardHtml(n, rn, rs) {
+  const m = rn.output?.meta || {};
+  const model = m.model
+    ? String(m.model).replace(/^claude-/, '').replace(/^([a-z]+)-(\d+)-(\d+).*$/i, (_, f, a, b) => `${f[0].toUpperCase()}${f.slice(1)} ${a}.${b}`)
+    : '';
+  const foot = [cardFootMeta(rn, m)].filter(Boolean);
+  if (outOfDate(rn)) foot.push('<span class="rs-changed" title="An earlier step was redone after this one ran">out of date</span>');
+  if (!rn.gone && changedSinceRun(n)) foot.push('<span class="rs-changed" title="You changed this step after the run used it">changed since</span>');
+  return `
+    <div class="n-head">
+      <span class="n-kind">${KIND_GLYPH[n.kind] || '●'} ${escapeHtml(KINDS[n.kind]?.name || LEGACY[n.kind] || KIND_LABEL[n.kind] || n.kind)}</span>
+      ${model ? `<span class="n-model">${escapeHtml(model)}</span>` : `<span class="n-id">${escapeHtml(n.id)}</span>`}
+    </div>
+    <div class="n-title">${escapeHtml(n.title || n.id)}</div>
+    ${rn.gone ? '<div class="n-gone">not in the workflow any more</div>' : ''}
+    <div class="c-body">${cardBody(rn)}</div>
+    ${previewOf(rn) ? '<button type="button" class="n-preview" title="Open what it made, full size">Preview ↗</button>' : ''}
+    ${foot.length ? `<div class="n-foot"><span class="n-meta">${foot.join(' · ')}</span></div>` : ''}
+    ${RS_BADGE[rs] ? `<span class="rs-badge" aria-label="${{ done: 'done', failed: 'failed', ask: 'waiting for you' }[rs]}">${RS_BADGE[rs]}</span>` : ''}`;
+}
+
+/*
+ * Cards that show a result are taller, or wider, than the grid allows for.
+ * Each column is as wide as its widest card and each row as tall as its
+ * tallest, so nothing overlaps; with nothing big the grid is as it was.
+ */
+function reflow(inner) {
+  const cards = [...inner.querySelectorAll('.n-card')];
+  const colW = {}, rowH = {};
+  for (const el of cards) {
+    const c = Number(el.dataset.c), r = Number(el.dataset.r);
+    colW[c] = Math.max(colW[c] || 0, el.offsetWidth);
+    rowH[r] = Math.max(rowH[r] || 0, el.offsetHeight);
+  }
+  const maxC = Math.max(0, ...Object.keys(colW).map(Number));
+  const maxR = Math.max(0, ...Object.keys(rowH).map(Number));
+  const colLeft = [], rowTop = [];
+  for (let c = 0, x = GUTTER; c <= maxC + 1; c++) { colLeft[c] = x; x += Math.max(COL_W, (colW[c] || 0) + 40); }
+  for (let r = 0, y = GUTTER; r <= maxR + 1; r++) { rowTop[r] = y; y += Math.max(ROW_H, (rowH[r] || 0) + 40); }
+  for (const el of cards) {
+    el.style.left = `${colLeft[Number(el.dataset.c)]}px`;
+    el.style.top = `${rowTop[Number(el.dataset.r)]}px`;
+  }
+  state.grid = { colLeft, rowTop };
+  return {
+    w: colLeft[maxC] + (colW[maxC] || 200) + GUTTER,
+    h: rowTop[maxR] + (rowH[maxR] || 92) + GUTTER,
+  };
+}
+
+/** The column or row a dropped card lands in, on a grid whose steps vary. */
+function gridIndex(px, starts, step) {
+  if (!starts?.length) return Math.round((px - GUTTER) / step);
+  const last = starts.length - 1;
+  if (px > starts[last]) return last + Math.round((px - starts[last]) / step);
+  let best = 0;
+  for (let i = 1; i < starts.length; i++) if (Math.abs(starts[i] - px) < Math.abs(starts[best] - px)) best = i;
+  return best;
+}
+
+/** Show a run on the canvas, and keep it up to date. */
+async function showRun(runId) {
+  const r = await fetch(`/api/runs/${encodeURIComponent(runId)}`).then((x) => x.json()).catch(() => ({}));
+  if (!r.run) { toast('That run is not there any more — it may have been deleted.', 'err'); return false; }
+  state.runId = runId;
+  applyRun(r);
+  const q = new URLSearchParams(location.search);
+  q.set('run', runId);
+  history.replaceState(null, '', `${location.pathname}?${q}`);
+  followRuns();
+  if (state.side === 'runs') state.side = null;
+  render();
+  fitLayout();
+  return true;
+}
+
+function applyRun(r) {
+  state.run = r.run;
+  state.runMeta = r;
+  setRun(r.run, r);
+  document.body.classList.add('has-run');
+  renderRunBar();
+}
+
+/** Fetch the run again after an update, and redraw only what a run changes. */
+async function refreshRun() {
+  if (!state.runId) return;
+  const r = await fetch(`/api/runs/${encodeURIComponent(state.runId)}`).then((x) => x.json()).catch(() => ({}));
+  if (!r.run || r.run.runId !== state.runId) return;
+  applyRun(r);
+  // A card being dragged is left alone; it redraws when it is let go.
+  if (state.dragging) state.redrawAfterDrag = true; else renderCanvas();
+  renderRunStep();
+  refreshRedo();
+}
+
+function closeRun() {
+  state.run = null; state.runId = null; state.runMeta = {};
+  setRun(null, {});
+  document.body.classList.remove('has-run');
+  $('runBar').classList.add('hidden');
+  const q = new URLSearchParams(location.search);
+  q.delete('run');
+  history.replaceState(null, '', `${location.pathname}${q.toString() ? `?${q}` : ''}`);
+  render();
+  fitLayout();
+}
+
+/* Every run's events arrive on one stream; only this run's redraw the canvas. */
+let runStream = null;
+function followRuns() {
+  if (runStream || new URLSearchParams(location.search).has('snapshot')) return;
+  runStream = new EventSource('/events');
+  let pending = null;
+  const mine = (e) => {
+    let id = null;
+    try { id = JSON.parse(e.data || '{}').runId; } catch { /* no payload */ }
+    if (!state.runId || (id && id !== state.runId)) return;
+    clearTimeout(pending);
+    pending = setTimeout(() => refreshRun().catch(() => {}), 120);
+  };
+  for (const ev of ['update', 'run-start', 'run-finish']) runStream.addEventListener(ev, mine);
+}
+
+const RUN_WORDS = { running: 'Running', 'awaiting-answer': 'Waiting for you', done: 'Done', failed: 'Failed', stopped: 'Stopped', interrupted: 'Cut short' };
+
+function renderRunBar() {
+  const run = state.run;
+  $('runBar').classList.toggle('hidden', !run);
+  if (!run) return;
+  const nodes = run.graph?.nodes || [];
+  const done = nodes.filter((n) => n.status === 'done').length;
+  const cost = nodes.reduce((t, n) => t + (typeof n.output?.meta?.cost === 'number' ? n.output.meta.cost : 0), 0);
+  const live = run.status === 'running' || run.status === 'awaiting-answer';
+  const bits = [];
+  if (cost) bits.push(money(cost));
+  if (run.budgetUsd) bits.push(`limit ${money(run.budgetUsd)}`);
+  const took = runSeconds(run);
+  if (took != null) bits.push(`took ${fmtSeconds(took)}`);
+  const started = run.startedAt ? when(run.startedAt) : '';
+  $('rbStatus').innerHTML = `${live ? '<span class="live-dot"></span>' : ''}<b>${escapeHtml(RUN_WORDS[run.status] || run.status)}</b>`
+    + ` · ${done} of ${nodes.length} done${bits.length ? ` · <span class="run-totals">${bits.map(escapeHtml).join(' · ')}</span>` : ''}`
+    + `${started ? ` · <span class="run-totals">started ${escapeHtml(started)}</span>` : ''}`;
+  const up = $('rbParent');
+  up.hidden = !run.parent;
+  if (run.parent) { up.href = `/workflow-editor.html?run=${encodeURIComponent(run.parent.runId)}`; up.textContent = `↑ Part of ${run.parent.title}`; }
+  renderNotice();
+  renderAnswer();
+  renderRetro();
+  renderRunActions();
+  renderTimeline();
+}
+
+/** The selected step's part in the run, above its settings in the sidebar. */
+function renderRunStep() {
+  const box = $('runStep');
+  const rn = state.selectedId ? runNode(state.selectedId) : null;
+  const show = !!rn && rn.status !== 'pending';
+  box.classList.toggle('hidden', !show);
+  if (!show) { $('runStepMore').innerHTML = ''; return; }
+  openDrawer(rn.id, { keepScroll: true });
+  const n = selectedNode();
+  const run = state.run;
+  const live = run.status === 'running' || run.status === 'awaiting-answer';
+  // Redo repeats the step as the run ran it. To try a change, start from the
+  // step with the workflow as it is now; earlier steps keep what they made.
+  const ours = state.loaded && run.workflowId === state.loaded.id;
+  const changed = n && changedSinceRun(n);
+  $('runStepMore').innerHTML = ours && n && !live ? `<div class="rs-more">
+      ${changed ? '<div class="rs-changed-note">You have changed this step since this run. Redo runs it as it was; this uses your changes.</div>' : ''}
+      <button class="run-btn" id="rsFromHere" title="A new run of the workflow as it is now, starting from this step">▶ Run from here with the workflow as it is now</button>
+      <div class="rs-more-why">Earlier steps keep what they made in this run, unless you changed them. ${state.dirty ? 'Saves your changes first.' : ''}</div>
+      <span class="need-status" id="rsFromStatus"></span>
+    </div>` : '';
+  $('rsFromHere')?.addEventListener('click', (e) => runFromHere(n.id, e.currentTarget));
+}
+
+let startingRun = false;
+async function runFromHere(nodeId, btn) {
+  if (startingRun) return;
+  if (state.dirty) { const saved = await save(); if (!saved) return; }
+  startingRun = true;
+  btn.disabled = true; btn.textContent = 'Starting…';
+  const r = await startRunHere({ inputs: state.run.inputs || {}, reuse: { runId: state.run.runId, fromNodeId: nodeId } });
+  startingRun = false;
+  if (r.run?.runId) { await showRun(r.run.runId); return; }
+  btn.disabled = false; btn.textContent = '▶ Run from here with the workflow as it is now';
+  const el = $('rsFromStatus');
+  if (el) { el.textContent = r.error || 'Could not start it.'; el.classList.add('bad'); }
+}
+
+function startRunHere(body) {
+  const l = state.loaded;
+  return fetch(`/api/workflows/${encodeURIComponent(l.id)}/run`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...body, scope: l.scope, repo: l.repoRoot || null }),
+  }).then((x) => x.json()).catch((e) => ({ error: e.message }));
+}
+
+/** Inputs a run asks for: the workflow's own, plus any an Inputs step declares. */
+function runInputs(def) {
+  const seen = new Set();
+  const out = [];
+  for (const f of [...(def.inputs || []),
+    ...(def.graph?.nodes || []).filter((n) => n.kind === 'inputs').flatMap((n) => (n.spec?.fields || []).map((x) => ({ ...x, textarea: x.type === 'textarea' })))]) {
+    if (!f?.key || seen.has(f.key)) continue;
+    seen.add(f.key);
+    out.push(f);
+  }
+  return out;
+}
+
+/**
+ * Start a run from the editor. A workflow that asks for inputs asks for them
+ * here, in a window on this page, filled in from the run on the canvas.
+ */
+async function openRunDialog({ prefill } = {}) {
+  if (state.dirty || !state.loaded) { const saved = await save(); if (!saved) return; }
+  const fields = runInputs(state.def);
+  const values = prefill || (state.run?.workflowId === state.loaded.id ? state.run.inputs : null) || {};
+  if (!fields.length) { await go({}); return; }
+  let d = $('runDlg');
+  if (!d) {
+    d = document.createElement('dialog');
+    d.id = 'runDlg';
+    d.className = 'run-dlg';
+    document.body.append(d);
+    d.addEventListener('click', (e) => { if (e.target === d) d.close(); });
+  }
+  d.innerHTML = `<form method="dialog" id="rdForm">
+      <h3>Run ${escapeHtml(state.def.title || state.def.id)}</h3>
+      <div class="rd-sub">It runs here, on this canvas. Each step fills in as it goes.</div>
+      ${fields.map((f) => `<label for="rd-${escapeAttr(f.key)}">${escapeHtml(f.label || f.key)}</label>${f.textarea
+        ? `<textarea id="rd-${escapeAttr(f.key)}" data-key="${escapeAttr(f.key)}" placeholder="${escapeAttr(f.placeholder || '')}">${escapeHtml(values[f.key] ?? '')}</textarea>`
+        : `<input id="rd-${escapeAttr(f.key)}" data-key="${escapeAttr(f.key)}" placeholder="${escapeAttr(f.placeholder || '')}" value="${escapeAttr(values[f.key] ?? '')}">`}`).join('')}
+      <div class="rd-foot"><span class="rd-status" id="rdStatus"></span>
+        <button type="button" class="run-btn" id="rdCancel">Cancel</button>
+        <button type="submit" class="run-btn go" id="rdGo">▶ Run</button></div>
+    </form>`;
+  d.querySelector('#rdCancel').onclick = () => d.close();
+  d.querySelector('#rdForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const inputs = {};
+    for (const el of d.querySelectorAll('[data-key]')) inputs[el.dataset.key] = el.value.trim();
+    const okRun = await go(inputs, d);
+    if (okRun) d.close();
+  };
+  if (!d.open) d.showModal();
+  d.querySelector('[data-key]')?.focus();
+}
+
+async function go(inputs, dlg = null) {
+  if (startingRun) return false;
+  startingRun = true;
+  const btn = dlg?.querySelector('#rdGo') || $('btnRun');
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Starting…';
+  const r = await startRunHere({ inputs });
+  startingRun = false;
+  btn.disabled = false; btn.textContent = label;
+  if (r.run?.runId) { await showRun(r.run.runId); return true; }
+  if (dlg) { const st = dlg.querySelector('#rdStatus'); st.textContent = r.error || 'Could not start it.'; st.classList.add('bad'); }
+  else toast(`Could not start it: ${r.error || 'no reason given'}`, 'err', 0);
+  return false;
+}
+
+/* The canvas takes the room left under the run bar, which grows and shrinks. */
+function fitLayout() {
+  const layout = $('edLayout');
+  const top = layout.getBoundingClientRect().top;
+  layout.style.height = `${Math.max(320, innerHeight - top)}px`;
 }
 
 function slug(s, live = false) {
