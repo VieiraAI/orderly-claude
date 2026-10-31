@@ -1022,6 +1022,8 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
             repoRoot: ref.repoRoot, scope: ref.scope,
             sessionId: liveId,
             trigger: body.trigger || 'you',
+            // From the editor: start from a step, keeping what an earlier run made before it.
+            reuse: body.reuse?.runId && body.reuse?.fromNodeId ? { runId: String(body.reuse.runId), fromNodeId: String(body.reuse.fromNodeId) } : null,
           });
           startScheduler(run);
           broadcast('run-start', { runId: run.runId, workflowId: run.workflowId });

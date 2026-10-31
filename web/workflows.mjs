@@ -328,7 +328,7 @@ async function runNow() {
       body: JSON.stringify({ inputs, ...refBody(w) }),
     }).then((x) => x.json());
     if (r.run?.runId) {
-      location.href = `/workflows-run.html#${r.run.runId}`;
+      location.href = `/workflow-editor.html?run=${r.run.runId}`;
       return;
     }
     throw new Error(r.error || 'run did not start');
@@ -462,7 +462,7 @@ function needCard(r) {
     ? q.choices.map((ch) => `<button class="answer-btn ${/reject|no/i.test(ch) ? 'neg' : ''}" data-answer-run="${r.runId}" data-node="${escapeHtml(q.nodeId)}" data-answer="${escapeHtml(ch)}">${escapeHtml(ch)}</button>`).join('')
     : `<input class="answer-text" data-free-run="${r.runId}" data-node="${escapeHtml(q.nodeId)}" placeholder="Your answer"><button class="answer-btn" data-free-send="${r.runId}">Answer</button>`;
   return `<div class="need-card">
-    <div class="need-top"><span class="pip-ask"></span><a class="need-wf" href="/workflows-run.html#${r.runId}">${escapeHtml(r.workflowTitle || r.workflowId)}</a>
+    <div class="need-top"><span class="pip-ask"></span><a class="need-wf" href="/workflow-editor.html?run=${r.runId}">${escapeHtml(r.workflowTitle || r.workflowId)}</a>
       <span class="need-meta">${escapeHtml(q.title)} · started ${ago(r.startedAt)}${r.status === 'interrupted' ? ' · answering will resume it' : ''}</span></div>
     <div class="need-q">${escapeHtml(q.question)}</div>
     <div class="need-actions">${choices}${msg(`ns-${r.runId}`)}</div>
@@ -472,7 +472,7 @@ function needCard(r) {
 function interruptedCard(r) {
   const at = r.interruption?.nodes?.length ? `during “${escapeHtml(r.interruption.nodes.join(', '))}”` : '';
   return `<div class="need-card cut">
-    <div class="need-top"><span class="pip-cut"></span><a class="need-wf" href="/workflows-run.html#${r.runId}">${escapeHtml(r.workflowTitle || r.workflowId)}</a>
+    <div class="need-top"><span class="pip-cut"></span><a class="need-wf" href="/workflow-editor.html?run=${r.runId}">${escapeHtml(r.workflowTitle || r.workflowId)}</a>
       <span class="need-meta">${r.doneNodes} of ${r.totalNodes} steps done · stopped ${ago(r.interruption?.at || r.endedAt)} ${at}</span></div>
     <div class="need-actions"><button class="answer-btn" data-resume="${r.runId}">Resume</button>${msg(`ns-${r.runId}`)}</div>
     <div class="choice-slot" id="cs-${r.runId}"></div>
@@ -544,7 +544,7 @@ function schedulesSection() {
 }
 
 function scheduleRow(s) {
-  const last = s.lastRun ? `<a href="/workflows-run.html#${s.lastRunId}">${escapeHtml(stateLine(s.lastRun).text)}</a>` : escapeHtml(s.lastStatus || 'not run yet');
+  const last = s.lastRun ? `<a href="/workflow-editor.html?run=${s.lastRunId}">${escapeHtml(stateLine(s.lastRun).text)}</a>` : escapeHtml(s.lastStatus || 'not run yet');
   const del = runsView.armed.has(`sdel-${s.id}`);
   return `<div class="sched-row${s.enabled ? '' : ' paused'}">
     <div class="sched-main">
@@ -623,7 +623,7 @@ async function resume(runId, extra = {}) {
   say(`ns-${runId}`, 'Resuming…');
   const r = await post(`/api/runs/${runId}/resume`, extra);
   if (r.needsChoice) { showChoice(runId, r.needsChoice); say(`ns-${runId}`, ''); return; }
-  if (r.resumed) { location.href = `/workflows-run.html#${runId}`; return; }
+  if (r.resumed) { location.href = `/workflow-editor.html?run=${runId}`; return; }
   say(`ns-${runId}`, r.error || 'Could not resume it.', true);
 }
 
@@ -693,7 +693,7 @@ function bindRuns(mount) {
   for (const el of mount.querySelectorAll('.run-row')) {
     el.onclick = (ev) => {
       if (ev.target.closest('.row-btn, .row-detail, .choice-slot, a')) return;
-      location.href = `/workflows-run.html#${el.dataset.id}`;
+      location.href = `/workflow-editor.html?run=${el.dataset.id}`;
     };
   }
   for (const b of mount.querySelectorAll('.row-btn[data-act]')) {
@@ -797,7 +797,7 @@ async function shareRunRow(runId, btn) {
 
 async function rerunFromCatalog(runId) {
   const r = await post(`/api/runs/${encodeURIComponent(runId)}/rerun`);
-  if (r.run?.runId) { location.href = `/workflows-run.html#${r.run.runId}`; return; }
+  if (r.run?.runId) { location.href = `/workflow-editor.html?run=${r.run.runId}`; return; }
   say(`ns-${runId}`, r.error || 'Could not repeat it.', true);
 }
 
@@ -875,7 +875,7 @@ function renderDecisions() {
       if (ev.target.closest('.row-btn')) return;
       const kind = el.dataset.kind;
       if (kind === 'auto' && el.dataset.runId) {
-        location.href = `/workflows-run.html#${el.dataset.runId}`;
+        location.href = `/workflow-editor.html?run=${el.dataset.runId}`;
       } else if (kind === 'marked' && el.dataset.sessionId) {
         location.href = `/#${el.dataset.sessionId}/${el.dataset.stepId || ''}`;
       }
