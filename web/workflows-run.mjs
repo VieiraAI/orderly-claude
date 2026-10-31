@@ -179,6 +179,9 @@ function render() {
   document.getElementById('runTitle').textContent   = run.workflowTitle;
   document.getElementById('runCatPip').className    = `pip ${run.category || ''}`;
   document.getElementById('backToWf').href = `/workflow-editor.html?from=${encodeURIComponent(run.workflowId)}${runRef()}`;
+  const up = document.getElementById('toParent');
+  up.hidden = !run.parent;
+  if (run.parent) { up.href = `/workflows-run.html#${encodeURIComponent(run.parent.runId)}`; up.textContent = `↑ Part of ${run.parent.title}`; }
   const nodes = run.graph?.nodes || [];
   const done = nodes.filter((n) => n.status === 'done').length;
   const totals = { cost: 0, tokens: 0, elapsedS: 0 };
@@ -616,6 +619,19 @@ function cardFootMeta(n, meta) {
   return '';
 }
 
+/** A Run a workflow step: the run it started, followed live, with a way in. */
+function workflowCard(n) {
+  const c = n.output.child;
+  const pct = c.total ? Math.round((c.done / c.total) * 100) : 0;
+  const line = n.waitsFor === 'child'
+    ? `<div class="ask-q">Waiting for you in ${esc(c.title)}: ${esc(c.waiting?.[0] || 'a question')}</div>`
+    : n.status === 'failed' ? `<div class="fail-note"><span class="fail-tag">failed</span>${esc(n.output.error || '')}</div>`
+    : `<div class="doc-b">${esc(`${c.done} of ${c.total} steps${c.current && n.status === 'running' ? ` · ${c.current}` : ''}`)}</div>`;
+  return `<div class="doc-h">${esc(c.title)}</div>${line}
+    <div class="sub-bar"><i style="width:${pct}%"></i></div>
+    <a class="sub-open" href="/workflows-run.html#${encodeURIComponent(c.runId)}">${n.waitsFor === 'child' ? 'Answer it there ↗' : 'Open its run ↗'}</a>`;
+}
+
 function cardBody(n) {
   // `selfProgress` kinds render their own in-progress UI (grids filling, text
   // streaming); the generic running-note short-circuits for everyone else.
@@ -627,6 +643,7 @@ function cardBody(n) {
   if (n.waitsFor === 'you') {
     return `<div class="ask-q">${esc(n.output?.question || 'Waiting for you.')}</div><div class="ask-cta">◆ Answer on the left</div>`;
   }
+  if (n.kind === 'workflow' && n.output?.child) return workflowCard(n);
   if (n.status === 'pending') return `<div class="wait-note">Not started</div>`;
   // A command step that is drawing pictures shows each one as it lands.
   if (n.status === 'running' && hasPreview(n)) return previewHtml(n);

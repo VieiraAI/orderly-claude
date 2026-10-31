@@ -344,6 +344,9 @@ export class Scheduler extends EventEmitter {
         if (partialOutput !== undefined) patch.output = { ...(node.output || {}), ...partialOutput };
         if (Object.keys(patch).length) updateNode(node.id, patch);
       },
+      // A step waiting on something other than this run, such as a question
+      // in a workflow it started. Shown on its card; answered elsewhere.
+      wait: (who) => { if ((node.waitsFor || null) !== (who || null)) updateNode(node.id, { waitsFor: who || null }); },
       // What was actually sent, references resolved, for the drill-down.
       recordSent: (text) => updateNode(node.id, { sent: String(text ?? '').slice(0, 20_000) }),
       awaitAnswer: (nodeId, question) => {

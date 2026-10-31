@@ -229,6 +229,70 @@ export async function runWorkflowEngineChecks({ check, session }) {
     const filesDir = path.join(repo, '.claude', 'workflows', 'kit');
     fs.mkdirSync(filesDir, { recursive: true });
     fs.writeFileSync(path.join(filesDir, 'hello.sh'), 'echo "kit says $1"\n');
+    // ---- Run a workflow: one workflow as a step of another ------------------
+    const flow = (id, spec, extra = {}) => ({ id, title: id, kind: 'workflow', col: 1, row: 0, spec, ...extra });
+    await save({ id: 'sub-child', title: 'Sub child', inputs: [{ key: 'word', label: 'Word' }],
+      graph: { nodes: [script('a', 'echo child got {{inputs.word}}')], edges: [] } });
+    await save({ id: 'sub-parent', title: 'Sub parent', inputs: [{ key: 'w', label: 'W' }], graph: { nodes: [
+      flow('inner', { workflow: 'sub-child', inputs: { word: '{{inputs.w}} twice' } }),
+      script('after', 'echo after {{nodes.inner.output.steps.a.out}}'),
+    ], edges: [['inner', 'after']] } });
+    r = await until((await start('sub-parent', { w: 'hello' })).run.runId, settled);
+    const innerRun = node(r, 'inner')?.output?.child?.runId;
+    const kid = innerRun ? await read(innerRun) : null;
+    check('a workflow runs another as one of its steps', r.status === 'done' && kid?.status === 'done', `${states(r)} child=${kid?.status}`);
+    check('…filling its inputs from this run', /child got hello twice/.test(node(kid, 'a')?.output?.out || ''), node(kid, 'a')?.output?.out);
+    check('…and later steps can use what its steps made', /after child got hello twice/.test(node(r, 'after')?.output?.out || ''), node(r, 'after')?.output?.out);
+    check('the inner run knows which run and step started it',
+      kid?.parent?.runId === r.runId && kid?.parent?.nodeId === 'inner' && kid?.parent?.chain?.join('>') === 'sub-parent>sub-child', JSON.stringify(kid?.parent));
+    check('the step\'s card has the inner run\'s progress', node(r, 'inner')?.output?.child?.done === 1 && node(r, 'inner')?.output?.child?.total === 1, JSON.stringify(node(r, 'inner')?.output?.child));
+
+    await save({ id: 'sub-self', title: 'Sub self', graph: { nodes: [flow('me', { workflow: 'sub-self' })], edges: [] } });
+    r = await until((await start('sub-self')).run.runId, settled);
+    check('a workflow cannot run itself', r.status === 'failed' && /inside itself/.test(node(r, 'me')?.output?.error || ''), node(r, 'me')?.output?.error);
+
+    await save({ id: 'sub-bad', title: 'Sub bad', graph: { nodes: [script('boom', 'echo no luck; exit 3')], edges: [] } });
+    await save({ id: 'sub-wraps-bad', title: 'Sub wraps bad', graph: { nodes: [flow('inner', { workflow: 'sub-bad' })], edges: [] } });
+    r = await until((await start('sub-wraps-bad')).run.runId, settled);
+    check('when the inner workflow fails, the step fails and says why',
+      r.status === 'failed' && /Sub bad failed/.test(node(r, 'inner')?.output?.error || '') && node(r, 'inner')?.output?.child?.status === 'failed', node(r, 'inner')?.output?.error);
+
+    await save({ id: 'sub-asks', title: 'Sub asks', graph: { nodes: [
+      { id: 'ok', title: 'Looks right?', kind: 'approve', spec: { question: 'Looks right?' } }, script('then', 'echo approved'),
+    ], edges: [['ok', 'then']] } });
+    await save({ id: 'sub-waits', title: 'Sub waits', graph: { nodes: [flow('inner', { workflow: 'sub-asks' })], edges: [] } });
+    const waitsRun = (await start('sub-waits')).run.runId;
+    r = await until(waitsRun, (x) => node(x, 'inner')?.waitsFor === 'child');
+    const innerAsk = node(r, 'inner')?.output?.child?.runId;
+    check('a question inside the inner workflow shows on the step', node(r, 'inner')?.waitsFor === 'child'
+      && /waiting for you in Sub asks: Looks right\?/.test(node(r, 'inner')?.progress || ''), `${node(r, 'inner')?.waitsFor} ${node(r, 'inner')?.progress}`);
+    await api(`/api/runs/${innerAsk}/answer`, { body: { nodeId: 'ok', answer: 'approve' } });
+    r = await until(waitsRun, settled);
+    check('…and answering it there lets both runs finish', r.status === 'done' && !node(r, 'inner')?.waitsFor, states(r));
+
+    await save({ id: 'sub-slow', title: 'Sub slow', graph: { nodes: [script('nap', 'sleep 20')], edges: [] } });
+    await save({ id: 'sub-wraps-slow', title: 'Sub wraps slow', graph: { nodes: [flow('inner', { workflow: 'sub-slow' })], edges: [] } });
+    const slowRun = (await start('sub-wraps-slow')).run.runId;
+    r = await until(slowRun, (x) => node(x, 'inner')?.output?.child?.runId);
+    const napRun = node(r, 'inner').output.child.runId;
+    await until(napRun, (x) => node(x, 'nap')?.status === 'running');
+    await api(`/api/runs/${slowRun}/stop`, { body: {} });
+    const nap = await until(napRun, settled);
+    check('stopping a run stops the workflow it started', nap?.status === 'stopped', nap?.status);
+
+    await save({ id: 'sub-deep-4', title: 'Deep 4', graph: { nodes: [script('x', 'echo bottom')], edges: [] } });
+    await save({ id: 'sub-deep-3', title: 'Deep 3', graph: { nodes: [flow('d', { workflow: 'sub-deep-4' })], edges: [] } });
+    await save({ id: 'sub-deep-2', title: 'Deep 2', graph: { nodes: [flow('d', { workflow: 'sub-deep-3' })], edges: [] } });
+    await save({ id: 'sub-deep-1', title: 'Deep 1', graph: { nodes: [flow('d', { workflow: 'sub-deep-2' })], edges: [] } });
+    r = await until((await start('sub-deep-1')).run.runId, settled, 12000);
+    const two = await read(node(r, 'd')?.output?.child?.runId);
+    const three = await read(node(two, 'd')?.output?.child?.runId);
+    check('workflows nest three deep, and no further', r.status === 'failed' && two?.status === 'failed'
+      && /3 workflows deep/.test(node(three, 'd')?.output?.error || ''), node(three, 'd')?.output?.error);
+
+    let sv = await api('/api/workflows/validate', { body: { def: { schemaVersion: 2, id: 'sub-none', graph: { nodes: [flow('w', {})], edges: [] } } } });
+    check('a Run a workflow step must name its workflow', !sv.ok && sv.problems.some((p) => /pick the workflow it runs/.test(p)), JSON.stringify(sv.problems));
+
     await save({ id: 'kit', title: 'Kit', files: 'kit', graph: { nodes: [script('a', 'sh {{workflow.files}}/hello.sh hi')], edges: [] } });
     r = await until((await start('kit')).run.runId, settled);
     check('{{workflow.files}} runs a script the workflow ships with', /kit says hi/.test(node(r, 'a')?.output?.out || ''), states(r));
@@ -1130,6 +1194,44 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     check('a step\'s drawer offers redo alone and redo from here', r.modes === 'alone,onward' && r.why.length > 0, JSON.stringify(r));
     check('two quick clicks on Redo this step redo it once, in the same run', again.redos?.length === 1, JSON.stringify(again.redos));
     check('redoing raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
+    // Run a workflow: the step's card links to the run it started, that run
+    // links back, and the editor picks the workflow and fills its inputs.
+    const outerId = (await start('sub-parent', { w: 'hi' })).run.runId;
+    const outer = await until(outerId, settled);
+    const innerId = node(outer, 'inner')?.output?.child?.runId;
+    p = await open(`/workflows-run.html#${outerId}`);
+    r = await p.ev(`const c = document.querySelector('.card[data-id="inner"]');
+      return { title: c?.querySelector('.doc-h')?.textContent, line: c?.querySelector('.doc-b')?.textContent,
+        link: c?.querySelector('.sub-open')?.textContent, href: c?.querySelector('.sub-open')?.getAttribute('href'),
+        up: !document.getElementById('toParent').hidden };`);
+    check('a Run a workflow step shows the run it started, with a link to open it',
+      r.title === 'Sub child' && r.line === '1 of 1 steps' && r.link === 'Open its run ↗' && r.href === `/workflows-run.html#${innerId}` && !r.up, JSON.stringify(r));
+    await p.close();
+    p = await open(`/workflows-run.html#${innerId}`);
+    r = await p.ev(`const up = document.getElementById('toParent'); return { shown: !up.hidden, text: up.textContent, href: up.getAttribute('href') };`);
+    check('the run it started links back to the run it is part of',
+      r.shown && r.text === '↑ Part of Sub parent' && r.href === `/workflows-run.html#${outerId}`, JSON.stringify(r));
+    check('following runs raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
+    p = await open('/workflow-editor.html?from=sub-parent');
+    await sleep(600);
+    r = await p.ev(`document.querySelector('.n-card[data-id="inner"]').click(); ${tick}
+      const sel = document.getElementById('sp-wf');
+      return { kinds: [...document.getElementById('newKind').options].map((o) => o.textContent),
+        picked: sel?.selectedOptions[0]?.textContent, word: document.getElementById('sp-inputs.word')?.value,
+        hands: document.getElementById('selSpec').textContent.includes('nodes.inner.output.steps.a') };`);
+    check('the editor offers Run a workflow as a kind of step', r.kinds.includes('Run a workflow'), JSON.stringify(r.kinds));
+    check('a Run a workflow step shows the workflow it runs and that workflow\'s inputs',
+      /^Sub child/.test(r.picked || '') && r.word === '{{inputs.w}} twice' && r.hands, JSON.stringify(r));
+    r = await p.ev(`const sel = document.getElementById('sp-wf');
+      sel.value = [...sel.options].find((o) => /^Sub asks/.test(o.textContent)).value;
+      sel.dispatchEvent(new Event('change')); ${tick}
+      return { none: document.getElementById('selSpec').textContent.includes('It asks for nothing'), saved: document.getElementById('saveLine').textContent };`);
+    check('picking another workflow shows its inputs instead', r.none && /unsaved/.test(r.saved), JSON.stringify(r));
+    check('the Run a workflow form raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
   } finally {
     try { cdp?.close?.(); } catch { /* gone */ }

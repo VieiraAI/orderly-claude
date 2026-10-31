@@ -50,7 +50,7 @@
   /* Step kinds on the editor canvas. */
   --k-agent: #a3abff; --k-script: #efb36c; --k-decision: #f2a93b; --k-check: #7cd4a4;
   --k-publish: #f26b7a; --k-display: #9ab6c7; --k-inputs: #8ad3e3; --k-loop: #c084fc;
-  --k-delay: #8a90a5; --k-approve: #7cd4a4;
+  --k-delay: #8a90a5; --k-approve: #7cd4a4; --k-workflow: #e7a3d8;
 
   --cv-dot: #ffffff16;
   color-scheme: dark;
@@ -94,7 +94,7 @@
 
   --k-agent: #415A6B; --k-script: #9A6420; --k-decision: #9C6F22; --k-check: #2F7A5A;
   --k-publish: #A94E46; --k-display: #6B7C88; --k-inputs: #2F6E99; --k-loop: #6650B0;
-  --k-delay: #7A838B; --k-approve: #2F7A5A;
+  --k-delay: #7A838B; --k-approve: #2F7A5A; --k-workflow: #9A3F86;
 
   --cv-dot: #00000012;
   color-scheme: light;
@@ -945,3 +945,9 @@ button.stat:hover { background: var(--raised); }
 .pvw-pages p { margin: 0; font-size: 14.5px; line-height: 1.6; white-space: pre-wrap; }
 .pvw-n { position: absolute; bottom: 8px; right: 12px; font: 11px var(--f-mono); color: var(--faint); }
 .pvw-note { margin-top: 10px; font-size: 12px; color: var(--faint); }
+
+/* A Run a workflow step's card: the run it started. */
+.card .sub-bar { height: 4px; border-radius: 2px; background: var(--line, rgba(127,127,127,.25)); overflow: hidden; margin: 8px 0 6px; }
+.card .sub-bar i { display: block; height: 100%; background: var(--k-workflow); }
+.card .sub-open { font-size: 12px; color: var(--k-workflow); text-decoration: none; }
+.card .sub-open:hover { text-decoration: underline; }

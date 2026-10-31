@@ -61,6 +61,7 @@ You never save or run the workflow. When you finish, your edits to draft.json ap
 - delay ("Wait"): wait like "30s" or "5m" (at most 10m).
 - inputs ("Ask for inputs"): fields — prefer the workflow's own "inputs" list instead.
 - mcp: server, tool — calls a tool from an MCP server.
+- workflow ("Run a workflow"): workflow: <id of another workflow>; inputs: { <its input key>: text or references }. Runs that workflow as one step and hands on what its steps made as {{nodes.ID.output.steps.STEP.FIELD}}. Project workflows live in .claude/workflows/ and the person's own in ~/.claude/workflows/; read one to learn its inputs. A workflow may not run itself, and they nest at most three deep.
 - Any step may have retry: { attempts (0-5), backoffMs } and timeoutMs (1 second to 1 hour).
 
 ## References between steps

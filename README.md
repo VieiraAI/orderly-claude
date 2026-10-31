@@ -88,9 +88,16 @@ runs on your machine.
 - **Build one without writing a file.** Open **Workflows → + New workflow**
   and add steps from plain-language kinds: *Ask Claude*, *Run a command*,
   *Ask me to choose*, *Ask me to approve*, *Check*, *Repeat for each*,
-  *Save or publish*. Connect them in the order they should run. Every
+  *Run a workflow*, *Save or publish*. Connect them in the order they should run. Every
   setting the engine reads has a field in the panel; the file view is there
   to diff, not to author in. Or start from a built-in with **Make it yours**.
+- **Workflows are building blocks.** A *Run a workflow* step runs another
+  workflow as one step: you fill its inputs from this run, its card follows
+  that run and links to it, and later steps use what its steps made as
+  `{{nodes.ID.output.steps.STEP.FIELD}}`. A question it asks is answered on
+  its own Run page; its spending counts against this run's limit; stopping
+  this run stops it. A workflow can never run itself, and they nest at most
+  three deep.
 - **Steps name what they use.** `{{inputs.audience}}` is something typed when
   the run starts; `{{nodes.research.output}}` is what an earlier step made,
   and `{{nodes.tests.output.code}}` one field of it. **+ insert** offers only

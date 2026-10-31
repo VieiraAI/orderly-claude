@@ -41,6 +41,16 @@ import { loadMcpConfig, resolveTool, interpolate, PUBLISH_TO_MCP } from './mcp.m
  *  path when one is set on the run; falls back to the repo root. */
 function cwdOf(run) { return run?.cwd || run?.repoRoot; }
 
+/**
+ * How a "Run a workflow" step starts another run. The server owns schedulers,
+ * so it hands this in at boot: ({ workflowId, scope, repoRoot, inputs,
+ * budgetUsd, sessionId, parent }) → { run, scheduler }.
+ */
+let launchRun = null;
+export function setRunLauncher(fn) { launchRun = fn; }
+/** Workflows inside workflows go this many deep, counting the outermost. */
+export const MAX_NESTING = 3;
+
 /** An error that retrying cannot fix: a missing reference, a rejection. */
 function final(message) { return Object.assign(new Error(message), { retryable: false }); }
 
@@ -625,6 +635,92 @@ const HANDLERS = {
 
   // Approve blocks until a human picks approve/reject. A reject fails the
   // run so downstream work doesn't start on an unapproved artifact.
+  /*
+   * Run a workflow: another workflow, started as its own run and followed to
+   * the end. Its card mirrors the run's steps; a question it asks is answered
+   * on its own Run page, which the card links to. Whatever it spends counts
+   * against this run's limit. What its steps made comes back as `steps`, so
+   * later steps can use {{nodes.ID.output.steps.STEP.FIELD}}.
+   */
+  workflow: async (node, ctx) => {
+    const spec = node.spec || {};
+    const id = String(spec.workflow || '').trim();
+    if (!launchRun) throw final('Running a workflow inside another needs the Orderly server');
+    // The workflows above this one, outermost first.
+    const chain = ctx.run.parent?.chain || [ctx.run.workflowId];
+    if (chain.includes(id)) {
+      throw final(`"${node.title || node.id}" would run ${id} inside itself (${[...chain, id].join(' → ')})`);
+    }
+    if (chain.length >= MAX_NESTING) {
+      throw final(`"${node.title || node.id}" is ${MAX_NESTING} workflows deep; Orderly stops there so a run stays followable`);
+    }
+    const inputs = {};
+    for (const [key, text] of Object.entries(spec.inputs || {})) inputs[key] = resolveOrFail(String(text), ctx, node);
+    // What is left of this run's limit is the most the inner run may spend.
+    const limit = Number(ctx.run.budgetUsd) || 0;
+    const left = limit > 0 ? Math.max(0.01, limit - runSpend(ctx.run)) : undefined;
+    ctx.recordSent?.(`Run ${id} with ${JSON.stringify(inputs, null, 2)}`);
+
+    const { run: child, scheduler } = launchRun({
+      workflowId: id,
+      scope: spec.scope || null,
+      repoRoot: spec.repo || ctx.run.repoRoot || null,
+      inputs,
+      budgetUsd: left,
+      sessionId: ctx.run.sessionId || null,
+      parent: {
+        runId: ctx.run.runId, nodeId: node.id, workflowId: ctx.run.workflowId,
+        title: ctx.run.workflowTitle || ctx.run.workflowId, chain: [...chain, id],
+      },
+    });
+
+    const summary = () => {
+      const steps = child.graph.nodes;
+      const waiting = steps.filter((n) => n.waitsFor === 'you');
+      return {
+        runId: child.runId, workflowId: child.workflowId, title: child.workflowTitle || id, status: child.status,
+        done: steps.filter((n) => n.status === 'done' || n.status === 'skipped').length,
+        total: steps.length,
+        current: (waiting[0] || steps.find((n) => n.status === 'running'))?.title || null,
+        waiting: waiting.map((n) => n.title || n.id),
+        meta: { cost: Math.round(runSpend(child) * 10000) / 10000 },
+      };
+    };
+    const report = () => {
+      const sum = summary();
+      ctx.wait?.(sum.waiting.length ? 'child' : null);
+      ctx.onProgress({
+        progress: sum.waiting.length ? `waiting for you in ${sum.title}: ${sum.waiting[0]}` : `${sum.done} of ${sum.total} steps${sum.current ? ` · ${sum.current}` : ''}`,
+        partialOutput: { child: sum, meta: sum.meta },
+      });
+    };
+    const stopChild = () => scheduler.stop();
+    ctx.signal?.addEventListener('abort', stopChild, { once: true });
+    scheduler.on('update', report);
+    report();
+    const status = await new Promise((resolve) => {
+      if (['done', 'failed', 'stopped', 'interrupted'].includes(child.status)) return resolve(child.status);
+      scheduler.once('finish', (e) => resolve(e.status));
+    });
+    scheduler.off('update', report);
+    ctx.signal?.removeEventListener('abort', stopChild);
+    ctx.wait?.(null);
+
+    const sum = summary();
+    const output = {
+      child: sum,
+      inputs,
+      // Each inner step's result, by its short name.
+      steps: Object.fromEntries(child.graph.nodes.filter((n) => n.status === 'done').map((n) => [n.id, n.output ?? null])),
+      meta: sum.meta,
+    };
+    if (status !== 'done') {
+      const why = child.halt?.message || child.error || status;
+      throw Object.assign(final(`${sum.title} ${status === 'failed' ? 'failed' : `was ${status}`}: ${why}`), { output });
+    }
+    return output;
+  },
+
   approve: async (node, ctx) => {
     const spec = node.spec || {};
     const question = resolveOrFail(spec.question || spec.prompt || 'Approve?', ctx, node);
