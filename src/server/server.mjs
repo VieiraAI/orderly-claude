@@ -218,18 +218,27 @@ function summariseRun(r, versionOf = null) {
  * and `via` names the steps it was asked through, so the outer run's page
  * can ask it in place. `find` reads a run, live or from disk.
  */
-function questionFor(run, find, depth = 0) {
+function questionFor(run, find) {
+  const all = questionsFor(run, find);
+  // Several branches can wait at once; one is asked at a time, and the rest are counted.
+  return all.length ? { ...all[0], more: all.length - 1 } : null;
+}
+
+/** Every question a run is waiting on, its own and its inner workflows', in step order. */
+function questionsFor(run, find, depth = 0) {
+  const out = [];
   const own = openQuestion(run) || legacyQuestion(run);
-  if (own) return { ...own, runId: run.runId, via: [] };
-  if (depth > 4) return null;
+  if (own) out.push({ ...own, runId: run.runId, via: [] });
+  if (depth > 4) return out;
   for (const n of run.graph?.nodes || []) {
     const childId = n.waitsFor === 'child' && n.output?.child?.runId;
     if (!childId) continue;
     const child = find(childId);
-    const q = child && questionFor(child, find, depth + 1);
-    if (q) return { ...q, via: [{ nodeId: n.id, title: n.title, workflow: child.workflowTitle }, ...q.via] };
+    for (const q of child ? questionsFor(child, find, depth + 1) : []) {
+      out.push({ ...q, via: [{ nodeId: n.id, title: n.title, workflow: child.workflowTitle }, ...q.via] });
+    }
   }
-  return null;
+  return out;
 }
 
 function legacyQuestion(r) {

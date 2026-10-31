@@ -1183,7 +1183,7 @@ function summary(n) {
   switch (n.kind) {
     case 'agent': return `${s.verify ? 'Checks its work · ' : ''}${s.prompt || 'No instructions yet'}`;
     case 'script': return s.op ? ({ 'find-dev-server': 'Find the running dev server', 'capture-shot': 'Screenshot a page', 'capture-shots': 'Screenshot several pages' })[s.op] || s.op : (s.cmd ? `$ ${s.cmd}` : 'No command yet');
-    case 'decision': return `${s.question || ''} — ${(s.options || []).map((o) => o.label).join(' / ')}`;
+    case 'decision': return `${s.question || ''} — ${(s.options || []).map((o) => o.label).join(s.multi ? ' + ' : ' / ')}${s.multi ? ' (pick any)' : ''}`;
     case 'approve': return s.question || '';
     case 'check': return Object.fromEntries(CHECK_TYPES)[s.assert?.type] || s.assert?.type || '';
     case 'loop': return `for each in ${s.over || '…'}`;
@@ -1588,7 +1588,8 @@ function renderSpecForm(n) {
       html = refHead('Question', 'question') + txt('question', s.question, 'Which direction wins?', true)
         + '<label>Choices <span class="hint">pick which one each connection follows under Goes before</span></label>'
         + (s.options || []).map((o, i) => `<div class="list-row"><input class="wide" data-opt="${i}" value="${escapeAttr(o.label || '')}" placeholder="Choice"><span></span><button class="run-btn danger x" data-rm-opt="${i}" title="Remove">✕</button></div>`).join('')
-        + '<button class="run-btn" data-act="add-opt">+ add choice</button>';
+        + '<button class="run-btn" data-act="add-opt">+ add choice</button>'
+        + `<label class="check-line"><input type="checkbox" id="sp-multi" ${s.multi ? 'checked' : ''}> They can pick several <span class="hint">every picked choice’s branch runs; the others are skipped</span></label>`;
       break;
     case 'workflow': {
       const lib = (state.library || []).filter((w) => w.id !== state.def.id);
@@ -1699,6 +1700,12 @@ function renderSpecForm(n) {
     state.def.graph.edges = state.def.graph.edges.filter((e) => !(e[0] === n.id && e[2] === gone.edgeLabel));
     changed();
   };
+  mount.querySelector('#sp-multi')?.addEventListener('change', (e) => {
+    const x = selectedNode(); if (!x) return;
+    x.spec = x.spec || {};
+    if (e.target.checked) x.spec.multi = true; else delete x.spec.multi;
+    changed({ redraw: 'canvas' });
+  });
   mount.querySelector('[data-act="add-opt"]')?.addEventListener('click', () => {
     s.options = s.options || [];
     let k = s.options.length + 1;

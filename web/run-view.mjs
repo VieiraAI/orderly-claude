@@ -237,15 +237,22 @@ function renderAnswer() {
   // Someone typing an answer keeps what they typed when the run is read again.
   const key = `${q.runId || run.runId}:${q.nodeId}`;
   if (mount.dataset.q === key && mount.contains(document.activeElement) && document.activeElement.id === 'answerText') return;
+  // Someone part-way through picking several keeps their picks too.
+  if (mount.dataset.q === key && mount.querySelector('[data-pick][aria-pressed="true"]')) return;
   mount.dataset.q = key;
-  const buttons = q.choices?.length
+  // A pick-several question: toggles, then one button that sends them all.
+  const multi = !!q.multi && q.choices?.length;
+  const buttons = multi
+    ? q.choices.map((c) => `<button class="answer-btn pick" type="button" aria-pressed="false" data-pick="${esc(c)}">${esc(c)}</button>`).join('')
+      + '<button class="answer-btn go" type="button" id="answerMany" disabled>Go with these</button>'
+    : q.choices?.length
     ? q.choices.map((c) => `<button class="answer-btn ${/reject|^no$/i.test(c) ? 'neg' : ''}" data-answer="${esc(c)}">${esc(c)}</button>`).join('')
     : '<input class="answer-text" id="answerText" placeholder="Your answer"><button class="answer-btn" id="answerSend">Answer</button>';
   // A question from a workflow this run runs is answered here too, in its own run.
   const path = (q.via || []).map((v) => v.title).concat(q.title).join(' › ');
   mount.innerHTML = `<div class="answer-panel">
-    <div class="ap-eyebrow">Waiting for you · ${esc(path)}</div>
-    <div class="ap-q">${esc(q.question)}</div>
+    <div class="ap-eyebrow">Waiting for you · ${esc(path)}${q.more ? ` · ${q.more} more question${q.more === 1 ? '' : 's'} after this` : ''}</div>
+    <div class="ap-q">${esc(q.question)}${multi ? ' <span class="ap-hint">Pick any, then Go.</span>' : ''}</div>
     <div class="ap-see" id="apSee">${answerSee.key === seeKey(q) ? answerSee.html : ''}</div>
     <div class="need-actions">${buttons}<span class="need-status" id="apStatus"></span></div>
   </div>`;
@@ -256,6 +263,13 @@ function renderAnswer() {
     else { const el = document.getElementById('apStatus'); el.textContent = r.error || 'Could not answer.'; el.classList.add('bad'); }
   };
   mount.querySelectorAll('[data-answer]').forEach((b) => { b.onclick = () => send(b.dataset.answer); });
+  const many = mount.querySelector('#answerMany');
+  if (many) {
+    const picks = [...mount.querySelectorAll('[data-pick]')];
+    const chosen = () => picks.filter((b) => b.getAttribute('aria-pressed') === 'true').map((b) => b.dataset.pick);
+    for (const b of picks) b.onclick = () => { b.setAttribute('aria-pressed', String(b.getAttribute('aria-pressed') !== 'true')); many.disabled = !chosen().length; };
+    many.onclick = () => send(chosen());
+  }
   const box = mount.querySelector('#answerText');
   if (box) {
     mount.querySelector('#answerSend').onclick = () => send(box.value.trim());

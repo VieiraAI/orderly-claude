@@ -52,7 +52,7 @@ You never save or run the workflow. When you finish, your edits to draft.json ap
 ## Step kinds and their spec
 - agent ("Ask Claude"): prompt (required); model haiku | sonnet | opus; output markdown | json | json-findings | html | json-hunks; uses: [skill slugs]; verify: { asserts, renders, maxRetries } to check its own result.
 - script ("Run a command"): cmd (shell, runs in the project folder) or op (capture-shot | capture-shots | find-dev-server); show: "dir/*.png, dir/clip.mp4" to show pictures it makes; allowFailure: true to keep going when it fails; idempotent: false for anything that must not happen twice (a deploy, a push, sending a message).
-- decision ("Ask me to choose"): question; options: [{ label, edgeLabel }].
+- decision ("Ask me to choose"): question; options: [{ label, edgeLabel }]. multi: true lets the person pick several; every picked branch runs.
 - approve ("Ask me to approve"): question. Rejecting ends the run.
 - check ("Check"): assert: { type, from: <an upstream step id>, needle? } with type exit-zero | contains | has-pairs | manual | color-in-palette | font-is-brand | contrast-min | spacing-on-scale | no-raw-hex; onFail: stop | skip.
 - loop ("Repeat for each"): over: "{{inputs.list}}" or "{{nodes.x.output.data.items}}"; action: agent | script; prompt or cmd using {{item}}; max (at most 500); concurrency (at most 8).

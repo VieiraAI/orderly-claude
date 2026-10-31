@@ -103,12 +103,13 @@ export class Scheduler extends EventEmitter {
    * Throws if the node is not waiting or the answer is not one of its choices.
    */
   answer(nodeId, answer) {
-    recordAnswer(this.run, nodeId, answer);
+    // Recorded as checked: one choice, or for a pick-several question, a list.
+    const n = recordAnswer(this.run, nodeId, answer);
     writeRun(this.run);
     const slot = this.pendingAnswers.get(nodeId);
     if (!slot) return false;
     this.pendingAnswers.delete(nodeId);
-    slot.resolve(answer);
+    slot.resolve(n.pendingAnswer);
     return true;
   }
 
@@ -450,7 +451,8 @@ function edgeIsLive(source, label) {
   if (source.kind === 'decision' && source.status === 'done') {
     const picked = source.output?.picked;
     if (!label) return true;
-    return picked === label;
+    // A pick-several question keeps every picked branch live.
+    return Array.isArray(picked) ? picked.includes(label) : picked === label;
   }
   if (source.kind === 'check' && source.status === 'done'
       && source.spec?.onFail === 'skip' && source.output?.pass === false) {

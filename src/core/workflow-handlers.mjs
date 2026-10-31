@@ -105,8 +105,8 @@ const HANDLERS = {
 
   ask: async (node, ctx) => {
     const question = resolveOrFail(node.question || node.title, ctx, node);
-    const answer = await ctx.awaitAnswer(node.id, { question, choices: node.choices || null });
-    return { question, answer };
+    const answer = await ctx.awaitAnswer(node.id, { question, choices: node.choices || null, ...(node.multi ? { multi: true } : {}) });
+    return { question, answer, ...(node.multi ? { multi: true } : {}) };
   },
 
   document: async (node, ctx) => {
@@ -359,10 +359,17 @@ const HANDLERS = {
       ...node,
       question: resolveOrFail(spec.question || node.title, ctx, node),
       choices: options.map((o) => o.label),
+      multi: !!spec.multi,
     };
     const base = await HANDLERS.ask(askNode, ctx);
-    const picked = options.find((o) => o.label === base.answer);
-    return { ...base, picked: picked?.edgeLabel || base.answer, options };
+    const edgeOf = (label) => options.find((o) => o.label === label)?.edgeLabel || label;
+    // Several picks: every picked branch runs. The answer reads as one line
+    // ("workout, adapt rule") where a later step names it; `answers` lists them.
+    if (spec.multi) {
+      const answers = [].concat(base.answer);
+      return { ...base, answer: answers.join(', '), answers, picked: answers.map(edgeOf), options };
+    }
+    return { ...base, picked: edgeOf(base.answer), options };
   },
 
   check: async (node, ctx) => {

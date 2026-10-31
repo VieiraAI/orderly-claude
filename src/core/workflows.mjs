@@ -370,6 +370,7 @@ function validateV2Node(n) {
       if (!Array.isArray(spec.options) || spec.options.length === 0) {
         problems.push('spec.options must be a non-empty array');
       }
+      if (spec.multi != null && typeof spec.multi !== 'boolean') problems.push('spec.multi must be true or false');
       break;
     case 'check': {
       if (!spec.assert || !spec.assert.type) { problems.push('spec.assert.type is required'); break; }
@@ -1202,7 +1203,7 @@ export function openQuestion(run) {
     (x.status === 'running' || x.status === 'interrupted') && x.waitsFor === 'you');
   if (!n) return null;
   const o = n.output || {};
-  return { nodeId: n.id, title: n.title, kind: n.kind, question: o.question || n.title, choices: o.choices || null };
+  return { nodeId: n.id, title: n.title, kind: n.kind, question: o.question || n.title, choices: o.choices || null, ...(o.multi ? { multi: true } : {}) };
 }
 
 /**
@@ -1215,6 +1216,15 @@ export function recordAnswer(run, nodeId, answer) {
   if (!n) throw new Error(`no node "${nodeId}" in this run`);
   if (n.waitsFor !== 'you') throw new Error(`"${n.title || nodeId}" is not waiting for an answer`);
   const choices = n.output?.choices;
+  // A pick-several question takes a list (or one choice); each must be a choice.
+  if (n.output?.multi) {
+    const list = [...new Set([].concat(answer ?? []).map((x) => String(x).trim()).filter(Boolean))];
+    if (!list.length) throw new Error('pick at least one');
+    const bad = Array.isArray(choices) ? list.filter((x) => !choices.includes(x)) : [];
+    if (bad.length) throw new Error(`${bad.join(', ')} ${bad.length === 1 ? 'is' : 'are'} not among: ${choices.join(', ')}`);
+    n.pendingAnswer = list;
+    return n;
+  }
   if (Array.isArray(choices) && choices.length && !choices.includes(answer)) {
     throw new Error(`answer must be one of: ${choices.join(', ')}`);
   }

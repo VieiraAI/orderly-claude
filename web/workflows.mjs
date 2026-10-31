@@ -461,7 +461,9 @@ function dayLabel(day) {
 
 function needCard(r) {
   const q = r.needsYou;
-  const choices = q.choices?.length
+  const choices = q.multi
+    ? `<a class="answer-btn" href="/workflow-editor.html?run=${r.runId}">Pick on its canvas ↗</a>`
+    : q.choices?.length
     ? q.choices.map((ch) => `<button class="answer-btn ${/reject|no/i.test(ch) ? 'neg' : ''}" data-answer-run="${r.runId}" data-node="${escapeHtml(q.nodeId)}" data-answer="${escapeHtml(ch)}">${escapeHtml(ch)}</button>`).join('')
     : `<input class="answer-text" data-free-run="${r.runId}" data-node="${escapeHtml(q.nodeId)}" placeholder="Your answer"><button class="answer-btn" data-free-send="${r.runId}">Answer</button>`;
   return `<div class="need-card">

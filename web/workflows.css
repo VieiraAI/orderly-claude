@@ -954,3 +954,9 @@ button.stat:hover { background: var(--raised); }
 /* What a question is about: buttons that open the earlier steps' work full size. */
 .ap-see { display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 10px; }
 .ap-see:empty { display: none; }
+/* A pick-several question: choices toggle on, then one button sends them. */
+.answer-btn.pick { background: transparent; color: var(--text); border: 1px solid var(--edge-hi); }
+.answer-btn.pick[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.answer-btn.pick[aria-pressed="true"]::before { content: "✓ "; }
+.answer-btn.go:disabled { opacity: .45; cursor: not-allowed; }
+.ap-hint { font: 12.5px var(--f-ui); color: var(--mute); margin-left: 6px; }

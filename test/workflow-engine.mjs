@@ -273,6 +273,40 @@ export async function runWorkflowEngineChecks({ check, session }) {
     r = await until(waitsRun, settled);
     check('…and answering it there lets both runs finish', r.status === 'done' && !node(r, 'inner')?.waitsFor, states(r));
 
+    // A choice that allows several: every picked branch runs, the rest are skipped.
+    await save({ id: 'pick-many', title: 'Pick many', graph: { nodes: [
+      { id: 'what', title: 'What?', kind: 'decision', col: 1, row: 0, spec: { question: 'What are we making?', multi: true,
+        options: [{ label: 'theme', edgeLabel: 'theme' }, { label: 'workout', edgeLabel: 'workout' }, { label: 'rule', edgeLabel: 'rule' }] } },
+      { ...script('t', 'echo theme'), col: 2 }, { ...script('w', 'echo workout'), col: 2, row: 1 }, { ...script('ru', 'echo rule'), col: 2, row: 2 },
+      { ...script('always', 'echo always'), col: 2, row: 3 },
+      { ...script('after', 'echo {{nodes.what.output.answer}}'), col: 3 },
+    ], edges: [['what', 't', 'theme'], ['what', 'w', 'workout'], ['what', 'ru', 'rule'], ['what', 'always'], ['always', 'after']] } });
+    const manyId = (await start('pick-many')).run.runId;
+    r = await until(manyId, (x) => node(x, 'what')?.waitsFor === 'you');
+    const manyQ = (await api(`/api/runs/${manyId}`)).question;
+    const badPick = await api(`/api/runs/${manyId}/answer`, { body: { nodeId: 'what', answer: ['theme', 'cake'] } });
+    const noPick = await api(`/api/runs/${manyId}/answer`, { body: { nodeId: 'what', answer: [] } });
+    await api(`/api/runs/${manyId}/answer`, { body: { nodeId: 'what', answer: ['theme', 'rule'] } });
+    r = await until(manyId, settled);
+    check('a choice can allow several, and says so when it asks', manyQ?.multi === true && manyQ?.choices?.length === 3, JSON.stringify(manyQ));
+    check('…a pick that is not a choice, or no pick, is refused', badPick.status === 400 && /cake/.test(badPick.error || '') && noPick.status === 400, `${badPick.error} | ${noPick.error}`);
+    check('…every picked branch runs and the others are skipped', r.status === 'done' && node(r, 't')?.status === 'done' && node(r, 'ru')?.status === 'done'
+      && node(r, 'w')?.status === 'skipped' && node(r, 'always')?.status === 'done', states(r));
+    check('…and the answer reads as one line where a step names it', node(r, 'after')?.output?.out?.trim() === 'theme, rule'
+      && JSON.stringify(node(r, 'what')?.output?.picked) === '["theme","rule"]', `${node(r, 'after')?.output?.out} ${JSON.stringify(node(r, 'what')?.output)}`);
+
+    // Two inner workflows waiting at once: one question is asked, the other counted.
+    await save({ id: 'two-waits', title: 'Two waits', graph: { nodes: [flow('one', { workflow: 'sub-asks' }), { ...flow('two', { workflow: 'sub-asks' }), row: 1 }], edges: [] } });
+    const twoId = (await start('two-waits')).run.runId;
+    await until(twoId, (x) => node(x, 'one')?.waitsFor === 'child' && node(x, 'two')?.waitsFor === 'child');
+    const twoQ = (await api(`/api/runs/${twoId}`)).question;
+    check('two inner workflows waiting at once: one question is asked, and the other counted', twoQ?.more === 1 && twoQ?.via?.[0]?.nodeId === 'one', JSON.stringify(twoQ));
+    for (const id of ['one', 'two']) {
+      const cr = node((await api(`/api/runs/${twoId}`)).run, id)?.output?.child?.runId;
+      if (cr) await api(`/api/runs/${cr}/answer`, { body: { nodeId: 'ok', answer: 'approve' } });
+    }
+    await until(twoId, settled);
+
     await save({ id: 'sub-slow', title: 'Sub slow', graph: { nodes: [script('nap', 'sleep 20')], edges: [] } });
     await save({ id: 'sub-wraps-slow', title: 'Sub wraps slow', graph: { nodes: [flow('inner', { workflow: 'sub-slow' })], edges: [] } });
     const slowRun = (await start('sub-wraps-slow')).run.runId;
@@ -1280,6 +1314,24 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     r = await p.ev(`return { path: location.pathname + location.search, cls: document.querySelector('.n-card[data-id="inner"]').className };`);
     check('…the page stays on the outer run, and its step turns done', r.path === `/workflow-editor.html?run=${outerAsk}` && /rs-done/.test(r.cls), JSON.stringify(r));
     check('answering from the outer run raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
+    // Picking several on the canvas: toggles, then one button sends them.
+    const manyUi = (await start('pick-many')).run.runId;
+    await until(manyUi, (x) => node(x, 'what')?.waitsFor === 'you');
+    p = await open(`/workflow-editor.html?run=${manyUi}`);
+    r = await p.ev(`const panel = document.getElementById('answerPanel');
+      const go = panel.querySelector('#answerMany');
+      const before = go?.disabled;
+      for (const t of ['workout', 'rule']) panel.querySelector('[data-pick="' + t + '"]').click();
+      const pressed = [...panel.querySelectorAll('[data-pick][aria-pressed="true"]')].map((b) => b.dataset.pick);
+      go.click();
+      return { before, pressed, hint: panel.textContent.includes('Pick any') };`);
+    const manyDone = await until(manyUi, settled);
+    check('a pick-several question shows toggles, and Go sends the picks',
+      r.before === true && r.pressed.join() === 'workout,rule' && r.hint && node(manyDone, 'w')?.status === 'done' && node(manyDone, 'ru')?.status === 'done' && node(manyDone, 't')?.status === 'skipped',
+      `${JSON.stringify(r)} ${states(manyDone)}`);
+    check('picking several raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
 
     // With no live stream (as when Orderly restarts under an open page), a
