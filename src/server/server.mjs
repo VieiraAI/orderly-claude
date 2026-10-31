@@ -212,6 +212,26 @@ function summariseRun(r, versionOf = null) {
   };
 }
 
+/*
+ * The question a run is waiting on, wherever it is asked: its own, or one a
+ * workflow it runs is asking, however deep. `runId` says which run to answer
+ * and `via` names the steps it was asked through, so the outer run's page
+ * can ask it in place. `find` reads a run, live or from disk.
+ */
+function questionFor(run, find, depth = 0) {
+  const own = openQuestion(run) || legacyQuestion(run);
+  if (own) return { ...own, runId: run.runId, via: [] };
+  if (depth > 4) return null;
+  for (const n of run.graph?.nodes || []) {
+    const childId = n.waitsFor === 'child' && n.output?.child?.runId;
+    if (!childId) continue;
+    const child = find(childId);
+    const q = child && questionFor(child, find, depth + 1);
+    if (q) return { ...q, via: [{ nodeId: n.id, title: n.title, workflow: child.workflowTitle }, ...q.via] };
+  }
+  return null;
+}
+
 function legacyQuestion(r) {
   const n = (r.graph?.nodes || []).find((x) => ['ask', 'decision', 'approve'].includes(x.kind)
     && x.status === 'running' && x.output?.question);
@@ -1320,7 +1340,7 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
         return send(200, {
           run,
           currentVersion: def ? def.version || 1 : null,
-          question: openQuestion(run) || legacyQuestion(run),
+          question: questionFor(run, (id) => schedulers.get(id)?.run || readRun(id)),
           live: schedulers.has(run.runId),
           ownedElsewhere: ownedElsewhere(run),
           redos: [...(redos.get(run.runId)?.values() || [])],

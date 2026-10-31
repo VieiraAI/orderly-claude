@@ -266,6 +266,9 @@ export async function runWorkflowEngineChecks({ check, session }) {
     const innerAsk = node(r, 'inner')?.output?.child?.runId;
     check('a question inside the inner workflow shows on the step', node(r, 'inner')?.waitsFor === 'child'
       && /waiting for you in Sub asks: Looks right\?/.test(node(r, 'inner')?.progress || ''), `${node(r, 'inner')?.waitsFor} ${node(r, 'inner')?.progress}`);
+    const outerQ = (await api(`/api/runs/${waitsRun}`)).question;
+    check('…and the outer run carries that question, saying which run to answer and through which step',
+      outerQ?.runId === innerAsk && outerQ?.nodeId === 'ok' && outerQ?.question === 'Looks right?' && outerQ?.via?.[0]?.nodeId === 'inner', JSON.stringify(outerQ));
     await api(`/api/runs/${innerAsk}/answer`, { body: { nodeId: 'ok', answer: 'approve' } });
     r = await until(waitsRun, settled);
     check('…and answering it there lets both runs finish', r.status === 'done' && !node(r, 'inner')?.waitsFor, states(r));
@@ -1258,6 +1261,25 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     check('…double-clicked in a run, it shows how far that workflow got, and closes again',
       r.opened && r.minis.length === 1 && /rs-done/.test(r.minis[0]) && /1 of 1 done/.test(r.head) && r.closed, JSON.stringify(r));
     check('opening a workflow step raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
+    // A question from a workflow this one runs is answered on this canvas,
+    // without going to the inner run's page.
+    const outerAsk = (await start('sub-waits')).run.runId;
+    await until(outerAsk, (x) => node(x, 'inner')?.waitsFor === 'child');
+    p = await open(`/workflow-editor.html?run=${outerAsk}`);
+    r = await p.ev(`const panel = document.getElementById('answerPanel');
+      const out = { eyebrow: panel.querySelector('.ap-eyebrow')?.textContent || '', q: panel.querySelector('.ap-q')?.textContent || '',
+        buttons: [...panel.querySelectorAll('[data-answer]')].map((b) => b.dataset.answer) };
+      panel.querySelector('[data-answer]')?.click();
+      return out;`);
+    const answeredHere = await until(outerAsk, settled);
+    check('a question an inner workflow asks is answered above the outer run\'s canvas',
+      /inner › Looks right\?/.test(r.eyebrow) && r.q === 'Looks right?' && r.buttons.length > 0 && answeredHere?.status === 'done', `${JSON.stringify(r)} ${answeredHere?.status}`);
+    await sleep(500);
+    r = await p.ev(`return { path: location.pathname + location.search, cls: document.querySelector('.n-card[data-id="inner"]').className };`);
+    check('…the page stays on the outer run, and its step turns done', r.path === `/workflow-editor.html?run=${outerAsk}` && /rs-done/.test(r.cls), JSON.stringify(r));
+    check('answering from the outer run raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
 
     // The editor shows a run on the workflow's own canvas: each card's state

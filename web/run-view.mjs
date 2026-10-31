@@ -25,6 +25,7 @@ const host = {
   afterDelete: () => { location.href = '/workflows.html#runs'; },
   again: null,
   answerHint: '◆ Answer on the left',
+  childAnswer: 'Answer it on the left, or there ↗',
 };
 
 export function bindRunView(hooks) { Object.assign(host, hooks); }
@@ -236,14 +237,16 @@ function renderAnswer() {
   const buttons = q.choices?.length
     ? q.choices.map((c) => `<button class="answer-btn ${/reject|^no$/i.test(c) ? 'neg' : ''}" data-answer="${esc(c)}">${esc(c)}</button>`).join('')
     : '<input class="answer-text" id="answerText" placeholder="Your answer"><button class="answer-btn" id="answerSend">Answer</button>';
+  // A question from a workflow this run runs is answered here too, in its own run.
+  const path = (q.via || []).map((v) => v.title).concat(q.title).join(' › ');
   mount.innerHTML = `<div class="answer-panel">
-    <div class="ap-eyebrow">Waiting for you · ${esc(q.title)}</div>
+    <div class="ap-eyebrow">Waiting for you · ${esc(path)}</div>
     <div class="ap-q">${esc(q.question)}</div>
     <div class="need-actions">${buttons}<span class="need-status" id="apStatus"></span></div>
   </div>`;
   const send = async (answer) => {
     document.getElementById('apStatus').textContent = 'Sending…';
-    const r = await post(`/api/runs/${encodeURIComponent(run.runId)}/answer`, { nodeId: q.nodeId, answer });
+    const r = await post(`/api/runs/${encodeURIComponent(q.runId || run.runId)}/answer`, { nodeId: q.nodeId, answer });
     if (r.answered) { document.getElementById('apStatus').textContent = 'Answered.'; host.reload(); }
     else { const el = document.getElementById('apStatus'); el.textContent = r.error || 'Could not answer.'; el.classList.add('bad'); }
   };
@@ -412,7 +415,7 @@ function workflowCard(n) {
     : `<div class="doc-b">${esc(`${c.done} of ${c.total} steps${c.current && n.status === 'running' ? ` · ${c.current}` : ''}`)}</div>`;
   return `<div class="doc-h">${esc(c.title)}</div>${line}
     <div class="sub-bar"><i style="width:${pct}%"></i></div>
-    <a class="sub-open" href="${host.runHref(c.runId)}">${n.waitsFor === 'child' ? 'Answer it there ↗' : 'Open its run ↗'}</a>`;
+    <a class="sub-open" href="${host.runHref(c.runId)}">${n.waitsFor === 'child' ? host.childAnswer : 'Open its run ↗'}</a>`;
 }
 
 function cardBody(n) {

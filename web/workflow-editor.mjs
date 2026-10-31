@@ -1952,6 +1952,7 @@ bindRunView({
   afterDelete: () => closeRun(),
   again: (r) => openRunDialog({ prefill: r.inputs || {} }),
   answerHint: '◆ Answer it above the canvas',
+  childAnswer: 'Answer it above the canvas, or open its run ↗',
 });
 
 function runNode(id) { return state.run?.graph?.nodes?.find((n) => n.id === id) || null; }
@@ -2105,7 +2106,8 @@ function followRuns() {
   const mine = (e) => {
     let id = null;
     try { id = JSON.parse(e.data || '{}').runId; } catch { /* no payload */ }
-    const children = Object.values(state.childRuns).map((x) => x?.runId);
+    // A workflow this run runs reports on its own run; its questions show here.
+    const children = (state.run?.graph?.nodes || []).map((x) => x.output?.child?.runId).concat(Object.values(state.childRuns).map((x) => x?.runId)).filter(Boolean);
     if (!state.runId || (id && id !== state.runId && !children.includes(id))) return;
     clearTimeout(pending);
     pending = setTimeout(() => refreshRun().catch(() => {}), 120);
