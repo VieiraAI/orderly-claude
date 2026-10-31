@@ -289,6 +289,12 @@
     <div class="ed-canvas-inner" id="edInner">
       <svg class="svg-edges" id="edEdges"></svg>
     </div>
+    <!-- Inside the canvas, so it centres on the canvas and never covers the side panel. -->
+    <div class="ed-empty" id="edEmpty">
+      <div class="ed-empty-h">Start with <b>+ Add step</b>, or from a workflow that already works:</div>
+      <div class="ed-empty-list" id="edEmptyList"></div>
+      <div class="ed-empty-sub">Each step's <b>Comes after</b> list joins it to the others.</div>
+    </div>
   </div>
 
   <div class="ed-json" id="edJson">
@@ -404,11 +410,6 @@
   <div id="status" class="status" role="status"></div>
   <div id="problems" class="problems" style="display:none;"></div>
   <div id="warnings" class="warnings" style="display:none;"></div>
-</div>
-<div class="ed-empty" id="edEmpty">
-  <div class="ed-empty-h">Start with <b>+ Add step</b>, or from a workflow that already works:</div>
-  <div class="ed-empty-list" id="edEmptyList"></div>
-  <div class="ed-empty-sub">Each step's <b>Comes after</b> list joins it to the others.</div>
 </div>
 <div class="ref-pop hidden" id="refPop" role="listbox"></div>
 
