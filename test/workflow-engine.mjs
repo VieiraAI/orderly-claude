@@ -1239,6 +1239,27 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     check('the Run a workflow form raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
 
+    // A Run a workflow step opens up to show the workflow it runs: its plan
+    // when editing, and each inner step's state when a run is shown.
+    p = await open('/workflow-editor.html?from=sub-parent');
+    await sleep(600);
+    r = await p.ev(`const c = () => document.querySelector('.n-card[data-id="inner"]');
+      c().querySelector('.n-open').click(); await new Promise((r) => setTimeout(r, 700));
+      return { opened: c().classList.contains('opened'), minis: [...c().querySelectorAll('.mini')].map((m) => m.className) };`);
+    check('a Run a workflow step opens up to show the steps of the workflow it runs',
+      r.opened && r.minis.length === 1 && !r.minis.some((m) => /rs-/.test(m)), JSON.stringify(r));
+    await p.close();
+    p = await open(`/workflow-editor.html?run=${outerId}`);
+    r = await p.ev(`const c = () => document.querySelector('.n-card[data-id="inner"]');
+      c().click(); await new Promise((r) => setTimeout(r, 100)); c().click(); await new Promise((r) => setTimeout(r, 900));
+      const opened = { opened: c().classList.contains('opened'), minis: [...c().querySelectorAll('.mini')].map((m) => m.className), head: c().querySelector('.n-inner-head')?.textContent || '' };
+      c().click(); await new Promise((r) => setTimeout(r, 100)); c().click(); await new Promise((r) => setTimeout(r, 600));
+      return { ...opened, closed: !c().classList.contains('opened') };`);
+    check('…double-clicked in a run, it shows how far that workflow got, and closes again',
+      r.opened && r.minis.length === 1 && /rs-done/.test(r.minis[0]) && /1 of 1 done/.test(r.head) && r.closed, JSON.stringify(r));
+    check('opening a workflow step raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
     // The editor shows a run on the workflow's own canvas: each card's state
     // on its border, the result inside, and the run's question and actions
     // above the canvas. Steps the run has not reached look as they do when editing.

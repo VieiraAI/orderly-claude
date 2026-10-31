@@ -111,6 +111,8 @@ const state = {
   runMeta: {},
   grid: null,          // column and row starts while a run sizes the cards
   dragging: false,
+  expanded: new Set(), // "Run a workflow" steps opened up to show their own steps
+  childRuns: {},       // step id → the run it started, while it is opened up
 };
 
 /* ---------------------------------- init --------------------------------- */
@@ -1092,7 +1094,7 @@ function renderCanvas() {
     h: nodes.reduce((m, n) => Math.max(m, GUTTER + ((n.row || 0) - o.row) * ROW_H + 140), 0) + GUTTER,
   };
   state.grid = null;
-  if (state.run) state.content = reflow(inner);
+  if (state.run || state.expanded.size) state.content = reflow(inner);
   const canvas = inner.parentElement;
   const w = Math.max(state.content.w, canvas.clientWidth / (state.zoom || 1));
   const h = Math.max(state.content.h, canvas.clientHeight / (state.zoom || 1));
@@ -1200,6 +1202,7 @@ function nodeCard(n) {
   card.title = probs.map(plain).join('\n');
   card.addEventListener('click', (e) => {
     e.stopPropagation();
+    if (n.kind === 'workflow' && !e.target.closest('a, button') && secondClick(n.id)) { toggleOpen(n.id); return; }
     if (e.shiftKey && state.selectedId && state.selectedId !== n.id) {
       if (addEdge(state.selectedId, n.id)) changed();
       return;
@@ -1214,6 +1217,7 @@ function nodeCard(n) {
     confirmDelete(n);
   });
   attachDrag(card, n);
+  if (n.kind === 'workflow') openable(card, n, null);
   return card;
 }
 
@@ -1225,6 +1229,7 @@ function runCard(card, n, rn, rs) {
     e.stopPropagation();
     if (cardClick(rn, e)) return;
     if (e.target.closest('.n-preview')) { openPreview(rn); return; }
+    if (n.kind === 'workflow' && !n.gone && !e.target.closest('a, button') && secondClick(n.id)) { toggleOpen(n.id); return; }
     if (!n.gone && e.shiftKey && state.selectedId && state.selectedId !== n.id) {
       if (addEdge(state.selectedId, n.id)) changed();
       return;
@@ -1239,6 +1244,7 @@ function runCard(card, n, rn, rs) {
     confirmDelete(n);
   });
   attachDrag(card, n);
+  if (n.kind === 'workflow') openable(card, n, rn);
   return card;
 }
 
@@ -2071,6 +2077,7 @@ async function refreshRun() {
   const r = await fetch(`/api/runs/${encodeURIComponent(state.runId)}`).then((x) => x.json()).catch(() => ({}));
   if (!r.run || r.run.runId !== state.runId) return;
   applyRun(r);
+  await refreshChildRuns();
   // A card being dragged is left alone; it redraws when it is let go.
   if (state.dragging) state.redrawAfterDrag = true; else renderCanvas();
   renderRunStep();
@@ -2098,7 +2105,8 @@ function followRuns() {
   const mine = (e) => {
     let id = null;
     try { id = JSON.parse(e.data || '{}').runId; } catch { /* no payload */ }
-    if (!state.runId || (id && id !== state.runId)) return;
+    const children = Object.values(state.childRuns).map((x) => x?.runId);
+    if (!state.runId || (id && id !== state.runId && !children.includes(id))) return;
     clearTimeout(pending);
     pending = setTimeout(() => refreshRun().catch(() => {}), 120);
   };
@@ -2253,6 +2261,118 @@ function fitLayout() {
   const layout = $('edLayout');
   const top = layout.getBoundingClientRect().top;
   layout.style.height = `${Math.max(320, innerHeight - top)}px`;
+}
+
+/* -------------------- a workflow step, opened up -------------------- */
+
+/*
+ * Double-click a "Run a workflow" step (or press its ⤢) to open it up on the
+ * canvas: every step of the workflow it runs, laid out as in its own editor.
+ * With a run shown, each inner step wears the same state as the cards here,
+ * from the run that step started, and follows it live.
+ */
+const MINI_W = 150, MINI_H = 50, MINI_COL = 172, MINI_ROW = 66;
+
+function openable(card, n, rn) {
+  const open = state.expanded.has(n.id);
+  const head = card.querySelector('.n-head');
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'n-open';
+  btn.title = open ? 'Close it (or double-click)' : 'Open it up to see its steps (or double-click)';
+  btn.setAttribute('aria-expanded', String(open));
+  btn.textContent = open ? '⤡' : '⤢';
+  btn.addEventListener('mousedown', (e) => e.stopPropagation());
+  btn.addEventListener('click', (e) => { e.stopPropagation(); toggleOpen(n.id); });
+  // Beside the kind, where it stays in view however wide the card opens.
+  const kind = head?.querySelector('.n-kind');
+  if (kind) kind.after(btn); else head?.append(btn);
+  if (!open) return;
+  card.classList.add('opened');
+  const inner = innerOf(n, rn);
+  const box = document.createElement('div');
+  box.className = 'n-inner';
+  box.innerHTML = inner ? innerHtml(inner) : '<div class="n-inner-none">Pick the workflow it runs, in the panel on the right.</div>';
+  box.addEventListener('mousedown', (e) => { if (e.target.closest('a')) e.stopPropagation(); });
+  const foot = card.querySelector('.n-foot');
+  if (foot) card.insertBefore(box, foot); else card.append(box);
+  if (inner) card.style.width = `${Math.max(320, inner.w + 24)}px`;
+}
+
+/*
+ * Two clicks on the same step close together. Not the dblclick event: the
+ * first click selects the step and redraws the canvas, so the second lands
+ * on a new card and the browser never pairs them.
+ */
+let lastClick = { id: null, at: 0 };
+function secondClick(id) {
+  const now = Date.now();
+  const again = lastClick.id === id && now - lastClick.at < 450;
+  lastClick = again ? { id: null, at: 0 } : { id, at: now };
+  return again;
+}
+
+async function toggleOpen(id) {
+  if (state.expanded.has(id)) { state.expanded.delete(id); delete state.childRuns[id]; }
+  else {
+    state.expanded.add(id);
+    await loadLibrary();
+    await refreshChildRuns();
+  }
+  renderCanvas();
+}
+
+/** The run each opened step started, fetched again on every update. */
+async function refreshChildRuns() {
+  await Promise.all([...state.expanded].map(async (id) => {
+    const childId = runNode(id)?.output?.child?.runId;
+    if (!childId) { delete state.childRuns[id]; return; }
+    const r = await fetch(`/api/runs/${encodeURIComponent(childId)}`).then((x) => x.json()).catch(() => ({}));
+    if (r.run) state.childRuns[id] = r.run;
+  }));
+}
+
+/** What to draw inside: the run the step started if there is one, else the workflow it names. */
+function innerOf(n, rn) {
+  const child = state.childRuns[n.id];
+  const def = child?.definition || workflowPicked(n.spec || {}, state.library || []);
+  const graph = child?.graph || def?.graph;
+  if (!graph?.nodes?.length) return null;
+  const nodes = graph.nodes;
+  const minC = Math.min(...nodes.map((x) => x.col || 0)), minR = Math.min(...nodes.map((x) => x.row || 0));
+  const pos = Object.fromEntries(nodes.map((x) => [x.id, { x: ((x.col || 0) - minC) * MINI_COL, y: ((x.row || 0) - minR) * MINI_ROW }]));
+  const w = Math.max(...Object.values(pos).map((p) => p.x)) + MINI_W;
+  const h = Math.max(...Object.values(pos).map((p) => p.y)) + MINI_H;
+  return { title: def?.title || child?.workflowTitle || n.spec?.workflow, nodes, edges: graph.edges || [], pos, w, h, child, def, live: !!rn };
+}
+
+function innerHtml(i) {
+  const done = i.child ? i.nodes.filter((x) => x.status === 'done').length : 0;
+  const href = i.child
+    ? `/workflow-editor.html?run=${encodeURIComponent(i.child.runId)}`
+    : i.def ? `/workflow-editor.html?from=${encodeURIComponent(i.def.id)}${refQuery(i.def)}` : '';
+  const state_ = i.child ? `${RUN_WORDS[i.child.status] || i.child.status} · ${done} of ${i.nodes.length} done` : `${i.nodes.length} steps${i.live ? ' · not started' : ''}`;
+  const edges = i.edges.map(([a, b]) => {
+    const p = i.pos[a], q = i.pos[b];
+    if (!p || !q) return '';
+    const x1 = p.x + MINI_W, y1 = p.y + MINI_H / 2, x2 = q.x, y2 = q.y + MINI_H / 2;
+    const dx = Math.max(12, (x2 - x1) / 2);
+    return `<path d="M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}"/>`;
+  }).join('');
+  const minis = i.nodes.map((x) => {
+    const rs = i.child ? runState(x) : null;
+    const label = KINDS[x.kind]?.name || LEGACY[x.kind] || x.kind;
+    return `<div class="mini k-${escapeAttr(x.kind)}${rs ? ` rs-${rs}` : ''}" style="left:${i.pos[x.id].x}px;top:${i.pos[x.id].y}px" title="${escapeAttr(`${x.title || x.id} · ${label}${rs ? ` · ${{ done: 'done', failed: 'failed', ask: 'waiting for you', running: 'working', skipped: 'skipped', stopped: 'stopped' }[rs]}` : ''}`)}">
+      <span class="mini-kind">${KIND_GLYPH[x.kind] || '●'} ${escapeHtml(label)}</span>
+      <span class="mini-title">${escapeHtml(x.title || x.id)}</span>
+      ${RS_BADGE[rs] ? `<span class="rs-badge">${RS_BADGE[rs]}</span>` : ''}
+    </div>`;
+  }).join('');
+  const pct = i.child && i.nodes.length ? Math.round((done / i.nodes.length) * 100) : 0;
+  return `<div class="n-inner-head"><span class="n-inner-title">${escapeHtml(i.title || '')}</span><span class="n-inner-state">${escapeHtml(state_)}</span>
+      ${href ? `<a class="n-inner-open" href="${href}" target="_blank" rel="noopener" title="${i.child ? 'Open this run on its own canvas' : 'Open the workflow in the editor'}">Open ↗</a>` : ''}</div>
+    ${i.child ? `<div class="n-inner-bar"><i style="width:${pct}%"></i></div>` : ''}
+    <div class="n-inner-canvas" style="width:${i.w}px;height:${i.h}px"><svg width="${i.w}" height="${i.h}">${edges}</svg>${minis}</div>`;
 }
 
 function slug(s, live = false) {

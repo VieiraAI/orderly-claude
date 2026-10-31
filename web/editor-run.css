@@ -119,3 +119,44 @@ body.has-run .ed-layout:not(.no-sel) { grid-template-columns: 1fr 380px; }
 .run-dlg .rd-status { margin-right: auto; font: 12px var(--f-ui); color: var(--mute); }
 .run-dlg .rd-status.bad { color: var(--ship); }
 .run-dlg .run-btn.go { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+
+/* ---------------- a "Run a workflow" step, opened up ---------------- */
+.n-card .n-open { margin-left: 2px; margin-right: auto; width: 20px; height: 20px; padding: 0; border: 1px solid var(--edge-tint); border-radius: 5px;
+  background: var(--bg); color: var(--mute); font: 12px/1 var(--f-ui); cursor: pointer; flex: none; }
+.n-card .n-open:hover { color: var(--text); border-color: var(--edge-hi); }
+.n-card .n-head { align-items: center; }
+.n-card.opened { cursor: default; }
+.n-inner { margin-top: 6px; padding: 10px; border: 1px dashed color-mix(in oklab, var(--k-workflow) 45%, var(--edge-tint)); border-radius: 8px;
+  background: color-mix(in oklab, var(--k-workflow) 5%, var(--bg)); display: flex; flex-direction: column; gap: 8px; cursor: default; }
+.n-inner-head { display: flex; align-items: baseline; gap: 8px; font: 12px var(--f-ui); }
+.n-inner-title { font-weight: 500; color: var(--text); }
+.n-inner-state { color: var(--mute); font: 10.5px var(--f-mono); }
+.n-inner-open { margin-left: auto; font: 10.5px var(--f-mono); color: var(--accent); text-decoration: none; }
+.n-inner-open:hover { text-decoration: underline; }
+.n-inner-none { font: 11.5px var(--f-ui); color: var(--faint); }
+.n-inner-bar { height: 4px; border-radius: 2px; background: var(--edge-tint); overflow: hidden; }
+.n-inner-bar i { display: block; height: 100%; background: var(--ok); }
+/* Opened, the inner view says the workflow's name and progress; the card body need not. */
+.n-card.opened .c-body .doc-h, .n-card.opened .c-body .sub-bar, .n-card.opened .c-body .doc-b { display: none; }
+.n-inner-canvas { position: relative; }
+.n-inner-canvas > svg { position: absolute; inset: 0; overflow: visible; }
+.n-inner-canvas > svg path { fill: none; stroke: var(--design); stroke-width: 1.2; opacity: .6; }
+.mini { position: absolute; width: 150px; height: 50px; box-sizing: border-box; padding: 6px 8px; display: flex; flex-direction: column; gap: 2px;
+  background: var(--surface); border: 1px solid var(--edge-tint); border-left: 3px solid var(--kind-color, var(--faint)); border-radius: 7px; }
+.mini[class*="rs-"] { border-width: 1.5px; border-left-width: 3px; }
+.mini.k-agent { --kind-color: var(--k-agent); } .mini.k-script { --kind-color: var(--k-script); } .mini.k-decision { --kind-color: var(--k-decision); }
+.mini.k-approve { --kind-color: var(--k-approve); } .mini.k-check { --kind-color: var(--k-check); } .mini.k-workflow { --kind-color: var(--k-workflow); }
+.mini.k-publish { --kind-color: var(--k-publish); } .mini.k-loop { --kind-color: var(--k-loop); } .mini.k-display { --kind-color: var(--k-display); }
+.mini-kind { font: 9px var(--f-mono); color: var(--kind-color, var(--faint)); letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mini-title { font: 500 11.5px var(--f-ui); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mini.rs-done    { border-color: var(--ok); }
+.mini.rs-failed  { border-color: var(--ship); }
+.mini.rs-ask     { border-color: var(--amber); animation: rsAsk 1.6s ease-in-out infinite; }
+.mini.rs-running { border-color: var(--accent); animation: rsWork 1.6s ease-in-out infinite; }
+.mini.rs-skipped { border-style: dashed; opacity: .45; }
+.mini.rs-stopped { border-style: dashed; border-color: color-mix(in oklab, var(--design) 60%, transparent); }
+.mini .rs-badge { width: 16px; height: 16px; top: -7px; right: -7px; }
+.mini .rs-badge svg { width: 10px; height: 10px; }
+.mini.rs-done .rs-badge { background: var(--ok); } .mini.rs-failed .rs-badge { background: var(--ship); }
+.mini.rs-ask .rs-badge { background: var(--amber); color: #1a1408; font: 700 10px var(--f-ui); }
+@media (prefers-reduced-motion: reduce) { .mini.rs-ask, .mini.rs-running { animation: none; } }
