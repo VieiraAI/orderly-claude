@@ -724,7 +724,8 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       // with its repo. The booted repo's defs still win over user-global ones.
       if (url.pathname === '/api/workflows' && req.method === 'GET') {
         // bootedRepo lets the client name booted-repo workflows by id alone.
-        return send(200, { workflows: listAllDefinitions({ repoRoot: liveCwd }), bootedRepo: bootedRepo() });
+        // projects and home let the editor say which folder a workflow is kept in.
+        return send(200, { workflows: listAllDefinitions({ repoRoot: liveCwd }), bootedRepo: bootedRepo(), projects: knownRepoRoots().map((p) => path.resolve(p)), home: os.homedir() });
       }
 
       // Suggest which workflow fits a free-text ask. Pure token overlap; no

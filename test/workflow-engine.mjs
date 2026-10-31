@@ -1410,6 +1410,25 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     check('saving a draft raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
     await p.close();
 
+    // Keep it in names each project by its folder, so "this project" is
+    // never a guess, and saving into another project keeps it there.
+    p = await open('/workflow-editor.html');
+    await sleep(500);
+    r = await p.ev(`const $ = (id) => document.getElementById(id);
+      const opts = [...$('wfScope').options].map((o) => ({ v: o.value, t: o.textContent }));
+      $('wfTitle').value = 'Kept elsewhere'; $('wfTitle').dispatchEvent(new Event('input', { bubbles: true }));
+      const other = opts.find((o) => o.t === 'other-project');
+      if (other) { $('wfScope').value = other.v; $('wfScope').dispatchEvent(new Event('change', { bubbles: true })); }
+      $('btnSave').click(); await new Promise((r) => setTimeout(r, 900));
+      return { opts, status: $('status').textContent };`);
+    const keptAt = (await api('/api/workflows')).workflows.find((w) => w.id === 'kept-elsewhere');
+    check('Keep it in names your library and each project by its folder',
+      r.opts[0]?.v === 'user' && r.opts[1]?.t === 'project' && r.opts.some((o) => o.t === 'other-project'), JSON.stringify(r.opts));
+    check('…and saving into another project keeps it there, and says so',
+      keptAt?.scope === 'project' && keptAt?.repoName === 'other-project' && /Saved in other-project/.test(r.status), `${keptAt?.repoRoot} ${r.status}`);
+    check('picking a project raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));
+    await p.close();
+
     // A step that is working has a moving border, and Stop is above the canvas.
     await save({ id: 'ed-slow', title: 'Editor slow', graph: { nodes: [script('z', 'sleep 30')], edges: [] } });
     const slowId = (await start('ed-slow')).run.runId;

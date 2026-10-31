@@ -160,3 +160,7 @@ header.wf-header { grid-template-columns: 1fr 200px 150px auto; }
 .del-foot .btn:hover { border-color: var(--edge-strong); }
 .del-foot .btn.danger { background: var(--ship, #A94E46); border-color: var(--ship, #A94E46); color: #fff; }
 .del-foot .btn.danger:hover { filter: brightness(1.08); }
+
+/* Keep it in pointing at the home folder, which is not a project. */
+.wf-field select.warn { border-color: var(--amber); color: var(--amber); }
+.ed-side .hint.warn { color: var(--amber); }

@@ -87,8 +87,9 @@ const VERIFY_CHECKS = [
 ];
 
 const SCOPE_HINT = {
-  user: 'Kept in your own library (~/.claude/workflows), so it follows you into every project.',
-  project: 'Kept inside this project (.claude/workflows). Commit it to share it with whoever works on the project.',
+  user: 'Kept in your own library (~/.claude/workflows), so it follows you into every project. It runs in whichever project is open when you start it.',
+  project: 'Kept inside the project (.claude/workflows), and always runs there. Commit it to share it with whoever works on the project.',
+  home: 'This is your home folder, not a project. A workflow kept here runs here, so its commands will not find your project. Pick the project instead.',
 };
 
 const state = {
@@ -218,6 +219,7 @@ async function loadExisting(id, { scope: wantScope, repo, quiet = false } = {}) 
   state.loaded = state.builtin ? null : { id: clean.id, scope, repoRoot: repoRoot || null };
   // A built-in saves as the person's own copy, in their library.
   $('wfScope').value = state.builtin ? 'user' : scope;
+  fillScopes();
   document.title = `${clean.title || clean.id} — workflow editor`;
 }
 
@@ -627,6 +629,10 @@ async function loadLibrary() {
   const r = await fetch('/api/workflows').then((x) => x.json()).catch(() => null);
   if (!r) return;
   const list = (r.workflows || []).filter((w) => !w.invalid);
+  state.bootedRepo = r.bootedRepo || state.bootedRepo;
+  state.projects = r.projects || [];
+  state.home = r.home || null;
+  fillScopes();
   const changed = !state.library || list.map((w) => `${w.key}@${w.version || 0}`).join() !== state.library.map((w) => `${w.key}@${w.version || 0}`).join();
   state.library = list;
   if (changed && selectedNode()?.kind === 'workflow') renderSelected();
@@ -679,12 +685,12 @@ async function save() {
   if (!def.id) def.id = slug(def.title);
   const ok = await validate();
   if (!ok) { showProblems(state.problems, state.warnings, 'Fix these, then save.'); return false; }
-  const scope = $('wfScope').value;
-  // A project workflow from another repo saves back into that repo; a new
-  // one goes into the booted repo, as before.
-  const repoRoot = scope === 'project' && state.loaded?.scope === 'project' ? state.loaded.repoRoot : null;
-  // Saving over itself is fine; saving a new one over another is not.
-  const overwrite = !!state.loaded && state.loaded.id === def.id && state.loaded.scope === scope;
+  // Keep it in names the folder: your library, or a project by its path.
+  const scope = $('wfScope').value === 'user' ? 'user' : 'project';
+  const repoRoot = scope === 'project' ? pickedRepo() : null;
+  // Saving over itself is fine; saving a new one over another, or into another project, is not.
+  const overwrite = !!state.loaded && state.loaded.id === def.id && state.loaded.scope === scope
+    && (scope !== 'project' || (state.loaded.repoRoot || state.bootedRepo) === (repoRoot || state.bootedRepo));
   try {
     const r = await fetch('/api/workflows', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -715,7 +721,8 @@ async function save() {
     markSaved(true, r.version);
     // Saved for the first time: the conversation about it follows it.
     state.assistant?.rekey(assistantKey());
-    toast(r.version > 1 ? `Saved as version ${r.version}. Runs already made keep the version they ran.` : 'Saved.', 'ok', 2500);
+    const where = r.scope === 'project' && r.repoRoot ? ` in ${r.repoRoot.split('/').filter(Boolean).pop()}` : ' in your library';
+    toast(r.version > 1 ? `Saved${where} as version ${r.version}. Runs already made keep the version they ran.` : `Saved${where}.`, 'ok', 2500);
     return true;
   } catch (e) {
     toast(e.message, 'err');
@@ -737,7 +744,7 @@ async function importFile() {
   if (!f) return;
   let def;
   try { def = JSON.parse(await f.text()); } catch { toast(`${f.name} is not a workflow file.`, 'err'); return; }
-  const scope = $('wfScope').value;
+  const scope = $('wfScope').value === 'user' ? 'user' : 'project';
   const post = (d) => fetch('/api/workflows/import', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ def: d, scope }),
   }).then(async (x) => ({ status: x.status, ...(await x.json()) }));
@@ -1037,7 +1044,43 @@ function render() {
   if (state.mode === 'json') $('jsonArea').value = JSON.stringify(state.def, null, 2);
 }
 
-function renderScopeHint() { $('scopeHint').textContent = SCOPE_HINT[$('wfScope').value] || ''; }
+/** The folder the Keep it in picker points at, or null for the library. */
+function pickedRepo() {
+  const v = $('wfScope').value;
+  return v === 'user' ? null : v.startsWith('project:') ? v.slice(8) : state.bootedRepo || null;
+}
+
+/*
+ * Keep it in: your library, or a project named by its folder, so it is
+ * plain which one "this project" is. The project open in Orderly comes
+ * first; the home folder is said to be no project.
+ */
+function fillScopes() {
+  const sel = $('wfScope');
+  const name = (p) => String(p).split('/').filter(Boolean).pop() || p;
+  const note = (p) => (p && p === state.home ? ' (your home folder, not a project)' : '');
+  const others = (state.projects || []).filter((p) => p !== state.bootedRepo && p !== state.home);
+  const was = sel.value;
+  sel.innerHTML = '<option value="user">your library</option>'
+    + `<option value="project">${state.bootedRepo ? `${escapeHtml(name(state.bootedRepo))}${note(state.bootedRepo)}` : 'this project'}</option>`
+    + others.map((p) => `<option value="project:${escapeAttr(p)}">${escapeHtml(name(p))}</option>`).join('');
+  const l = state.loaded;
+  const want = state.builtin ? 'user'
+    : l?.scope === 'project' && l.repoRoot && l.repoRoot !== state.bootedRepo ? `project:${l.repoRoot}`
+    : l ? (l.scope === 'user' ? 'user' : 'project') : was;
+  sel.value = [...sel.options].some((o) => o.value === want) ? want : 'project';
+  sel.title = pickedRepo() || '~/.claude/workflows';
+  renderScopeHint();
+}
+
+function renderScopeHint() {
+  const v = $('wfScope').value;
+  const home = pickedRepo() && pickedRepo() === state.home;
+  $('scopeHint').textContent = home ? SCOPE_HINT.home : SCOPE_HINT[v === 'user' ? 'user' : 'project'];
+  $('scopeHint').classList.toggle('warn', !!home);
+  $('wfScope').classList.toggle('warn', !!home);
+  $('wfScope').title = pickedRepo() || '~/.claude/workflows';
+}
 
 function markSaved(saved, version) {
   const el = $('saveLine');
