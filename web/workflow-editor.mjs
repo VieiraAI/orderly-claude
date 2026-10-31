@@ -1057,7 +1057,10 @@ function pickedRepo() {
  */
 function fillScopes() {
   const sel = $('wfScope');
-  const name = (p) => String(p).split('/').filter(Boolean).pop() || p;
+  // A folder name shared by two projects carries its parent, so the two can be told apart.
+  const base = (p) => String(p).split('/').filter(Boolean).pop() || p;
+  const twice = new Set((state.projects || []).map(base).filter((n, i, all) => all.indexOf(n) !== i));
+  const name = (p) => (twice.has(base(p)) ? `${base(p)} (${String(p).split('/').filter(Boolean).slice(-2, -1)[0] || '/'})` : base(p));
   const note = (p) => (p && p === state.home ? ' (your home folder, not a project)' : '');
   const others = (state.projects || []).filter((p) => p !== state.bootedRepo && p !== state.home);
   const was = sel.value;
@@ -2173,7 +2176,10 @@ function followRuns() {
  */
 const LIVE = new Set(['running', 'awaiting-answer']);
 setInterval(() => {
-  if (state.runId && LIVE.has(state.run?.status) && document.visibilityState === 'visible' && !state.dragging) refreshRun().catch(() => {});
+  // A run marked failed can still have a step at work (a branch failed while
+  // another waits on you), so a working step keeps the page reading it too.
+  const working = LIVE.has(state.run?.status) || (state.run?.graph?.nodes || []).some((n) => n.status === 'running');
+  if (state.runId && working && document.visibilityState === 'visible' && !state.dragging) refreshRun().catch(() => {});
 }, 5000);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && state.runId) refreshRun().catch(() => {});

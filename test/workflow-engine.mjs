@@ -1431,13 +1431,13 @@ async function browserChecks({ check, base, api, save, start, until, settled, no
     r = await p.ev(`const $ = (id) => document.getElementById(id);
       const opts = [...$('wfScope').options].map((o) => ({ v: o.value, t: o.textContent }));
       $('wfTitle').value = 'Kept elsewhere'; $('wfTitle').dispatchEvent(new Event('input', { bubbles: true }));
-      const other = opts.find((o) => o.t === 'other-project');
+      const other = opts.find((o) => /^other-project\\b/.test(o.t) && o.v.endsWith(${JSON.stringify(path.basename(path.dirname(other)) + '/other-project')}));
       if (other) { $('wfScope').value = other.v; $('wfScope').dispatchEvent(new Event('change', { bubbles: true })); }
       $('btnSave').click(); await new Promise((r) => setTimeout(r, 900));
       return { opts, status: $('status').textContent };`);
     const keptAt = (await api('/api/workflows')).workflows.find((w) => w.id === 'kept-elsewhere');
     check('Keep it in names your library and each project by its folder',
-      r.opts[0]?.v === 'user' && r.opts[1]?.t === 'project' && r.opts.some((o) => o.t === 'other-project'), JSON.stringify(r.opts));
+      r.opts[0]?.v === 'user' && /^project\b/.test(r.opts[1]?.t) && r.opts.some((o) => /^other-project\b/.test(o.t)), JSON.stringify(r.opts));
     check('…and saving into another project keeps it there, and says so',
       keptAt?.scope === 'project' && keptAt?.repoName === 'other-project' && /Saved in other-project/.test(r.status), `${keptAt?.repoRoot} ${r.status}`);
     check('picking a project raised no errors or dialogs', p.errors.length === 0, p.errors.join(' | '));

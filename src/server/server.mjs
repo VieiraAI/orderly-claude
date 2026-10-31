@@ -403,6 +403,23 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
     return { scope, repoRoot: repoFrom(src.repo || src.repoRoot) };
   }
   const bootedRepo = () => (liveCwd ? path.resolve(liveCwd) : null);
+  /*
+   * Projects a workflow can be kept in, by name. Folders under the system's
+   * temp folders (scratch work, test runs) are left out: one called
+   * "project" looked like the right choice and was not.
+   */
+  const pickableProjects = () => {
+    const temp = [os.tmpdir(), '/tmp', '/private/tmp', '/private/var/folders', '/var/folders'].map((p) => { try { return fs.realpathSync(p); } catch { return p; } });
+    const isTemp = (p) => temp.some((t) => p === t || p.startsWith(t + path.sep)) || /\/(\.?scratchpad|worktrees)\//.test(p);
+    const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+    // Working in a temp folder itself (as the test suite does), temp folders are fair game.
+    const keepTemp = liveCwd && isTemp(real(path.resolve(liveCwd)));
+    // One entry per folder, however it was reached (/var is /private/var on a Mac).
+    const seen = new Set();
+    return knownRepoRoots().map((p) => path.resolve(p))
+      .filter((p) => { const r = real(p); if (seen.has(r)) return false; seen.add(r); return keepTemp || !isTemp(r); })
+      .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+  };
   // One folder can be named two ways (/tmp and /private/tmp); compare the real one.
   const realDir = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
   const queryRef = (url) => refFrom({ scope: url.searchParams.get('scope'), repo: url.searchParams.get('repo') });
@@ -725,7 +742,7 @@ export async function startServer({ port, file, sessionId, cwd, title, capture =
       if (url.pathname === '/api/workflows' && req.method === 'GET') {
         // bootedRepo lets the client name booted-repo workflows by id alone.
         // projects and home let the editor say which folder a workflow is kept in.
-        return send(200, { workflows: listAllDefinitions({ repoRoot: liveCwd }), bootedRepo: bootedRepo(), projects: knownRepoRoots().map((p) => path.resolve(p)), home: os.homedir() });
+        return send(200, { workflows: listAllDefinitions({ repoRoot: liveCwd }), bootedRepo: bootedRepo(), projects: pickableProjects(), home: os.homedir() });
       }
 
       // Suggest which workflow fits a free-text ask. Pure token overlap; no
